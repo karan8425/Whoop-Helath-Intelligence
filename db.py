@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 from cryptography.fernet import Fernet
-from .config import TOKEN_ENCRYPTION_KEY
+from config import TOKEN_ENCRYPTION_KEY
 
 DB_PATH = Path("whoop.db")
 
