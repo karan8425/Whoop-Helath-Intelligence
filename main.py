@@ -3,9 +3,9 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from .config import SESSION_SECRET, validate_config
-from .db import init_db
-from .whoop import authorization_url, exchange_code, get_phase1_snapshot
+from config import SESSION_SECRET, validate_config
+from db import init_db
+from whoop import authorization_url, exchange_code, get_phase1_snapshot
 
 validate_config()
 init_db()
@@ -15,7 +15,7 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
     same_site="lax",
-    https_only=False,  # Change to True when deployed behind HTTPS.
+    https_only=True,
 )
 
 @app.get("/", response_class=HTMLResponse)
@@ -38,13 +38,17 @@ async def health():
 
 @app.get("/whoop/login")
 async def whoop_login(request: Request):
-    # WHOOP documentation requires an 8-character state if generating it yourself.
     state = secrets.token_urlsafe(6)[:8]
     request.session["oauth_state"] = state
     return RedirectResponse(authorization_url(state))
 
 @app.get("/whoop/callback")
-async def whoop_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+async def whoop_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
     if error:
         raise HTTPException(status_code=400, detail=f"WHOOP authorization error: {error}")
     expected_state = request.session.pop("oauth_state", None)

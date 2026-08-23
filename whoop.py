@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode
 import httpx
 
-from .config import (
+from config import (
     WHOOP_AUTH_URL,
     WHOOP_TOKEN_URL,
     WHOOP_API_BASE,
@@ -12,7 +12,7 @@ from .config import (
     WHOOP_REDIRECT_URI,
     WHOOP_SCOPES,
 )
-from .db import load_token_json, save_token_json
+from db import load_token_json, save_token_json
 
 def authorization_url(state: str) -> str:
     params = {
@@ -53,14 +53,12 @@ async def refresh_token(refresh_token: str) -> dict:
         response.raise_for_status()
         token = response.json()
     token["_obtained_at"] = int(datetime.now(timezone.utc).timestamp())
-    # WHOOP rotates refresh tokens. Persist the new complete token immediately.
     save_token_json(json.dumps(token))
     return token
 
 def _expired(token: dict) -> bool:
     obtained = token.get("_obtained_at", 0)
     expires_in = token.get("expires_in", 0)
-    # Refresh 60 seconds before expiry.
     return int(datetime.now(timezone.utc).timestamp()) >= obtained + max(expires_in - 60, 0)
 
 async def get_valid_token() -> dict:

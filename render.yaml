@@ -3,15 +3,4 @@ services:
     name: whoop-health-intelligence
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: WHOOP_CLIENT_ID
-        sync: false
-      - key: WHOOP_CLIENT_SECRET
-        sync: false
-      - key: WHOOP_REDIRECT_URI
-        sync: false
-      - key: SESSION_SECRET
-        generateValue: true
-      - key: TOKEN_ENCRYPTION_KEY
-        sync: false
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
