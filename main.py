@@ -8,11 +8,17 @@ from db import init_db, table_counts
 from analytics import init_analytics
 from baselines import init_baselines
 from recommendations import daily_recommendation
-from ai_intelligence import generate_daily_ai_brief, validate_ai_connection
+from ai_intelligence import generate_daily_ai_brief
+from automation_status import (
+    init_automation_tables,
+    latest_stored_intelligence,
+    latest_automation_run,
+    automation_summary,
+)
 
 validate_config()
 
-app = FastAPI(title="WHOOP Health Intelligence", version="0.4.1")
+app = FastAPI(title="WHOOP Health Intelligence", version="0.4.2")
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
@@ -25,6 +31,7 @@ def startup():
     init_db()
     init_analytics()
     init_baselines()
+    init_automation_tables()
 
 def require_admin(request):
     if request.session.get("admin_authenticated") is not True:
@@ -39,14 +46,16 @@ async def home(request: Request):
         <input type="password" name="password" placeholder="Admin password" required>
         <button type="submit">Sign in</button></form></body></html>"""
 
-    return """<html><body style="font-family:Arial;max-width:950px;margin:50px auto">
+    return """<html><body style="font-family:Arial;max-width:960px;margin:50px auto">
     <h1>WHOOP Health Intelligence</h1>
-    <p><b>Phase 4B: OpenAI Daily Intelligence</b></p>
-    <p>The deterministic health engine decides the training category. OpenAI explains and prioritizes the validated data without changing that decision.</p>
+    <p><b>Phase 4C: Daily Automation & Freshness</b></p>
+    <p>A Render Cron Job will refresh WHOOP data, analytics, recommendations and the AI briefing automatically.</p>
     <ul>
-      <li><a href="/intelligence/deterministic">View deterministic recommendation</a></li>
-      <li><a href="/intelligence/ai/today">Generate OpenAI daily briefing</a></li>
-      <li><a href="/intelligence/ai/validate">Validate OpenAI intelligence connection</a></li>
+      <li><a href="/automation/status">View automation status</a></li>
+      <li><a href="/automation/latest-run">View latest automation run</a></li>
+      <li><a href="/intelligence/stored/latest">View latest stored daily intelligence</a></li>
+      <li><a href="/intelligence/deterministic">View live deterministic recommendation</a></li>
+      <li><a href="/intelligence/ai/live">Generate live OpenAI briefing</a></li>
       <li><a href="/database/counts">View source database counts</a></li>
       <li><a href="/admin/logout">Sign out</a></li>
     </ul>
@@ -66,24 +75,35 @@ async def logout(request: Request):
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "phase": "4B",
-        "version": "0.4.1",
-    }
+    return {"status": "ok", "phase": "4C", "version": "0.4.2"}
 
 @app.get("/database/counts")
 async def counts(request: Request):
     require_admin(request)
     return {"status": "ok", "counts": table_counts()}
 
+@app.get("/automation/status")
+async def status(request: Request):
+    require_admin(request)
+    return {"status": "ok", **automation_summary()}
+
+@app.get("/automation/latest-run")
+async def latest_run(request: Request):
+    require_admin(request)
+    return {"status": "ok", "run": latest_automation_run()}
+
+@app.get("/intelligence/stored/latest")
+async def stored_latest(request: Request):
+    require_admin(request)
+    return {"status": "ok", "intelligence": latest_stored_intelligence()}
+
 @app.get("/intelligence/deterministic")
 async def deterministic(request: Request):
     require_admin(request)
     return {"status": "ok", **daily_recommendation()}
 
-@app.get("/intelligence/ai/today")
-async def ai_today(request: Request):
+@app.get("/intelligence/ai/live")
+async def ai_live(request: Request):
     require_admin(request)
     try:
         return {"status": "ok", **generate_daily_ai_brief()}
@@ -91,15 +111,4 @@ async def ai_today(request: Request):
         raise HTTPException(
             status_code=502,
             detail=f"OpenAI intelligence generation failed: {exc}",
-        ) from exc
-
-@app.get("/intelligence/ai/validate")
-async def ai_validate(request: Request):
-    require_admin(request)
-    try:
-        return validate_ai_connection()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenAI validation failed: {exc}",
         ) from exc
