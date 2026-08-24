@@ -41,25 +41,59 @@ def init_analytics():
 
 def rebuild_daily_metrics():
     init_analytics()
+
     sql = """
     TRUNCATE TABLE whoop_daily_metrics;
 
-    WITH main_sleep AS (
+    WITH cycle_prepared AS (
+      SELECT
+        c.*,
+        CASE
+          WHEN c.timezone_offset IS NULL OR c.timezone_offset = '' OR c.timezone_offset = 'Z'
+            THEN INTERVAL '0 seconds'
+          ELSE c.timezone_offset::interval
+        END AS tz_interval
+      FROM whoop_cycles c
+      WHERE c.start_time IS NOT NULL
+    ),
+    cycle_ranked AS (
+      SELECT
+        cp.*,
+        DATE(cp.start_time + cp.tz_interval) AS metric_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY DATE(cp.start_time + cp.tz_interval)
+          ORDER BY cp.start_time DESC, cp.updated_at DESC NULLS LAST, cp.id DESC
+        ) AS rn
+      FROM cycle_prepared cp
+    ),
+    cycle_base AS (
+      SELECT *
+      FROM cycle_ranked
+      WHERE rn = 1
+    ),
+    main_sleep AS (
       SELECT DISTINCT ON (cycle_id)
-        cycle_id, id AS sleep_id, start_time AS sleep_start, end_time AS sleep_end,
-        score, updated_at
+        cycle_id,
+        id AS sleep_id,
+        start_time AS sleep_start,
+        end_time AS sleep_end,
+        score,
+        updated_at
       FROM whoop_sleeps
-      WHERE nap = FALSE AND score_state = 'SCORED'
+      WHERE nap = FALSE
+        AND score_state = 'SCORED'
       ORDER BY cycle_id, end_time DESC NULLS LAST
     ),
     workout_base AS (
-      SELECT *,
+      SELECT
+        w.*,
         CASE
-          WHEN timezone_offset IS NULL OR timezone_offset = '' OR timezone_offset = 'Z'
+          WHEN w.timezone_offset IS NULL OR w.timezone_offset = '' OR w.timezone_offset = 'Z'
             THEN INTERVAL '0 seconds'
-          ELSE timezone_offset::interval
+          ELSE w.timezone_offset::interval
         END AS tz_interval
-      FROM whoop_workouts
+      FROM whoop_workouts w
+      WHERE w.start_time IS NOT NULL
     ),
     workouts AS (
       SELECT
@@ -71,17 +105,7 @@ def rebuild_daily_metrics():
         jsonb_agg(sport_name ORDER BY start_time) AS workout_sports,
         MAX(updated_at) AS updated_at
       FROM workout_base
-      WHERE start_time IS NOT NULL
       GROUP BY 1
-    ),
-    cycle_base AS (
-      SELECT *,
-        CASE
-          WHEN timezone_offset IS NULL OR timezone_offset = '' OR timezone_offset = 'Z'
-            THEN INTERVAL '0 seconds'
-          ELSE timezone_offset::interval
-        END AS tz_interval
-      FROM whoop_cycles
     )
     INSERT INTO whoop_daily_metrics (
       metric_date, cycle_id, recovery_score, resting_heart_rate, hrv_rmssd_milli,
@@ -93,76 +117,159 @@ def rebuild_daily_metrics():
       workout_total_duration_hours, workout_sports, source_updated_at
     )
     SELECT
-      DATE(c.start_time + c.tz_interval),
+      c.metric_date,
       c.id,
-      r.recovery_score, r.resting_heart_rate, r.hrv_rmssd_milli, r.spo2_percentage, r.skin_temp_celsius,
-      c.strain, c.kilojoule,
+      r.recovery_score,
+      r.resting_heart_rate,
+      r.hrv_rmssd_milli,
+      r.spo2_percentage,
+      r.skin_temp_celsius,
+      c.strain,
+      c.kilojoule,
       CASE WHEN c.kilojoule IS NULL THEN NULL ELSE c.kilojoule / 4.184 END,
-      s.sleep_id, s.sleep_start, s.sleep_end,
+      s.sleep_id,
+      s.sleep_start,
+      s.sleep_end,
       CASE WHEN s.score IS NULL THEN NULL ELSE
-        (COALESCE((s.score->'stage_summary'->>'total_light_sleep_time_milli')::double precision,0)
-        +COALESCE((s.score->'stage_summary'->>'total_slow_wave_sleep_time_milli')::double precision,0)
-        +COALESCE((s.score->'stage_summary'->>'total_rem_sleep_time_milli')::double precision,0))/3600000.0 END,
-      (s.score->'stage_summary'->>'total_in_bed_time_milli')::double precision/3600000.0,
+        (
+          COALESCE((s.score->'stage_summary'->>'total_light_sleep_time_milli')::double precision,0)
+          + COALESCE((s.score->'stage_summary'->>'total_slow_wave_sleep_time_milli')::double precision,0)
+          + COALESCE((s.score->'stage_summary'->>'total_rem_sleep_time_milli')::double precision,0)
+        ) / 3600000.0
+      END,
+      (s.score->'stage_summary'->>'total_in_bed_time_milli')::double precision / 3600000.0,
       (s.score->>'sleep_performance_percentage')::double precision,
       (s.score->>'sleep_consistency_percentage')::double precision,
       (s.score->>'sleep_efficiency_percentage')::double precision,
       (s.score->>'respiratory_rate')::double precision,
-      (s.score->'stage_summary'->>'total_rem_sleep_time_milli')::double precision/3600000.0,
-      (s.score->'stage_summary'->>'total_slow_wave_sleep_time_milli')::double precision/3600000.0,
-      (s.score->'stage_summary'->>'total_light_sleep_time_milli')::double precision/3600000.0,
-      (s.score->'stage_summary'->>'total_awake_time_milli')::double precision/3600000.0,
+      (s.score->'stage_summary'->>'total_rem_sleep_time_milli')::double precision / 3600000.0,
+      (s.score->'stage_summary'->>'total_slow_wave_sleep_time_milli')::double precision / 3600000.0,
+      (s.score->'stage_summary'->>'total_light_sleep_time_milli')::double precision / 3600000.0,
+      (s.score->'stage_summary'->>'total_awake_time_milli')::double precision / 3600000.0,
       (s.score->'stage_summary'->>'disturbance_count')::integer,
-      COALESCE(w.workout_count,0), w.workout_total_strain, w.workout_max_strain,
-      w.workout_total_duration_hours, w.workout_sports,
+      COALESCE(w.workout_count,0),
+      w.workout_total_strain,
+      w.workout_max_strain,
+      w.workout_total_duration_hours,
+      w.workout_sports,
       GREATEST(c.updated_at, r.updated_at, s.updated_at, w.updated_at)
     FROM cycle_base c
-    LEFT JOIN whoop_recoveries r ON r.cycle_id=c.id
-    LEFT JOIN main_sleep s ON s.cycle_id=c.id
-    LEFT JOIN workouts w ON w.local_date=DATE(c.start_time + c.tz_interval)
-    WHERE c.start_time IS NOT NULL
-    ORDER BY c.start_time;
+    LEFT JOIN whoop_recoveries r ON r.cycle_id = c.id
+    LEFT JOIN main_sleep s ON s.cycle_id = c.id
+    LEFT JOIN workouts w ON w.local_date = c.metric_date
+    ORDER BY c.metric_date;
     """
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
-            cur.execute("SELECT COUNT(*) AS n, MIN(metric_date) AS oldest, MAX(metric_date) AS newest FROM whoop_daily_metrics")
-            x=cur.fetchone()
+            cur.execute("""
+                SELECT
+                  COUNT(*) AS n,
+                  MIN(metric_date) AS oldest,
+                  MAX(metric_date) AS newest
+                FROM whoop_daily_metrics
+            """)
+            x = cur.fetchone()
+
+            cur.execute("""
+                WITH cycle_prepared AS (
+                  SELECT
+                    DATE(
+                      start_time +
+                      CASE
+                        WHEN timezone_offset IS NULL OR timezone_offset = '' OR timezone_offset = 'Z'
+                          THEN INTERVAL '0 seconds'
+                        ELSE timezone_offset::interval
+                      END
+                    ) AS metric_date
+                  FROM whoop_cycles
+                  WHERE start_time IS NOT NULL
+                )
+                SELECT COUNT(*) AS duplicate_cycle_rows
+                FROM (
+                  SELECT metric_date
+                  FROM cycle_prepared
+                  GROUP BY metric_date
+                  HAVING COUNT(*) > 1
+                ) d
+            """)
+            duplicate_dates = cur.fetchone()["duplicate_cycle_rows"]
+
     return {
         "daily_records": x["n"],
         "oldest": str(x["oldest"]) if x["oldest"] else None,
-        "newest": str(x["newest"]) if x["newest"] else None
+        "newest": str(x["newest"]) if x["newest"] else None,
+        "source_dates_with_multiple_cycles": duplicate_dates,
     }
 
 def daily_metrics(limit=14):
     init_analytics()
-    limit=max(1,min(int(limit),90))
+    limit = max(1, min(int(limit), 90))
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT metric_date,recovery_score,resting_heart_rate,hrv_rmssd_milli,
-                cycle_strain,cycle_calories,sleep_duration_hours,sleep_performance_percentage,
-                sleep_consistency_percentage,sleep_efficiency_percentage,respiratory_rate,
-                workout_count,workout_total_strain,workout_total_duration_hours,workout_sports
-                FROM whoop_daily_metrics ORDER BY metric_date DESC LIMIT %s""",(limit,))
-            rows=cur.fetchall()
+            cur.execute("""
+                SELECT
+                  metric_date,
+                  recovery_score,
+                  resting_heart_rate,
+                  hrv_rmssd_milli,
+                  cycle_strain,
+                  cycle_calories,
+                  sleep_duration_hours,
+                  sleep_performance_percentage,
+                  sleep_consistency_percentage,
+                  sleep_efficiency_percentage,
+                  respiratory_rate,
+                  workout_count,
+                  workout_total_strain,
+                  workout_total_duration_hours,
+                  workout_sports
+                FROM whoop_daily_metrics
+                ORDER BY metric_date DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
     return rows
 
 def validate_daily_metrics():
     init_analytics()
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT COUNT(*) AS days,
-              COUNT(recovery_score) AS recovery_days,
-              COUNT(hrv_rmssd_milli) AS hrv_days,
-              COUNT(sleep_duration_hours) AS sleep_days,
-              COUNT(cycle_strain) AS strain_days,
-              SUM(workout_count) AS workouts_mapped,
-              MIN(metric_date) AS oldest, MAX(metric_date) AS newest
-              FROM whoop_daily_metrics""")
-            summary=cur.fetchone()
-            cur.execute("""SELECT metric_date,recovery_score,resting_heart_rate,hrv_rmssd_milli,
-              sleep_duration_hours,sleep_performance_percentage,sleep_consistency_percentage,
-              cycle_strain,cycle_calories,workout_count,workout_total_strain
-              FROM whoop_daily_metrics ORDER BY metric_date DESC LIMIT 7""")
-            latest=cur.fetchall()
-    return {"summary":summary,"latest_7_days":latest}
+            cur.execute("""
+                SELECT
+                  COUNT(*) AS days,
+                  COUNT(recovery_score) AS recovery_days,
+                  COUNT(hrv_rmssd_milli) AS hrv_days,
+                  COUNT(sleep_duration_hours) AS sleep_days,
+                  COUNT(cycle_strain) AS strain_days,
+                  SUM(workout_count) AS workouts_mapped,
+                  MIN(metric_date) AS oldest,
+                  MAX(metric_date) AS newest
+                FROM whoop_daily_metrics
+            """)
+            summary = cur.fetchone()
+
+            cur.execute("""
+                SELECT
+                  metric_date,
+                  recovery_score,
+                  resting_heart_rate,
+                  hrv_rmssd_milli,
+                  sleep_duration_hours,
+                  sleep_performance_percentage,
+                  sleep_consistency_percentage,
+                  cycle_strain,
+                  cycle_calories,
+                  workout_count,
+                  workout_total_strain
+                FROM whoop_daily_metrics
+                ORDER BY metric_date DESC
+                LIMIT 7
+            """)
+            latest = cur.fetchall()
+
+    return {
+        "summary": summary,
+        "latest_7_days": latest
+    }
