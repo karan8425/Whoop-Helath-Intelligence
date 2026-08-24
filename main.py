@@ -7,11 +7,11 @@ from config import SESSION_SECRET, ADMIN_PASSWORD, validate_config
 from db import init_db, table_counts
 from analytics import init_analytics
 from baselines import init_baselines
-from trends import latest_signals, validate_signals
+from recommendations import daily_recommendation, validate_recommendation
 
 validate_config()
 
-app = FastAPI(title="WHOOP Health Intelligence", version="0.3.4")
+app = FastAPI(title="WHOOP Health Intelligence", version="0.4.0")
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
@@ -38,13 +38,13 @@ async def home(request: Request):
         <input type="password" name="password" placeholder="Admin password" required>
         <button type="submit">Sign in</button></form></body></html>"""
 
-    return """<html><body style="font-family:Arial;max-width:930px;margin:50px auto">
+    return """<html><body style="font-family:Arial;max-width:940px;margin:50px auto">
     <h1>WHOOP Health Intelligence</h1>
-    <p><b>Phase 3C: Trend & Deviation Engine</b></p>
-    <p>This phase classifies current values and recent trends against your personal baselines. It does not yet make training or medical recommendations.</p>
+    <p><b>Phase 4A: Daily Recommendation Engine</b></p>
+    <p>This phase converts validated WHOOP signals into a deterministic daily recommendation. No LLM is used yet.</p>
     <ul>
-      <li><a href="/analytics/signals/latest">View latest trend & deviation signals</a></li>
-      <li><a href="/analytics/signals/validate">Validate signal engine</a></li>
+      <li><a href="/intelligence/today">View today's recommendation</a></li>
+      <li><a href="/intelligence/validate">Validate recommendation engine</a></li>
       <li><a href="/database/counts">View source database counts</a></li>
       <li><a href="/admin/logout">Sign out</a></li>
     </ul>
@@ -64,19 +64,19 @@ async def logout(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "phase": "3C", "version": "0.3.4"}
+    return {"status": "ok", "phase": "4A", "version": "0.4.0"}
 
 @app.get("/database/counts")
 async def counts(request: Request):
     require_admin(request)
     return {"status": "ok", "counts": table_counts()}
 
-@app.get("/analytics/signals/latest")
-async def signals_latest(request: Request):
+@app.get("/intelligence/today")
+async def intelligence_today(request: Request):
     require_admin(request)
-    return {"status": "ok", **latest_signals()}
+    return {"status": "ok", **daily_recommendation()}
 
-@app.get("/analytics/signals/validate")
-async def signals_validate(request: Request):
+@app.get("/intelligence/validate")
+async def intelligence_validate(request: Request):
     require_admin(request)
-    return validate_signals()
+    return validate_recommendation()
