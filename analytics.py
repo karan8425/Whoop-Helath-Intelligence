@@ -52,18 +52,36 @@ def rebuild_daily_metrics():
       WHERE nap = FALSE AND score_state = 'SCORED'
       ORDER BY cycle_id, end_time DESC NULLS LAST
     ),
+    workout_base AS (
+      SELECT *,
+        CASE
+          WHEN timezone_offset IS NULL OR timezone_offset = '' OR timezone_offset = 'Z'
+            THEN INTERVAL '0 seconds'
+          ELSE timezone_offset::interval
+        END AS tz_interval
+      FROM whoop_workouts
+    ),
     workouts AS (
       SELECT
-        DATE(start_time + COALESCE(timezone_offset,'+00:00')::interval) AS local_date,
+        DATE(start_time + tz_interval) AS local_date,
         COUNT(*)::int AS workout_count,
         SUM(COALESCE(strain,0)) AS workout_total_strain,
         MAX(strain) AS workout_max_strain,
         SUM(EXTRACT(EPOCH FROM (end_time-start_time))/3600.0) AS workout_total_duration_hours,
         jsonb_agg(sport_name ORDER BY start_time) AS workout_sports,
         MAX(updated_at) AS updated_at
-      FROM whoop_workouts
+      FROM workout_base
       WHERE start_time IS NOT NULL
       GROUP BY 1
+    ),
+    cycle_base AS (
+      SELECT *,
+        CASE
+          WHEN timezone_offset IS NULL OR timezone_offset = '' OR timezone_offset = 'Z'
+            THEN INTERVAL '0 seconds'
+          ELSE timezone_offset::interval
+        END AS tz_interval
+      FROM whoop_cycles
     )
     INSERT INTO whoop_daily_metrics (
       metric_date, cycle_id, recovery_score, resting_heart_rate, hrv_rmssd_milli,
@@ -75,10 +93,11 @@ def rebuild_daily_metrics():
       workout_total_duration_hours, workout_sports, source_updated_at
     )
     SELECT
-      DATE(c.start_time + COALESCE(c.timezone_offset,'+00:00')::interval),
+      DATE(c.start_time + c.tz_interval),
       c.id,
       r.recovery_score, r.resting_heart_rate, r.hrv_rmssd_milli, r.spo2_percentage, r.skin_temp_celsius,
-      c.strain, c.kilojoule, CASE WHEN c.kilojoule IS NULL THEN NULL ELSE c.kilojoule / 4.184 END,
+      c.strain, c.kilojoule,
+      CASE WHEN c.kilojoule IS NULL THEN NULL ELSE c.kilojoule / 4.184 END,
       s.sleep_id, s.sleep_start, s.sleep_end,
       CASE WHEN s.score IS NULL THEN NULL ELSE
         (COALESCE((s.score->'stage_summary'->>'total_light_sleep_time_milli')::double precision,0)
@@ -97,10 +116,10 @@ def rebuild_daily_metrics():
       COALESCE(w.workout_count,0), w.workout_total_strain, w.workout_max_strain,
       w.workout_total_duration_hours, w.workout_sports,
       GREATEST(c.updated_at, r.updated_at, s.updated_at, w.updated_at)
-    FROM whoop_cycles c
+    FROM cycle_base c
     LEFT JOIN whoop_recoveries r ON r.cycle_id=c.id
     LEFT JOIN main_sleep s ON s.cycle_id=c.id
-    LEFT JOIN workouts w ON w.local_date=DATE(c.start_time + COALESCE(c.timezone_offset,'+00:00')::interval)
+    LEFT JOIN workouts w ON w.local_date=DATE(c.start_time + c.tz_interval)
     WHERE c.start_time IS NOT NULL
     ORDER BY c.start_time;
     """
@@ -109,7 +128,11 @@ def rebuild_daily_metrics():
             cur.execute(sql)
             cur.execute("SELECT COUNT(*) AS n, MIN(metric_date) AS oldest, MAX(metric_date) AS newest FROM whoop_daily_metrics")
             x=cur.fetchone()
-    return {"daily_records":x["n"],"oldest":str(x["oldest"]) if x["oldest"] else None,"newest":str(x["newest"]) if x["newest"] else None}
+    return {
+        "daily_records": x["n"],
+        "oldest": str(x["oldest"]) if x["oldest"] else None,
+        "newest": str(x["newest"]) if x["newest"] else None
+    }
 
 def daily_metrics(limit=14):
     init_analytics()
