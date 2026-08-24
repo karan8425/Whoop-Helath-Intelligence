@@ -7,11 +7,12 @@ from config import SESSION_SECRET, ADMIN_PASSWORD, validate_config
 from db import init_db, table_counts
 from analytics import init_analytics
 from baselines import init_baselines
-from recommendations import daily_recommendation, validate_recommendation
+from recommendations import daily_recommendation
+from ai_intelligence import generate_daily_ai_brief, validate_ai_connection
 
 validate_config()
 
-app = FastAPI(title="WHOOP Health Intelligence", version="0.4.0")
+app = FastAPI(title="WHOOP Health Intelligence", version="0.4.1")
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
@@ -38,13 +39,14 @@ async def home(request: Request):
         <input type="password" name="password" placeholder="Admin password" required>
         <button type="submit">Sign in</button></form></body></html>"""
 
-    return """<html><body style="font-family:Arial;max-width:940px;margin:50px auto">
+    return """<html><body style="font-family:Arial;max-width:950px;margin:50px auto">
     <h1>WHOOP Health Intelligence</h1>
-    <p><b>Phase 4A: Daily Recommendation Engine</b></p>
-    <p>This phase converts validated WHOOP signals into a deterministic daily recommendation. No LLM is used yet.</p>
+    <p><b>Phase 4B: OpenAI Daily Intelligence</b></p>
+    <p>The deterministic health engine decides the training category. OpenAI explains and prioritizes the validated data without changing that decision.</p>
     <ul>
-      <li><a href="/intelligence/today">View today's recommendation</a></li>
-      <li><a href="/intelligence/validate">Validate recommendation engine</a></li>
+      <li><a href="/intelligence/deterministic">View deterministic recommendation</a></li>
+      <li><a href="/intelligence/ai/today">Generate OpenAI daily briefing</a></li>
+      <li><a href="/intelligence/ai/validate">Validate OpenAI intelligence connection</a></li>
       <li><a href="/database/counts">View source database counts</a></li>
       <li><a href="/admin/logout">Sign out</a></li>
     </ul>
@@ -64,19 +66,40 @@ async def logout(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "phase": "4A", "version": "0.4.0"}
+    return {
+        "status": "ok",
+        "phase": "4B",
+        "version": "0.4.1",
+    }
 
 @app.get("/database/counts")
 async def counts(request: Request):
     require_admin(request)
     return {"status": "ok", "counts": table_counts()}
 
-@app.get("/intelligence/today")
-async def intelligence_today(request: Request):
+@app.get("/intelligence/deterministic")
+async def deterministic(request: Request):
     require_admin(request)
     return {"status": "ok", **daily_recommendation()}
 
-@app.get("/intelligence/validate")
-async def intelligence_validate(request: Request):
+@app.get("/intelligence/ai/today")
+async def ai_today(request: Request):
     require_admin(request)
-    return validate_recommendation()
+    try:
+        return {"status": "ok", **generate_daily_ai_brief()}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI intelligence generation failed: {exc}",
+        ) from exc
+
+@app.get("/intelligence/ai/validate")
+async def ai_validate(request: Request):
+    require_admin(request)
+    try:
+        return validate_ai_connection()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI validation failed: {exc}",
+        ) from exc
