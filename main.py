@@ -8,7 +8,7 @@ from db import init_db, table_counts
 from analytics import init_analytics
 from baselines import init_baselines
 from recommendations import daily_recommendation
-from ai_intelligence import generate_daily_ai_brief
+from freshness import freshness_status
 from automation_status import (
     init_automation_tables,
     latest_stored_intelligence,
@@ -18,7 +18,7 @@ from automation_status import (
 
 validate_config()
 
-app = FastAPI(title="WHOOP Health Intelligence", version="0.4.2")
+app = FastAPI(title="WHOOP Health Intelligence", version="0.4.3")
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
@@ -48,14 +48,13 @@ async def home(request: Request):
 
     return """<html><body style="font-family:Arial;max-width:960px;margin:50px auto">
     <h1>WHOOP Health Intelligence</h1>
-    <p><b>Phase 4C: Daily Automation & Freshness</b></p>
-    <p>A Render Cron Job will refresh WHOOP data, analytics, recommendations and the AI briefing automatically.</p>
+    <p><b>Phase 4C.1: Freshness Guardrail</b></p>
+    <p>The app will no longer present an older WHOOP recommendation as if it were current.</p>
     <ul>
+      <li><a href="/freshness">Check current WHOOP freshness</a></li>
       <li><a href="/automation/status">View automation status</a></li>
       <li><a href="/automation/latest-run">View latest automation run</a></li>
-      <li><a href="/intelligence/stored/latest">View latest stored daily intelligence</a></li>
-      <li><a href="/intelligence/deterministic">View live deterministic recommendation</a></li>
-      <li><a href="/intelligence/ai/live">Generate live OpenAI briefing</a></li>
+      <li><a href="/intelligence/stored/latest">View latest stored intelligence + freshness</a></li>
       <li><a href="/database/counts">View source database counts</a></li>
       <li><a href="/admin/logout">Sign out</a></li>
     </ul>
@@ -75,7 +74,12 @@ async def logout(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "phase": "4C", "version": "0.4.2"}
+    return {"status": "ok", "phase": "4C.1", "version": "0.4.3"}
+
+@app.get("/freshness")
+async def freshness(request: Request):
+    require_admin(request)
+    return {"status": "ok", **freshness_status()}
 
 @app.get("/database/counts")
 async def counts(request: Request):
@@ -96,19 +100,3 @@ async def latest_run(request: Request):
 async def stored_latest(request: Request):
     require_admin(request)
     return {"status": "ok", "intelligence": latest_stored_intelligence()}
-
-@app.get("/intelligence/deterministic")
-async def deterministic(request: Request):
-    require_admin(request)
-    return {"status": "ok", **daily_recommendation()}
-
-@app.get("/intelligence/ai/live")
-async def ai_live(request: Request):
-    require_admin(request)
-    try:
-        return {"status": "ok", **generate_daily_ai_brief()}
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenAI intelligence generation failed: {exc}",
-        ) from exc

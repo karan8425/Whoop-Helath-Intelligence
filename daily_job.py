@@ -1,3 +1,4 @@
+import asyncio
 import json
 import traceback
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from baselines import init_baselines, rebuild_baselines
 from sync import incremental_sync
 from recommendations import daily_recommendation
 from ai_intelligence import generate_daily_ai_brief
+from freshness import freshness_status
 
 
 def init_automation_tables():
@@ -36,8 +38,13 @@ def init_automation_tables():
                     baselines_result JSONB,
                     deterministic_recommendation JSONB,
                     ai_result JSONB,
+                    freshness_result JSONB,
                     error TEXT
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE whoop_daily_automation_runs
+                ADD COLUMN IF NOT EXISTS freshness_result JSONB
             """)
 
 
@@ -51,28 +58,31 @@ def start_run():
             return cur.fetchone()["id"]
 
 
-def finish_run(run_id, metric_date, sync_result, analytics_result,
-               baselines_result, deterministic, ai_result):
+def finish_run(run_id, status, metric_date, sync_result, analytics_result,
+               baselines_result, deterministic, ai_result, freshness):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE whoop_daily_automation_runs
                 SET completed_at=NOW(),
-                    status='completed',
+                    status=%s,
                     metric_date=%s,
                     sync_result=%s,
                     analytics_result=%s,
                     baselines_result=%s,
                     deterministic_recommendation=%s,
-                    ai_result=%s
+                    ai_result=%s,
+                    freshness_result=%s
                 WHERE id=%s
             """, (
+                status,
                 metric_date,
                 Jsonb(sync_result),
                 Jsonb(analytics_result),
                 Jsonb(baselines_result),
-                Jsonb(deterministic),
-                Jsonb(ai_result),
+                Jsonb(deterministic) if deterministic is not None else None,
+                Jsonb(ai_result) if ai_result is not None else None,
+                Jsonb(freshness),
                 run_id,
             ))
 
@@ -130,52 +140,79 @@ def run_daily_pipeline():
     print(f"[daily-job] started run_id={run_id}", flush=True)
 
     try:
-        print("[daily-job] 1/5 syncing latest WHOOP records", flush=True)
-        sync_result = __import__("asyncio").run(incremental_sync())
+        print("[daily-job] 1/6 syncing latest WHOOP records", flush=True)
+        sync_result = asyncio.run(incremental_sync())
 
-        print("[daily-job] 2/5 rebuilding daily metrics", flush=True)
+        print("[daily-job] 2/6 rebuilding daily metrics", flush=True)
         analytics_result = rebuild_daily_metrics()
 
-        print("[daily-job] 3/5 rebuilding personal baselines", flush=True)
+        print("[daily-job] 3/6 rebuilding personal baselines", flush=True)
         baselines_result = rebuild_baselines()
 
-        print("[daily-job] 4/5 calculating deterministic recommendation", flush=True)
+        print("[daily-job] 4/6 checking WHOOP freshness", flush=True)
+        freshness = freshness_status()
+        print(json.dumps({"freshness": freshness}), flush=True)
+
+        if not freshness["can_generate_current_recommendation"]:
+            status = "pending_freshness" if freshness["status"] == "pending_today" else "stale_data"
+
+            finish_run(
+                run_id,
+                status,
+                freshness.get("latest_physiology_date"),
+                sync_result,
+                analytics_result,
+                baselines_result,
+                None,
+                None,
+                freshness,
+            )
+
+            result = {
+                "status": status,
+                "run_id": run_id,
+                "freshness": freshness,
+                "sync_new_rows": sync_result.get("new_rows"),
+                "message": (
+                    "No new daily recommendation was generated. "
+                    "The previously stored recommendation remains historical context only."
+                ),
+            }
+            print(json.dumps(result, default=str), flush=True)
+            return result
+
+        print("[daily-job] 5/6 calculating deterministic recommendation", flush=True)
         deterministic = daily_recommendation()
 
-        print("[daily-job] 5/5 generating OpenAI daily briefing", flush=True)
+        print("[daily-job] 6/6 generating OpenAI daily briefing", flush=True)
         ai_result = generate_daily_ai_brief()
-
-        # Guardrail: never allow AI to change deterministic training category.
         ai_result["brief"]["training_recommendation"] = deterministic["training_recommendation"]
 
         metric_date = store_intelligence(deterministic, ai_result)
 
         finish_run(
             run_id,
+            "completed",
             metric_date,
             sync_result,
             analytics_result,
             baselines_result,
             deterministic,
             ai_result,
+            freshness,
         )
 
         result = {
             "status": "completed",
             "run_id": run_id,
             "metric_date": metric_date,
+            "freshness": freshness,
             "sync_new_rows": sync_result.get("new_rows"),
-            "daily_metrics": analytics_result,
-            "baselines": {
-                "baseline_rows": baselines_result.get("baseline_rows"),
-                "dates": baselines_result.get("dates"),
-            },
             "training_recommendation": deterministic.get("training_recommendation"),
             "overall_status": deterministic.get("overall_status"),
             "ai_headline": ai_result.get("brief", {}).get("headline"),
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
-
         print(json.dumps(result, default=str), flush=True)
         return result
 
