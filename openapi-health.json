@@ -1,0 +1,129 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "WHOOP Health Intelligence",
+    "description": "Read-only personal WHOOP health intelligence API. Use current intelligence only when safe_to_treat_as_current is true. Never treat null physiological values as zero.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://whoop-health-intelligence.onrender.com"
+    }
+  ],
+  "paths": {
+    "/api/v1/coach/today": {
+      "get": {
+        "operationId": "getTodayHealthIntelligence",
+        "summary": "Get the latest safe daily WHOOP health intelligence",
+        "description": "Returns freshness plus current intelligence when safe. If freshness is insufficient, current_intelligence is null and the prior result is provided only as historical_context.",
+        "responses": {
+          "200": {
+            "description": "Daily health intelligence"
+          }
+        }
+      }
+    },
+    "/api/v1/coach/status": {
+      "get": {
+        "operationId": "getWhoopPipelineStatus",
+        "summary": "Check WHOOP data freshness and automation status",
+        "responses": {
+          "200": {
+            "description": "Freshness and automation status"
+          }
+        }
+      }
+    },
+    "/api/v1/coach/daily": {
+      "get": {
+        "operationId": "getDailyWhoopHistory",
+        "summary": "Get recent normalized WHOOP daily metrics",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 30
+            },
+            "description": "Number of recent calendar days to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent daily metrics"
+          }
+        }
+      }
+    },
+    "/api/v1/coach/baselines": {
+      "get": {
+        "operationId": "getLatestPersonalBaselines",
+        "summary": "Get latest 7, 14, 30 and 90 day personal baselines",
+        "responses": {
+          "200": {
+            "description": "Latest personal baselines"
+          }
+        }
+      }
+    },
+    "/api/v1/coach/metric-history": {
+      "get": {
+        "operationId": "getMetricBaselineHistory",
+        "summary": "Get baseline history for one WHOOP metric",
+        "parameters": [
+          {
+            "name": "metric",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "recovery_score",
+                "hrv_rmssd_milli",
+                "resting_heart_rate",
+                "sleep_duration_hours",
+                "sleep_performance_percentage",
+                "sleep_consistency_percentage",
+                "cycle_strain",
+                "workout_count"
+              ]
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365,
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metric history"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ]
+}
