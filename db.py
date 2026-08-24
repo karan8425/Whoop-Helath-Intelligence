@@ -52,8 +52,12 @@ def init_db():
             raw_json JSONB NOT NULL, synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
         """CREATE TABLE IF NOT EXISTS whoop_body_measurements (
-            user_id BIGINT PRIMARY KEY, height_meter DOUBLE PRECISION, weight_kilogram DOUBLE PRECISION,
-            max_heart_rate INTEGER, raw_json JSONB NOT NULL, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            id SMALLINT PRIMARY KEY CHECK (id = 1),
+            height_meter DOUBLE PRECISION,
+            weight_kilogram DOUBLE PRECISION,
+            max_heart_rate INTEGER,
+            raw_json JSONB NOT NULL,
+            observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
         """CREATE TABLE IF NOT EXISTS whoop_profiles (
             user_id BIGINT PRIMARY KEY, email TEXT, first_name TEXT, last_name TEXT,
@@ -63,11 +67,36 @@ def init_db():
             id BIGSERIAL PRIMARY KEY, sync_type TEXT NOT NULL, started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             completed_at TIMESTAMPTZ, status TEXT NOT NULL DEFAULT 'running', counts JSONB, error TEXT
         )""",
+        """CREATE TABLE IF NOT EXISTS whoop_sync_state (
+            dataset TEXT PRIMARY KEY, next_token TEXT,
+            completed BOOLEAN NOT NULL DEFAULT FALSE,
+            records_processed BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
     ]
     with get_conn() as conn:
         with conn.cursor() as cur:
             for s in statements:
                 cur.execute(s)
+
+    # Migrate the earlier body measurement schema if it exists with user_id instead of id.
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name='whoop_body_measurements'
+            """)
+            cols = {r["column_name"] for r in cur.fetchall()}
+            if "id" not in cols:
+                cur.execute("DROP TABLE IF EXISTS whoop_body_measurements")
+                cur.execute("""CREATE TABLE whoop_body_measurements (
+                    id SMALLINT PRIMARY KEY CHECK (id = 1),
+                    height_meter DOUBLE PRECISION,
+                    weight_kilogram DOUBLE PRECISION,
+                    max_heart_rate INTEGER,
+                    raw_json JSONB NOT NULL,
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )""")
 
 def database_health():
     with get_conn() as conn:
@@ -94,24 +123,6 @@ def load_token_json():
             cur.execute("SELECT encrypted_token FROM oauth_tokens WHERE id=1")
             row = cur.fetchone()
     return None if not row else _fernet().decrypt(bytes(row["encrypted_token"])).decode()
-
-def begin_sync(sync_type):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO whoop_sync_runs (sync_type) VALUES (%s) RETURNING id",(sync_type,))
-            return cur.fetchone()["id"]
-
-def finish_sync(sync_id, counts):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE whoop_sync_runs SET status='completed', completed_at=NOW(), counts=%s WHERE id=%s",
-                        (Jsonb(counts), sync_id))
-
-def fail_sync(sync_id, error):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE whoop_sync_runs SET status='failed', completed_at=NOW(), error=%s WHERE id=%s",
-                        (str(error)[:4000], sync_id))
 
 def upsert_cycle(r):
     score = r.get("score") or {}
@@ -177,14 +188,15 @@ def upsert_workout(r):
              score.get("max_heart_rate"),Jsonb(score),Jsonb(r)))
 
 def upsert_body(r):
-    if r.get("user_id") is None: return
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO whoop_body_measurements (user_id,height_meter,weight_kilogram,max_heart_rate,raw_json,observed_at)
-            VALUES (%s,%s,%s,%s,%s,NOW())
-            ON CONFLICT(user_id) DO UPDATE SET height_meter=EXCLUDED.height_meter,weight_kilogram=EXCLUDED.weight_kilogram,
+            cur.execute("""INSERT INTO whoop_body_measurements
+            (id,height_meter,weight_kilogram,max_heart_rate,raw_json,observed_at)
+            VALUES (1,%s,%s,%s,%s,NOW())
+            ON CONFLICT(id) DO UPDATE SET
+            height_meter=EXCLUDED.height_meter,weight_kilogram=EXCLUDED.weight_kilogram,
             max_heart_rate=EXCLUDED.max_heart_rate,raw_json=EXCLUDED.raw_json,observed_at=NOW()""",
-            (r.get("user_id"),r.get("height_meter"),r.get("weight_kilogram"),r.get("max_heart_rate"),Jsonb(r)))
+            (r.get("height_meter"),r.get("weight_kilogram"),r.get("max_heart_rate"),Jsonb(r)))
 
 def upsert_profile(r):
     if r.get("user_id") is None: return
@@ -204,4 +216,34 @@ def table_counts():
             for t in tables:
                 cur.execute(f"SELECT COUNT(*) AS n FROM {t}")
                 out[t]=cur.fetchone()["n"]
+    return out
+
+def body_measurement():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT height_meter, weight_kilogram, max_heart_rate, observed_at
+                           FROM whoop_body_measurements WHERE id=1""")
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {**row, "observed_at": row["observed_at"].isoformat()}
+
+def data_ranges():
+    queries = {
+        "cycles": ("whoop_cycles","start_time"),
+        "recoveries": ("whoop_recoveries","created_at"),
+        "sleeps": ("whoop_sleeps","start_time"),
+        "workouts": ("whoop_workouts","start_time"),
+    }
+    out={}
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for name,(table,col) in queries.items():
+                cur.execute(f"SELECT MIN({col}) AS oldest, MAX({col}) AS newest, COUNT(*) AS records FROM {table}")
+                row=cur.fetchone()
+                out[name]={
+                    "oldest": row["oldest"].isoformat() if row["oldest"] else None,
+                    "newest": row["newest"].isoformat() if row["newest"] else None,
+                    "records": row["records"],
+                }
     return out

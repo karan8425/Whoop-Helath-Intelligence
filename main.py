@@ -3,17 +3,17 @@ from fastapi import FastAPI,Request,HTTPException,Form
 from fastapi.responses import RedirectResponse,HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 from config import SESSION_SECRET,ADMIN_PASSWORD,validate_config
-from db import init_db,database_health,table_counts
-from whoop import authorization_url,exchange_code,get_phase1_snapshot
-from sync import sync_batch,sync_status,init_sync_state
+from db import init_db,database_health,table_counts,body_measurement,data_ranges
+from whoop import authorization_url,exchange_code,get_phase1_snapshot,whoop_get
+from sync import incremental_sync
 
 validate_config()
-app=FastAPI(title="WHOOP Health Intelligence",version="0.2.1")
+app=FastAPI(title="WHOOP Health Intelligence",version="0.2.2")
 app.add_middleware(SessionMiddleware,secret_key=SESSION_SECRET,same_site="lax",https_only=True)
 
 @app.on_event("startup")
 def startup():
-    init_db(); init_sync_state()
+    init_db()
 
 def is_admin(request): return request.session.get("admin_authenticated") is True
 def require_admin(request):
@@ -23,7 +23,15 @@ def require_admin(request):
 async def home(request:Request):
     if not is_admin(request):
         return """<html><body style="font-family:Arial;max-width:760px;margin:50px auto"><h1>WHOOP Health Intelligence</h1><form method="post" action="/admin/login"><input type="password" name="password" placeholder="Admin password" required><button type="submit">Sign in</button></form></body></html>"""
-    return """<html><body style="font-family:Arial;max-width:850px;margin:50px auto"><h1>WHOOP Health Intelligence</h1><p><b>Phase 2: Resumable Historical Import</b></p><p>Run small batches until sync status says complete = true.</p><ul><li><a href="/database/health">Test Supabase database</a></li><li><a href="/whoop/login">Reconnect WHOOP</a></li><li><a href="/whoop/snapshot">Recent WHOOP snapshot</a></li><li><a href="/whoop/sync/batch">Run next historical sync batch</a></li><li><a href="/whoop/sync/status">View historical sync status</a></li><li><a href="/database/counts">View database record counts</a></li><li><a href="/admin/logout">Sign out</a></li></ul></body></html>"""
+    return """<html><body style="font-family:Arial;max-width:850px;margin:50px auto"><h1>WHOOP Health Intelligence</h1><p><b>Phase 2 Validation</b></p><ul>
+    <li><a href="/database/health">Test Supabase database</a></li>
+    <li><a href="/database/body">Validate body measurement</a></li>
+    <li><a href="/database/ranges">Validate historical date ranges</a></li>
+    <li><a href="/whoop/sync/incremental">Run incremental sync</a></li>
+    <li><a href="/database/counts">View database record counts</a></li>
+    <li><a href="/whoop/snapshot">Recent WHOOP snapshot</a></li>
+    <li><a href="/whoop/login">Reconnect WHOOP</a></li>
+    <li><a href="/admin/logout">Sign out</a></li></ul></body></html>"""
 
 @app.post("/admin/login")
 async def admin_login(request:Request,password:str=Form(...)):
@@ -36,7 +44,8 @@ async def logout(request:Request):
     request.session.clear(); return RedirectResponse("/",status_code=303)
 
 @app.get("/health")
-async def health(): return {"status":"ok","phase":2,"version":"0.2.1"}
+async def health():
+    return {"status":"ok","phase":2,"version":"0.2.2"}
 
 @app.get("/database/health")
 async def db_health(request:Request):
@@ -45,6 +54,25 @@ async def db_health(request:Request):
 @app.get("/database/counts")
 async def db_counts(request:Request):
     require_admin(request); return {"status":"ok","counts":table_counts()}
+
+@app.get("/database/body")
+async def db_body(request:Request):
+    require_admin(request)
+    # Refresh body data from WHOOP before returning validation result.
+    body = await whoop_get("/v2/user/measurement/body")
+    from db import upsert_body
+    upsert_body(body)
+    return {"status":"ok","body_measurement":body_measurement()}
+
+@app.get("/database/ranges")
+async def db_ranges(request:Request):
+    require_admin(request); return {"status":"ok","ranges":data_ranges()}
+
+@app.get("/whoop/sync/incremental")
+async def inc_sync(request:Request):
+    require_admin(request)
+    try: return await incremental_sync()
+    except Exception as exc: raise HTTPException(status_code=502,detail=f"Incremental sync failed: {exc}")
 
 @app.get("/whoop/login")
 async def whoop_login(request:Request):
@@ -65,13 +93,3 @@ async def callback(request:Request,code:str|None=None,state:str|None=None,error:
 @app.get("/whoop/snapshot")
 async def snapshot(request:Request):
     require_admin(request); return await get_phase1_snapshot()
-
-@app.get("/whoop/sync/batch")
-async def batch(request:Request):
-    require_admin(request)
-    try: return await sync_batch(3)
-    except Exception as exc: raise HTTPException(502,detail=f"Historical sync batch failed: {exc}")
-
-@app.get("/whoop/sync/status")
-async def status(request:Request):
-    require_admin(request); return sync_status()
