@@ -1,16 +1,10 @@
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-
 from db import get_conn
 
 EASTERN = ZoneInfo("America/New_York")
 
-
 def latest_physiology_date():
-    """
-    Returns the newest date with recovery + sleep physiology in the normalized
-    daily metrics layer. This is safer than using calendar max alone.
-    """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -21,7 +15,6 @@ def latest_physiology_date():
             """)
             row = cur.fetchone()
     return row["latest_date"] if row else None
-
 
 def freshness_status(now_utc=None):
     if now_utc is None:
@@ -44,29 +37,27 @@ def freshness_status(now_utc=None):
 
     age_days = (local_today - latest_date).days
 
-    # At 5 AM Eastern, a sleep/recovery cycle commonly belongs to the date on
-    # which that overnight cycle started. Therefore yesterday is considered fresh.
-    if age_days <= 1:
+    if age_days == 0:
         status = "fresh"
         can_generate = True
         message = (
             f"Latest complete WHOOP physiology is {latest_date.isoformat()}, "
-            "which is current enough for this morning's recommendation."
+            "matching today's Eastern coaching date."
         )
-    elif age_days == 2:
+    elif age_days == 1:
         status = "pending_today"
         can_generate = False
         message = (
             f"Latest complete WHOOP physiology is {latest_date.isoformat()}. "
-            "Today's recovery/sleep appears not to have arrived yet. "
-            "Do not treat the prior training recommendation as today's recommendation."
+            "Today's completed sleep/recovery has not been ingested yet. "
+            "Do not treat the prior recommendation as today's recommendation."
         )
     else:
         status = "stale"
         can_generate = False
         message = (
             f"Latest complete WHOOP physiology is {latest_date.isoformat()}, "
-            f"{age_days} calendar days behind the current Eastern date. "
+            f"{age_days} calendar days behind today. "
             "A new training recommendation should not be generated."
         )
 
