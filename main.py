@@ -53,5 +53,9 @@ async def apple_health_ingest(request:Request):
     return ingest_healthkit_payload(await request.json())
 
 @app.get("/apple-health/latest")
-async def apple_health_latest(request:Request):
-    require_admin(request); return {"status":"ok","body":latest_apple_health()}
+async def apple_health_latest(request: Request):
+    require_admin(request)
+    return {
+        "status": "ok",
+        **latest_apple_health()
+    }
