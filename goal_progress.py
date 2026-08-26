@@ -1,28 +1,49 @@
+from datetime import datetime, timezone
+
 from goals import get_active_goal
 from apple_health_trends import apple_health_trends
 
 
 KG_TO_LB = 2.2046226218
+MIN_PHASE_AGE_DAYS = 7
 
 
 def _round(value, digits=1):
     if value is None:
         return None
-    return round(float(value), digits)
+
+    return round(
+        float(value),
+        digits,
+    )
 
 
-def _progress_percentage(start, current, target):
-    """
-    Calculate progress from phase-start value toward target.
+def _phase_age_days(
+    phase_start_date
+):
+    if not phase_start_date:
+        return None
 
-    0%   = still at starting value
-    100% = target reached
-    Negative values indicate movement away from target.
+    start = datetime.strptime(
+        phase_start_date,
+        "%Y-%m-%d",
+    ).date()
 
-    The returned dashboard percentage is capped at 0-100,
-    while raw_progress_percentage preserves the actual direction.
-    """
+    today = datetime.now(
+        timezone.utc
+    ).date()
 
+    return max(
+        0,
+        (today - start).days,
+    )
+
+
+def _progress_percentage(
+    start,
+    current,
+    target,
+):
     if (
         start is None
         or current is None
@@ -34,10 +55,18 @@ def _progress_percentage(start, current, target):
     current = float(current)
     target = float(target)
 
-    denominator = start - target
+    denominator = (
+        start - target
+    )
 
-    if abs(denominator) < 0.000001:
-        return 100.0, 100.0
+    if abs(
+        denominator
+    ) < 0.000001:
+
+        return (
+            100.0,
+            100.0,
+        )
 
     raw = (
         (start - current)
@@ -47,56 +76,78 @@ def _progress_percentage(start, current, target):
 
     dashboard = max(
         0.0,
-        min(100.0, raw),
+        min(
+            100.0,
+            raw,
+        ),
     )
 
     return (
-        round(dashboard, 1),
-        round(raw, 1),
+        round(
+            dashboard,
+            1,
+        ),
+        round(
+            raw,
+            1,
+        ),
     )
 
 
-def _body_fat_direction(body_fat):
-    """
-    Determine short-term body-fat direction using Hume-only
-    personal baselines.
-
-    We require enough observations before making a directional
-    judgment.
-    """
-
+def _body_fat_direction(
+    body_fat
+):
     if not body_fat:
         return "insufficient_data"
 
-    if not body_fat.get("available"):
+    if not body_fat.get(
+        "available"
+    ):
         return "insufficient_data"
 
-    current = body_fat.get("current_value")
+    current = body_fat.get(
+        "current_value"
+    )
 
     windows = body_fat.get(
         "windows",
         {},
     )
 
-    window_7 = windows.get("7", {})
-    window_30 = windows.get("30", {})
+    window_7 = windows.get(
+        "7",
+        {},
+    )
+
+    window_30 = windows.get(
+        "30",
+        {},
+    )
 
     observations_7 = (
-        window_7.get("observations")
+        window_7.get(
+            "observations"
+        )
         or 0
     )
 
     observations_30 = (
-        window_30.get("observations")
+        window_30.get(
+            "observations"
+        )
         or 0
     )
 
-    baseline_7 = window_7.get(
-        "baseline"
+    baseline_7 = (
+        window_7.get(
+            "baseline"
+        )
     )
 
-    baseline_30 = window_30.get(
-        "baseline"
+    baseline_30 = (
+        window_30.get(
+            "baseline"
+        )
     )
 
     if (
@@ -108,23 +159,35 @@ def _body_fat_direction(body_fat):
     ):
         return "insufficient_data"
 
-    current = float(current)
-    baseline_7 = float(baseline_7)
-    baseline_30 = float(baseline_30)
+    current = float(
+        current
+    )
 
-    # Small tolerance prevents normal scale noise from
-    # constantly changing dashboard direction.
+    baseline_7 = float(
+        baseline_7
+    )
+
+    baseline_30 = float(
+        baseline_30
+    )
+
     tolerance = 0.15
 
     if (
-        current < baseline_7 - tolerance
-        and baseline_7 <= baseline_30
+        current
+        < baseline_7
+        - tolerance
+        and baseline_7
+        <= baseline_30
     ):
         return "toward_goal"
 
     if (
-        current > baseline_7 + tolerance
-        and baseline_7 >= baseline_30
+        current
+        > baseline_7
+        + tolerance
+        and baseline_7
+        >= baseline_30
     ):
         return "away_from_goal"
 
@@ -135,19 +198,19 @@ def _activity_status(
     activity,
     daily_step_target,
 ):
-    """
-    Compare recent activity against the configured goal.
-
-    We use the 7-day average rather than today's partial-day
-    step count.
-    """
-
     if not daily_step_target:
         return {
-            "status": "not_configured",
-            "average_steps_7d": None,
-            "target_steps": None,
-            "percentage_of_target": None,
+            "status":
+                "not_configured",
+
+            "average_steps_7d":
+                None,
+
+            "target_steps":
+                None,
+
+            "percentage_of_target":
+                None,
         }
 
     baselines = activity.get(
@@ -160,9 +223,14 @@ def _activity_status(
         {},
     )
 
-    steps = window_7.get("steps")
+    steps = window_7.get(
+        "steps"
+    )
+
     days_available = (
-        window_7.get("days_available")
+        window_7.get(
+            "days_available"
+        )
         or 0
     )
 
@@ -171,25 +239,39 @@ def _activity_status(
         or days_available < 4
     ):
         return {
-            "status": "insufficient_data",
-            "average_steps_7d": steps,
-            "target_steps": daily_step_target,
-            "percentage_of_target": None,
+            "status":
+                "insufficient_data",
+
+            "average_steps_7d":
+                steps,
+
+            "target_steps":
+                daily_step_target,
+
+            "percentage_of_target":
+                None,
         }
 
-    steps = float(steps)
+    steps = float(
+        steps
+    )
+
     target = float(
         daily_step_target
     )
 
     percentage = (
-        steps / target * 100
+        steps
+        / target
+        * 100
         if target > 0
         else None
     )
 
     if percentage is None:
-        status = "not_configured"
+        status = (
+            "not_configured"
+        )
 
     elif percentage >= 100:
         status = "on_track"
@@ -201,37 +283,51 @@ def _activity_status(
         status = "below_target"
 
     return {
-        "status": status,
+        "status":
+            status,
+
         "average_steps_7d":
-            round(steps),
+            round(
+                steps
+            ),
 
         "target_steps":
-            int(target),
+            int(
+                target
+            ),
 
         "percentage_of_target":
-            _round(percentage, 1),
+            _round(
+                percentage,
+                1,
+            ),
     }
 
 
 def _overall_direction(
+    phase_age_days,
     body_fat_direction,
     activity_status,
 ):
-    """
-    Overall goal direction is deterministic.
-
-    Body composition is the primary outcome signal.
-    Activity is a supporting behavior signal.
-    """
-
-    if body_fat_direction == "insufficient_data":
-
-        if activity_status == "on_track":
-            return "insufficient_data"
-
+    # Do not label a newly started phase as
+    # on-track, mixed or off-track.
+    if (
+        phase_age_days is None
+        or phase_age_days
+        < MIN_PHASE_AGE_DAYS
+    ):
         return "insufficient_data"
 
-    if body_fat_direction == "toward_goal":
+    if (
+        body_fat_direction
+        == "insufficient_data"
+    ):
+        return "insufficient_data"
+
+    if (
+        body_fat_direction
+        == "toward_goal"
+    ):
 
         if activity_status in (
             "on_track",
@@ -241,10 +337,16 @@ def _overall_direction(
 
         return "mixed"
 
-    if body_fat_direction == "away_from_goal":
+    if (
+        body_fat_direction
+        == "away_from_goal"
+    ):
         return "off_track"
 
-    if body_fat_direction == "stable":
+    if (
+        body_fat_direction
+        == "stable"
+    ):
 
         if activity_status == "on_track":
             return "mixed"
@@ -257,17 +359,44 @@ def _overall_direction(
 def _summary(
     phase,
     direction,
+    phase_age_days,
     body_fat_direction,
     activity_status,
 ):
     phase_name = {
-        "lean_cut": "Lean Cut",
-        "maintenance": "Maintenance",
-        "lean_bulk": "Lean Bulk",
+        "lean_cut":
+            "Lean Cut",
+
+        "maintenance":
+            "Maintenance",
+
+        "lean_bulk":
+            "Lean Bulk",
     }.get(
         phase,
-        phase or "Current phase",
+        phase
+        or "Current phase",
     )
+
+    if (
+        phase_age_days is not None
+        and phase_age_days
+        < MIN_PHASE_AGE_DAYS
+    ):
+        if activity_status == "on_track":
+            return (
+                f"{phase_name} has just started. "
+                "Activity is on track, but there is not yet "
+                "enough post-phase body-composition data to "
+                "determine whether you are moving toward or "
+                "away from the goal."
+            )
+
+        return (
+            f"{phase_name} has just started. "
+            "More post-phase data is needed before "
+            "progress direction can be evaluated."
+        )
 
     if direction == "on_track":
         return (
@@ -296,14 +425,14 @@ def _summary(
         == "on_track"
     ):
         return (
-            f"Activity is supporting the {phase_name}, but more "
-            "Hume body-composition history is needed before confirming "
-            "the direction of progress."
+            f"Activity is supporting the {phase_name}, "
+            "but more Hume body-composition history is needed "
+            "before confirming the direction of progress."
         )
 
     return (
-        f"More reliable data is needed before determining whether "
-        f"the {phase_name} is moving toward or away from the goal."
+        f"More reliable data is needed before determining "
+        f"whether the {phase_name} is moving toward or away from the goal."
     )
 
 
@@ -312,13 +441,19 @@ def goal_progress():
 
     if not goal:
         return {
-            "status": "no_active_goal",
-            "message": (
-                "Create an active goal before calculating progress."
-            ),
+            "status":
+                "no_active_goal",
+
+            "message":
+                (
+                    "Create an active goal "
+                    "before calculating progress."
+                ),
         }
 
-    trends = apple_health_trends()
+    trends = (
+        apple_health_trends()
+    )
 
     body_composition = trends.get(
         "body_composition",
@@ -341,21 +476,32 @@ def goal_progress():
     )
 
     current_weight_kg = (
-        weight.get("current_value")
-        if weight.get("available")
+        weight.get(
+            "current_value"
+        )
+        if weight.get(
+            "available"
+        )
         else None
     )
 
     current_weight_lb = (
-        float(current_weight_kg)
+        float(
+            current_weight_kg
+        )
         * KG_TO_LB
-        if current_weight_kg is not None
+        if current_weight_kg
+        is not None
         else None
     )
 
     current_body_fat = (
-        body_fat.get("current_value")
-        if body_fat.get("available")
+        body_fat.get(
+            "current_value"
+        )
+        if body_fat.get(
+            "available"
+        )
         else None
     )
 
@@ -373,6 +519,14 @@ def goal_progress():
 
     target_body_fat = goal.get(
         "target_body_fat_percentage"
+    )
+
+    phase_age_days = (
+        _phase_age_days(
+            goal.get(
+                "phase_start_date"
+            )
+        )
     )
 
     (
@@ -408,23 +562,38 @@ def goal_progress():
         )
     )
 
-    direction = _overall_direction(
-        body_fat_direction,
-        activity_result["status"],
+    direction = (
+        _overall_direction(
+            phase_age_days,
+            body_fat_direction,
+            activity_result[
+                "status"
+            ],
+        )
     )
 
     return {
-        "status": "ok",
+        "status":
+            "ok",
 
-        "phase": goal.get(
-            "phase"
-        ),
+        "phase":
+            goal.get(
+                "phase"
+            ),
 
-        "direction": direction,
+        "direction":
+            direction,
 
-        "phase_start_date": goal.get(
-            "phase_start_date"
-        ),
+        "phase_start_date":
+            goal.get(
+                "phase_start_date"
+            ),
+
+        "phase_age_days":
+            phase_age_days,
+
+        "minimum_phase_age_days":
+            MIN_PHASE_AGE_DAYS,
 
         "body_fat": {
             "start_percentage":
@@ -481,10 +650,13 @@ def goal_progress():
                 raw_weight_progress,
         },
 
-        "activity": activity_result,
+        "activity":
+            activity_result,
 
         "strength": {
-            "status": "not_connected",
+            "status":
+                "not_connected",
+
             "target_sessions_per_week":
                 goal.get(
                     "strength_sessions_per_week"
@@ -492,21 +664,33 @@ def goal_progress():
         },
 
         "protein": {
-            "status": "not_connected",
+            "status":
+                "not_connected",
+
             "target_grams_per_day":
                 goal.get(
                     "protein_target_grams"
                 ),
         },
 
-        "summary": _summary(
-            goal.get("phase"),
-            direction,
-            body_fat_direction,
-            activity_result["status"],
-        ),
+        "summary":
+            _summary(
+                goal.get(
+                    "phase"
+                ),
+                direction,
+                phase_age_days,
+                body_fat_direction,
+                activity_result[
+                    "status"
+                ],
+            ),
 
         "data_notes": [
+            (
+                "The first 7 days of a new phase "
+                "are treated as a baseline-building period."
+            ),
             (
                 "Body composition uses Hume-only measurements "
                 "to reduce cross-device bias."
