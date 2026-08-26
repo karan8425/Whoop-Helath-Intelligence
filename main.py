@@ -1,4 +1,11 @@
 import secrets
+import
+from goals import (
+    init_goal_profiles,
+    get_active_goal,
+    get_goal_history,
+    save_goal_profile,
+)
 from fastapi import FastAPI, Request, HTTPException, Form
 from combined_coaching import (
     combined_daily_snapshot,
@@ -13,17 +20,28 @@ from baselines import init_baselines, rebuild_baselines, validate_baselines
 from freshness import freshness_status
 from automation_status import init_automation_tables, latest_stored_intelligence, latest_automation_run, automation_summary
 from debug_whoop_dates import latest_whoop_date_diagnostic
-from healthkit_ingest import (init_apple_health_tables,require_ingest_key,ingest_healthkit_payload,latest_apple_health,apple_health_history_summary)
+from healthkit_ingest import (
+    init_apple_health_tables,
+    require_ingest_key,
+    ingest_healthkit_payload,
+    latest_apple_health,
+    apple_health_history_summary,
+)
 from ai_intelligence import validate_combined_ai_connection
 from apple_health_trends import apple_health_trends
 
 validate_config()
-app=FastAPI(title="WHOOP Health Intelligence",version="0.5.2")
+app=FastAPI(title="WHOOP Health Intelligence",version="0.5.3")
 app.add_middleware(SessionMiddleware,secret_key=SESSION_SECRET,same_site="lax",https_only=True)
 
 @app.on_event("startup")
 def startup():
-    init_db(); init_analytics(); init_baselines(); init_automation_tables(); init_apple_health_tables()
+    init_db()
+    init_analytics()
+    init_baselines()
+    init_automation_tables()
+    init_apple_health_tables()
+    init_goal_profiles()
 
 def require_admin(request):
     if request.session.get("admin_authenticated") is not True:
@@ -43,7 +61,7 @@ async def login(request:Request,password:str=Form(...)):
     return RedirectResponse("/",303)
 
 @app.get("/health")
-async def health(): return {"status":"ok","phase":"5C.2","version":"0.5.2"}
+async def health(): return {"status":"ok","phase":"5D.1","version":"0.5.3"}
 
 @app.get("/freshness")
 async def freshness(request:Request):
@@ -102,3 +120,41 @@ async def apple_health_history_summary_route(request: Request):
 async def apple_health_trends_route(request: Request):
     require_admin(request)
     return apple_health_trends()
+
+@app.get("/goals/active")
+async def goals_active(request: Request):
+    require_admin(request)
+    return {
+        "status": "ok",
+        "goal": get_active_goal()
+    }
+
+
+@app.get("/goals/history")
+async def goals_history(request: Request):
+    require_admin(request)
+    return {
+        "status": "ok",
+        "goals": get_goal_history()
+    }
+
+
+@app.post("/goals")
+async def goals_save(request: Request):
+    require_admin(request)
+
+    try:
+        payload = await request.json()
+
+        return {
+            "status": "ok",
+            "goal": save_goal_profile(payload)
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc)
+        ) from exc
+
+
