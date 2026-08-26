@@ -390,7 +390,7 @@ async def goals_save(request: Request):
 # One-Time Goal Snapshot Backfill
 # ---------------------------------------------------------
 
-@app.get("/goals/backfill-active-start")
+@app.post("/goals/backfill-active-start")
 async def goals_backfill_active_start(
     request: Request,
 ):
