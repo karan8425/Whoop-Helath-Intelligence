@@ -184,4 +184,16 @@ async def mobile_goals_save(request: Request):
             detail=str(exc)
         ) from exc
 
+@app.get("/api/v1/coaching/today")
+async def mobile_combined_coaching(request: Request):
+    require_ingest_key(request)
+
+    try:
+        return validate_combined_ai_connection()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Combined AI coaching failed: {exc}"
+        ) from exc
 
