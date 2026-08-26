@@ -1,5 +1,4 @@
 import secrets
-import
 from goals import (
     init_goal_profiles,
     get_active_goal,
