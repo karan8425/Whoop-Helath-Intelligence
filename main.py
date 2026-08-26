@@ -1,6 +1,9 @@
 import secrets
 from fastapi import FastAPI, Request, HTTPException, Form
-from combined_coaching import combined_daily_snapshot
+from combined_coaching import (
+    combined_daily_snapshot,
+    combined_deterministic_coaching,
+)
 from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 from config import SESSION_SECRET, ADMIN_PASSWORD, validate_config
@@ -13,7 +16,7 @@ from debug_whoop_dates import latest_whoop_date_diagnostic
 from healthkit_ingest import init_apple_health_tables, require_ingest_key, ingest_healthkit_payload, latest_apple_health
 
 validate_config()
-app=FastAPI(title="WHOOP Health Intelligence",version="0.5.1")
+app=FastAPI(title="WHOOP Health Intelligence",version="0.5.2")
 app.add_middleware(SessionMiddleware,secret_key=SESSION_SECRET,same_site="lax",https_only=True)
 
 @app.on_event("startup")
@@ -28,7 +31,7 @@ def require_admin(request):
 async def home(request:Request):
     if request.session.get("admin_authenticated") is not True:
         return """<html><body><h1>WHOOP Health Intelligence</h1><form method="post" action="/admin/login"><input type="password" name="password"><button>Sign in</button></form></body></html>"""
-    return """<html><body><h1>WHOOP Health Intelligence</h1><p><b>Phase 5A.2</b></p><ul><li><a href="/apple-health/latest">View latest Apple Health / Hume body data</a></li><li><a href="/freshness">Check WHOOP freshness</a></li><li><a href="/automation/latest-run">View latest automation run</a></li></ul></body></html>"""
+    return """<html><body><h1>WHOOP Health Intelligence</h1><p><b>Phase 5C.2</b></p><ul><li><a href="/apple-health/latest">View latest Apple Health / Hume body data</a></li><li><a href="/freshness">Check WHOOP freshness</a></li><li><a href="/automation/latest-run">View latest automation run</a></li></ul></body></html>"""
 
 @app.post("/admin/login")
 async def login(request:Request,password:str=Form(...)):
@@ -38,7 +41,7 @@ async def login(request:Request,password:str=Form(...)):
     return RedirectResponse("/",303)
 
 @app.get("/health")
-async def health(): return {"status":"ok","phase":"5A.2","version":"0.5.1"}
+async def health(): return {"status":"ok","phase":"5C.2","version":"0.5.2"}
 
 @app.get("/freshness")
 async def freshness(request:Request):
@@ -65,3 +68,9 @@ async def apple_health_latest(request: Request):
 async def combined_today(request: Request):
     require_admin(request)
     return combined_daily_snapshot()
+
+
+@app.get("/coaching/combined/recommendation")
+async def combined_recommendation(request: Request):
+    require_admin(request)
+    return combined_deterministic_coaching()
