@@ -389,3 +389,125 @@ def save_goal_profile(payload):
             return _serialize(
                 cur.fetchone()
             )
+def backfill_active_goal_start_snapshot():
+    init_goal_profiles()
+
+    active_goal = get_active_goal()
+
+    if not active_goal:
+        return {
+            "status": "no_active_goal"
+        }
+
+    if (
+        active_goal.get("phase_start_weight_lb") is not None
+        or active_goal.get("phase_start_body_fat_percentage") is not None
+    ):
+        return {
+            "status": "already_populated",
+            "goal": active_goal
+        }
+
+    phase_start_date = active_goal[
+        "phase_start_date"
+    ]
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    value,
+                    observed_at
+                FROM apple_health_body_samples
+                WHERE metric_name = 'body_weight'
+                  AND source_bundle_id = 'com.elink.fittrackhealth'
+                  AND observed_at < (%s::date + INTERVAL '1 day')
+                ORDER BY observed_at DESC
+                LIMIT 1
+                """,
+                (phase_start_date,),
+            )
+
+            weight = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT
+                    value,
+                    observed_at
+                FROM apple_health_body_samples
+                WHERE metric_name = 'body_fat_percentage'
+                  AND source_bundle_id = 'com.elink.fittrackhealth'
+                  AND observed_at < (%s::date + INTERVAL '1 day')
+                ORDER BY observed_at DESC
+                LIMIT 1
+                """,
+                (phase_start_date,),
+            )
+
+            body_fat = cur.fetchone()
+
+            weight_lb = None
+            body_fat_percentage = None
+            recorded_at = None
+
+            if weight:
+                weight_lb = (
+                    float(weight["value"])
+                    * 2.2046226218
+                )
+
+                recorded_at = (
+                    weight["observed_at"]
+                )
+
+            if body_fat:
+                body_fat_percentage = float(
+                    body_fat["value"]
+                )
+
+                if (
+                    recorded_at is None
+                    or body_fat["observed_at"]
+                    > recorded_at
+                ):
+                    recorded_at = (
+                        body_fat["observed_at"]
+                    )
+
+            cur.execute(
+                """
+                UPDATE health_goal_profiles
+                SET
+                    phase_start_weight_lb = %s,
+                    phase_start_body_fat_percentage = %s,
+                    phase_start_recorded_at = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    weight_lb,
+                    body_fat_percentage,
+                    recorded_at,
+                    active_goal["id"],
+                ),
+            )
+
+            return {
+                "status": "ok",
+                "goal": _serialize(
+                    cur.fetchone()
+                )
+            }
+
+
+@app.post("/goals/backfill-active-start")
+
+async def goals_backfill_active_start(request: Request):
+
+    require_admin(request)
+
+    return backfill_active_goal_start_snapshot()
