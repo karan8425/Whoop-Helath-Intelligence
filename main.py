@@ -3,6 +3,7 @@ import secrets
 from fastapi import FastAPI, Request, HTTPException, Form
 from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
+from goal_progress import goal_progress
 
 from config import SESSION_SECRET, ADMIN_PASSWORD, validate_config
 from db import init_db
@@ -339,7 +340,14 @@ async def mobile_combined_coaching(
                 f"{exc}"
             ),
         ) from exc
+        
+@app.get("/api/v1/goals/progress")
+async def mobile_goal_progress(
+    request: Request,
+):
+    require_ingest_key(request)
 
+    return goal_progress()
 
 # ---------------------------------------------------------
 # Goal Admin Endpoints
@@ -441,3 +449,11 @@ async def mobile_goals_save(
             status_code=400,
             detail=str(exc),
         ) from exc
+
+@app.get("/goals/progress")
+async def goals_progress(
+    request: Request,
+):
+    require_admin(request)
+
+    return goal_progress()
