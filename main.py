@@ -156,4 +156,32 @@ async def goals_save(request: Request):
             detail=str(exc)
         ) from exc
 
+@app.get("/api/v1/goals/active")
+async def mobile_goals_active(request: Request):
+    require_ingest_key(request)
+
+    return {
+        "status": "ok",
+        "goal": get_active_goal()
+    }
+
+
+@app.post("/api/v1/goals")
+async def mobile_goals_save(request: Request):
+    require_ingest_key(request)
+
+    try:
+        payload = await request.json()
+
+        return {
+            "status": "ok",
+            "goal": save_goal_profile(payload)
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc)
+        ) from exc
+
 
