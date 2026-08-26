@@ -88,3 +88,11 @@ async def combined_ai(request: Request):
             status_code=500,
             detail=f"Combined AI coaching failed: {exc}"
         ) from exc
+
+@app.get("/apple-health/history/summary")
+async def apple_health_history_summary_route(request: Request):
+    require_admin(request)
+    return {
+        "status": "ok",
+        **apple_health_history_summary()
+    }
