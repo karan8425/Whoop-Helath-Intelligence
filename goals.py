@@ -37,11 +37,8 @@ def init_goal_profiles():
     with get_conn() as conn:
         with conn.cursor() as cur:
 
-            # Create the table if this is a brand-new database.
             cur.execute(DDL)
 
-            # Migration-safe additions for databases where the
-            # goal table already existed before these fields were added.
             cur.execute("""
                 ALTER TABLE health_goal_profiles
                 ADD COLUMN IF NOT EXISTS phase_start_weight_lb
@@ -79,9 +76,7 @@ def _serialize(row):
         "phase_end_date",
     ):
         if result.get(key):
-            result[key] = (
-                result[key].isoformat()
-            )
+            result[key] = result[key].isoformat()
 
     for key in (
         "phase_start_recorded_at",
@@ -89,9 +84,7 @@ def _serialize(row):
         "updated_at",
     ):
         if result.get(key):
-            result[key] = (
-                result[key].isoformat()
-            )
+            result[key] = result[key].isoformat()
 
     return result
 
@@ -135,11 +128,8 @@ def get_goal_history():
 
 def _latest_hume_start_snapshot():
     """
-    Capture the latest preferred-source Hume weight and
-    body-fat measurements when a new goal phase begins.
-
-    These values are frozen into the goal record and become
-    the baseline for measuring progress during that phase.
+    Capture the latest preferred-source Hume weight and body-fat
+    measurements when a new goal phase begins.
     """
 
     weight_lb = None
@@ -155,8 +145,7 @@ def _latest_hume_start_snapshot():
                     observed_at
                 FROM apple_health_body_samples
                 WHERE metric_name = 'body_weight'
-                  AND source_bundle_id =
-                      'com.elink.fittrackhealth'
+                  AND source_bundle_id = 'com.elink.fittrackhealth'
                 ORDER BY observed_at DESC
                 LIMIT 1
             """)
@@ -169,19 +158,15 @@ def _latest_hume_start_snapshot():
                     * 2.2046226218
                 )
 
-                recorded_at = (
-                    weight["observed_at"]
-                )
+                recorded_at = weight["observed_at"]
 
             cur.execute("""
                 SELECT
                     value,
                     observed_at
                 FROM apple_health_body_samples
-                WHERE metric_name =
-                    'body_fat_percentage'
-                  AND source_bundle_id =
-                      'com.elink.fittrackhealth'
+                WHERE metric_name = 'body_fat_percentage'
+                  AND source_bundle_id = 'com.elink.fittrackhealth'
                 ORDER BY observed_at DESC
                 LIMIT 1
             """)
@@ -195,22 +180,14 @@ def _latest_hume_start_snapshot():
 
                 if (
                     recorded_at is None
-                    or body_fat["observed_at"]
-                    > recorded_at
+                    or body_fat["observed_at"] > recorded_at
                 ):
-                    recorded_at = (
-                        body_fat["observed_at"]
-                    )
+                    recorded_at = body_fat["observed_at"]
 
     return {
-        "phase_start_weight_lb":
-            weight_lb,
-
-        "phase_start_body_fat_percentage":
-            body_fat_percentage,
-
-        "phase_start_recorded_at":
-            recorded_at,
+        "phase_start_weight_lb": weight_lb,
+        "phase_start_body_fat_percentage": body_fat_percentage,
+        "phase_start_recorded_at": recorded_at,
     }
 
 
@@ -265,82 +242,61 @@ def save_goal_profile(payload):
 
     if (
         target_body_fat is not None
-        and not 3
-        <= float(target_body_fat)
-        <= 60
+        and not 3 <= float(target_body_fat) <= 60
     ):
         raise ValueError(
-            "target_body_fat_percentage "
-            "must be between 3 and 60."
+            "target_body_fat_percentage must be between 3 and 60."
         )
 
     if (
         target_weight_lb is not None
-        and not 70
-        <= float(target_weight_lb)
-        <= 500
+        and not 70 <= float(target_weight_lb) <= 500
     ):
         raise ValueError(
-            "target_weight_lb "
-            "must be between 70 and 500."
+            "target_weight_lb must be between 70 and 500."
         )
 
     if (
         daily_step_target is not None
-        and not 0
-        <= int(daily_step_target)
-        <= 50000
+        and not 0 <= int(daily_step_target) <= 50000
     ):
         raise ValueError(
-            "daily_step_target "
-            "must be between 0 and 50000."
+            "daily_step_target must be between 0 and 50000."
         )
 
     if (
         strength_sessions is not None
-        and not 0
-        <= int(strength_sessions)
-        <= 14
+        and not 0 <= int(strength_sessions) <= 14
     ):
         raise ValueError(
-            "strength_sessions_per_week "
-            "must be between 0 and 14."
+            "strength_sessions_per_week must be between 0 and 14."
         )
 
     if (
         protein_target is not None
-        and not 0
-        <= int(protein_target)
-        <= 500
+        and not 0 <= int(protein_target) <= 500
     ):
         raise ValueError(
-            "protein_target_grams "
-            "must be between 0 and 500."
+            "protein_target_grams must be between 0 and 500."
         )
 
-    start_snapshot = (
-        _latest_hume_start_snapshot()
-    )
+    start_snapshot = _latest_hume_start_snapshot()
 
     with get_conn() as conn:
         with conn.cursor() as cur:
 
-            # Close the previous active phase.
             cur.execute("""
                 UPDATE health_goal_profiles
                 SET
                     is_active = FALSE,
                     phase_end_date =
-                        %s::date
-                        - INTERVAL '1 day',
+                        %s::date - INTERVAL '1 day',
                     updated_at = NOW()
                 WHERE is_active = TRUE
             """, (
                 phase_start_date,
             ))
 
-            # Create the new active phase and freeze
-            # the current Hume body-composition baseline.
             cur.execute("""
                 INSERT INTO health_goal_profiles (
                     phase,
@@ -389,6 +345,8 @@ def save_goal_profile(payload):
             return _serialize(
                 cur.fetchone()
             )
+
+
 def backfill_active_goal_start_snapshot():
     init_goal_profiles()
 
@@ -400,12 +358,16 @@ def backfill_active_goal_start_snapshot():
         }
 
     if (
-        active_goal.get("phase_start_weight_lb") is not None
-        or active_goal.get("phase_start_body_fat_percentage") is not None
+        active_goal.get(
+            "phase_start_weight_lb"
+        ) is not None
+        or active_goal.get(
+            "phase_start_body_fat_percentage"
+        ) is not None
     ):
         return {
             "status": "already_populated",
-            "goal": active_goal
+            "goal": active_goal,
         }
 
     phase_start_date = active_goal[
@@ -423,7 +385,8 @@ def backfill_active_goal_start_snapshot():
                 FROM apple_health_body_samples
                 WHERE metric_name = 'body_weight'
                   AND source_bundle_id = 'com.elink.fittrackhealth'
-                  AND observed_at < (%s::date + INTERVAL '1 day')
+                  AND observed_at <
+                      (%s::date + INTERVAL '1 day')
                 ORDER BY observed_at DESC
                 LIMIT 1
                 """,
@@ -440,7 +403,8 @@ def backfill_active_goal_start_snapshot():
                 FROM apple_health_body_samples
                 WHERE metric_name = 'body_fat_percentage'
                   AND source_bundle_id = 'com.elink.fittrackhealth'
-                  AND observed_at < (%s::date + INTERVAL '1 day')
+                  AND observed_at <
+                      (%s::date + INTERVAL '1 day')
                 ORDER BY observed_at DESC
                 LIMIT 1
                 """,
@@ -459,9 +423,7 @@ def backfill_active_goal_start_snapshot():
                     * 2.2046226218
                 )
 
-                recorded_at = (
-                    weight["observed_at"]
-                )
+                recorded_at = weight["observed_at"]
 
             if body_fat:
                 body_fat_percentage = float(
@@ -470,12 +432,9 @@ def backfill_active_goal_start_snapshot():
 
                 if (
                     recorded_at is None
-                    or body_fat["observed_at"]
-                    > recorded_at
+                    or body_fat["observed_at"] > recorded_at
                 ):
-                    recorded_at = (
-                        body_fat["observed_at"]
-                    )
+                    recorded_at = body_fat["observed_at"]
 
             cur.execute(
                 """
@@ -500,50 +459,5 @@ def backfill_active_goal_start_snapshot():
                 "status": "ok",
                 "goal": _serialize(
                     cur.fetchone()
-                )
+                ),
             }
-
-
-@app.post("/goals/backfill-active-start")
-
-async def goals_backfill_active_start(request: Request):
-
-    require_admin(request)
-
-    return backfill_active_goal_start_snapshot()
-
-
-# goals.py
-
-from datetime import datetime, timezone
-from db import get_conn
-
-DDL = """
-...
-"""
-
-ALLOWED_PHASES = {
-    ...
-}
-
-def init_goal_profiles():
-    ...
-
-def _serialize(row):
-    ...
-
-def get_active_goal():
-    ...
-
-def get_goal_history():
-    ...
-
-def _latest_hume_start_snapshot():
-    ...
-
-def save_goal_profile(payload):
-    ...
-    
-# ADD THE NEW FUNCTION HERE
-def backfill_active_goal_start_snapshot():
-    ...
