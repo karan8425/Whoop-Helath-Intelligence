@@ -13,7 +13,7 @@ from baselines import init_baselines, rebuild_baselines, validate_baselines
 from freshness import freshness_status
 from automation_status import init_automation_tables, latest_stored_intelligence, latest_automation_run, automation_summary
 from debug_whoop_dates import latest_whoop_date_diagnostic
-from healthkit_ingest import init_apple_health_tables, require_ingest_key, ingest_healthkit_payload, latest_apple_health
+from healthkit_ingest import (init_apple_health_tables,require_ingest_key,ingest_healthkit_payload,latest_apple_health,apple_health_history_summary)
 from ai_intelligence import validate_combined_ai_connection
 
 validate_config()
