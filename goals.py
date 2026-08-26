@@ -511,3 +511,39 @@ async def goals_backfill_active_start(request: Request):
     require_admin(request)
 
     return backfill_active_goal_start_snapshot()
+
+
+# goals.py
+
+from datetime import datetime, timezone
+from db import get_conn
+
+DDL = """
+...
+"""
+
+ALLOWED_PHASES = {
+    ...
+}
+
+def init_goal_profiles():
+    ...
+
+def _serialize(row):
+    ...
+
+def get_active_goal():
+    ...
+
+def get_goal_history():
+    ...
+
+def _latest_hume_start_snapshot():
+    ...
+
+def save_goal_profile(payload):
+    ...
+    
+# ADD THE NEW FUNCTION HERE
+def backfill_active_goal_start_snapshot():
+    ...
