@@ -4,6 +4,7 @@ from goals import (
     get_active_goal,
     get_goal_history,
     save_goal_profile,
+    backfill_active_goal_start_snapshot,
 )
 from fastapi import FastAPI, Request, HTTPException, Form
 from combined_coaching import (
