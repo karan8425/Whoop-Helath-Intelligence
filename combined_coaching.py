@@ -7,10 +7,12 @@ from freshness import freshness_status
 from healthkit_ingest import latest_apple_health
 from automation_status import latest_automation_run
 from apple_health_trends import apple_health_trends
+from goals import get_active_goal
 
 
 EASTERN = ZoneInfo("America/New_York")
-DAILY_STEP_TARGET = int(
+
+DEFAULT_DAILY_STEP_TARGET = int(
     os.getenv("DAILY_STEP_TARGET", "7000")
 )
 
@@ -67,7 +69,6 @@ def _latest_whoop_daily(metric_date):
 def _today_baselines(metric_date):
     with get_conn() as conn:
         with conn.cursor() as cur:
-
             cur.execute(
                 """
                 SELECT
@@ -136,88 +137,63 @@ def combined_daily_snapshot():
 
     if weight:
         body_summary["weight"] = {
-            "kg":
-                weight.get("value"),
-
-            "lb":
-                _lb(
-                    weight.get("value")
-                ),
-
-            "source_name":
-                weight.get("source_name"),
-
-            "observed_at":
-                weight.get("observed_at"),
-
-            "classification":
-                weight.get("classification"),
-
-            "coaching_eligible":
-                weight.get(
-                    "coaching_eligible"
-                ),
+            "kg": weight.get("value"),
+            "lb": _lb(
+                weight.get("value")
+            ),
+            "source_name": weight.get(
+                "source_name"
+            ),
+            "observed_at": weight.get(
+                "observed_at"
+            ),
+            "classification": weight.get(
+                "classification"
+            ),
+            "coaching_eligible": weight.get(
+                "coaching_eligible"
+            ),
         }
 
     if body_fat:
         body_summary[
             "body_fat_percentage"
         ] = {
-            "value":
-                body_fat.get("value"),
-
-            "source_name":
-                body_fat.get(
-                    "source_name"
-                ),
-
-            "observed_at":
-                body_fat.get(
-                    "observed_at"
-                ),
-
-            "classification":
-                body_fat.get(
-                    "classification"
-                ),
-
-            "coaching_eligible":
-                body_fat.get(
-                    "coaching_eligible"
-                ),
+            "value": body_fat.get("value"),
+            "source_name": body_fat.get(
+                "source_name"
+            ),
+            "observed_at": body_fat.get(
+                "observed_at"
+            ),
+            "classification": body_fat.get(
+                "classification"
+            ),
+            "coaching_eligible": body_fat.get(
+                "coaching_eligible"
+            ),
         }
 
     if lean_mass:
         body_summary[
             "lean_body_mass"
         ] = {
-            "kg":
-                lean_mass.get("value"),
-
-            "lb":
-                _lb(
-                    lean_mass.get("value")
-                ),
-
-            "source_name":
-                lean_mass.get(
-                    "source_name"
-                ),
-
-            "observed_at":
-                lean_mass.get(
-                    "observed_at"
-                ),
-
-            "classification":
-                lean_mass.get(
-                    "classification"
-                ),
-
-            "coaching_eligible":
-                lean_mass.get(
-                    "coaching_eligible"
-                ),
+            "kg": lean_mass.get("value"),
+            "lb": _lb(
+                lean_mass.get("value")
+            ),
+            "source_name": lean_mass.get(
+                "source_name"
+            ),
+            "observed_at": lean_mass.get(
+                "observed_at"
+            ),
+            "classification": lean_mass.get(
+                "classification"
+            ),
+            "coaching_eligible": lean_mass.get(
+                "coaching_eligible"
+            ),
         }
 
     whoop_ready = bool(
@@ -248,9 +224,6 @@ def combined_daily_snapshot():
         ) is True
     )
 
-    # WHOOP is required for training guidance.
-    # Hume and activity enrich coaching but
-    # do not block the recommendation.
     readiness = {
         "whoop_current":
             whoop_ready,
@@ -283,9 +256,8 @@ def combined_daily_snapshot():
 
     if not current_body:
         notes.append(
-            "Today's preferred-source Hume "
-            "weight/body-fat measurement is "
-            "not yet current. Historical Hume "
+            "Today's preferred-source Hume weight/body-fat "
+            "measurement is not yet current. Historical Hume "
             "data may still be used for trend context."
         )
 
@@ -296,41 +268,32 @@ def combined_daily_snapshot():
         )
     ):
         notes.append(
-            "Lean body mass is retained as "
-            "context but excluded from current coaching."
+            "Lean body mass is retained as context "
+            "but excluded from current coaching."
         )
 
     if not whoop_ready:
         notes.append(
-            "WHOOP physiology is not current "
-            "enough for today's training recommendation."
+            "WHOOP physiology is not current enough "
+            "for today's training recommendation."
         )
 
     return {
-        "status":
-            "ok",
-
+        "status": "ok",
         "coaching_date":
             local_today.isoformat(),
-
         "local_now":
             local_now.isoformat(),
-
         "data_readiness":
             readiness,
-
         "whoop_freshness":
             whoop_freshness,
-
         "whoop":
             whoop,
-
         "body_composition":
             body_summary,
-
         "activity":
             activity,
-
         "notes":
             notes,
     }
@@ -458,7 +421,6 @@ def _body_metric_trend(
         30,
         90,
     ):
-
         window_data = (
             metric_payload
             .get(
@@ -485,7 +447,6 @@ def _body_metric_trend(
         )
 
         if observations >= minimum:
-
             usable.append(
                 {
                     "window_days":
@@ -585,7 +546,6 @@ def _activity_trend_summary(
     )
 
     def pct(a, b):
-
         if (
             a is None
             or b in (
@@ -654,6 +614,233 @@ def _activity_trend_summary(
             b90.get(
                 "coverage_percentage"
             ),
+    }
+
+
+def _goal_context(
+    goal,
+    body_trends,
+    activity_trend
+):
+    if not goal:
+        return {
+            "active": False,
+            "phase": None,
+            "guidance": [
+                "No active goal profile is configured."
+            ],
+        }
+
+    phase = goal.get(
+        "phase"
+    )
+
+    target_body_fat = goal.get(
+        "target_body_fat_percentage"
+    )
+
+    target_weight_lb = goal.get(
+        "target_weight_lb"
+    )
+
+    target_steps = goal.get(
+        "daily_step_target"
+    )
+
+    target_strength = goal.get(
+        "strength_sessions_per_week"
+    )
+
+    target_protein = goal.get(
+        "protein_target_grams"
+    )
+
+    current_body_fat = (
+        body_trends
+        .get(
+            "body_fat_percentage",
+            {}
+        )
+        .get(
+            "current_value"
+        )
+    )
+
+    current_weight_kg = (
+        body_trends
+        .get(
+            "weight",
+            {}
+        )
+        .get(
+            "current_value"
+        )
+    )
+
+    current_weight_lb = (
+        _lb(
+            current_weight_kg
+        )
+        if current_weight_kg is not None
+        else None
+    )
+
+    body_fat_gap = None
+
+    if (
+        current_body_fat is not None
+        and target_body_fat is not None
+    ):
+        body_fat_gap = (
+            current_body_fat
+            - target_body_fat
+        )
+
+    guidance = []
+
+    if phase == "lean_cut":
+        guidance.append(
+            "Lean Cut priority: preserve strength-training "
+            "quality while reducing body fat gradually."
+        )
+
+        if target_steps:
+            guidance.append(
+                f"Maintain the configured movement target of "
+                f"{int(target_steps):,} steps per day unless "
+                "recovery or symptoms justify reducing activity."
+            )
+
+        if target_strength:
+            guidance.append(
+                f"Aim for approximately "
+                f"{int(target_strength)} strength sessions "
+                "per week when recovery supports training."
+            )
+
+        if body_fat_gap is not None:
+            if body_fat_gap > 0:
+                guidance.append(
+                    f"Current Hume body fat is about "
+                    f"{body_fat_gap:.1f} percentage points "
+                    f"above the {target_body_fat:.1f}% target."
+                )
+            else:
+                guidance.append(
+                    "The current Hume body-fat reading is "
+                    "at or below the configured target."
+                )
+
+        if target_protein:
+            guidance.append(
+                f"Configured protein target is "
+                f"{int(target_protein)} g/day; intake adherence "
+                "will be evaluated once nutrition data is integrated."
+            )
+
+    elif phase == "maintenance":
+        guidance.append(
+            "Maintenance priority: keep body composition broadly "
+            "stable while sustaining strength, recovery, and activity consistency."
+        )
+
+        if target_steps:
+            guidance.append(
+                f"Maintain approximately "
+                f"{int(target_steps):,} steps per day "
+                "as the configured activity target."
+            )
+
+        if target_strength:
+            guidance.append(
+                f"Maintain approximately "
+                f"{int(target_strength)} strength sessions "
+                "per week when recovery supports training."
+            )
+
+    elif phase == "lean_bulk":
+        guidance.append(
+            "Lean Bulk priority: support progressive strength "
+            "training and controlled weight gain while limiting "
+            "unnecessary fat gain."
+        )
+
+        if target_strength:
+            guidance.append(
+                f"Prioritize approximately "
+                f"{int(target_strength)} strength sessions "
+                "per week when recovery supports training."
+            )
+
+        if target_steps:
+            guidance.append(
+                f"Use {int(target_steps):,} daily steps as an "
+                "activity consistency target rather than maximizing "
+                "calorie expenditure."
+            )
+
+        if target_protein:
+            guidance.append(
+                f"Configured protein target is "
+                f"{int(target_protein)} g/day; intake adherence "
+                "will be evaluated once nutrition data is integrated."
+            )
+
+    return {
+        "active":
+            True,
+
+        "phase":
+            phase,
+
+        "phase_start_date":
+            goal.get(
+                "phase_start_date"
+            ),
+
+        "target_body_fat_percentage":
+            target_body_fat,
+
+        "target_weight_lb":
+            target_weight_lb,
+
+        "daily_step_target":
+            target_steps,
+
+        "strength_sessions_per_week":
+            target_strength,
+
+        "protein_target_grams":
+            target_protein,
+
+        "current_hume_body_fat_percentage":
+            current_body_fat,
+
+        "body_fat_percentage_points_to_target":
+            (
+                round(
+                    body_fat_gap,
+                    1
+                )
+                if body_fat_gap is not None
+                else None
+            ),
+
+        "current_hume_weight_lb":
+            (
+                round(
+                    current_weight_lb,
+                    1
+                )
+                if current_weight_lb is not None
+                else None
+            ),
+
+        "activity_trend":
+            activity_trend,
+
+        "guidance":
+            guidance,
     }
 
 
@@ -816,6 +1003,29 @@ def combined_deterministic_coaching():
         )
     )
 
+    active_goal = get_active_goal()
+
+    goal_context = _goal_context(
+        active_goal,
+        body_trends,
+        activity_trend,
+    )
+
+    configured_step_target = (
+        goal_context.get(
+            "daily_step_target"
+        )
+        if goal_context.get(
+            "active"
+        )
+        else None
+    )
+
+    daily_step_target = int(
+        configured_step_target
+        or DEFAULT_DAILY_STEP_TARGET
+    )
+
     activity = (
         snapshot.get(
             "activity"
@@ -848,15 +1058,14 @@ def combined_deterministic_coaching():
         )
 
         remaining = (
-            DAILY_STEP_TARGET
+            daily_step_target
         )
 
         progress = None
 
         activity_action = (
-            "Today's activity has not "
-            "populated yet. Use the historical "
-            "activity trend rather than "
+            "Today's activity has not populated yet. "
+            "Use the historical activity trend rather than "
             "interpreting the current partial day."
         )
 
@@ -864,16 +1073,18 @@ def combined_deterministic_coaching():
 
         remaining = max(
             0,
-            DAILY_STEP_TARGET
+            daily_step_target
             - steps
         )
 
         progress = (
             (
                 steps
-                / DAILY_STEP_TARGET
+                / daily_step_target
             )
             * 100.0
+            if daily_step_target > 0
+            else None
         )
 
         if remaining == 0:
@@ -883,9 +1094,9 @@ def combined_deterministic_coaching():
             )
 
             activity_action = (
-                "Daily step target is already "
-                "met; additional movement can "
-                "be based on preference and recovery."
+                "Daily step target is already met; "
+                "additional movement can be based on "
+                "goal phase, preference, and recovery."
             )
 
         elif hour < 12:
@@ -907,10 +1118,9 @@ def combined_deterministic_coaching():
             )
 
             activity_action = (
-                f"Add purposeful walking this "
-                f"afternoon; about {remaining:,} "
-                "steps remain to the configured "
-                "daily target."
+                f"Add purposeful walking this afternoon; "
+                f"about {remaining:,} steps remain "
+                "to the configured daily target."
             )
 
         else:
@@ -922,8 +1132,8 @@ def combined_deterministic_coaching():
             activity_action = (
                 f"Activity is below the configured "
                 f"daily target; about {remaining:,} "
-                "steps remain. Use an easy walk "
-                "if it fits recovery and schedule."
+                "steps remain. Use an easy walk if "
+                "it fits recovery and schedule."
             )
 
     body = (
@@ -948,14 +1158,12 @@ def combined_deterministic_coaching():
     )
 
     if weight:
-
         body_context.append(
             f"Most recent Hume weight "
             f"is {weight['lb']:.1f} lb."
         )
 
     if body_fat:
-
         body_context.append(
             f"Most recent Hume body fat "
             f"is {body_fat['value']:.1f}%."
@@ -967,12 +1175,10 @@ def combined_deterministic_coaching():
             "coaching_eligible"
         )
     ):
-
         body_context.append(
-            "Lean body mass is excluded "
-            "from current coaching because "
-            "the latest measurement is not "
-            "from the preferred current source."
+            "Lean body mass is excluded from current coaching "
+            "because the latest measurement is not from the "
+            "preferred current source."
         )
 
     trend_observations = []
@@ -984,16 +1190,18 @@ def combined_deterministic_coaching():
     )
 
     if activity_change is not None:
-
         trend_observations.append(
             f"7-day average steps are "
             f"{activity_change:+.1f}% versus "
             "the 30-day activity baseline."
         )
 
-    if weight_trend[
-        "status"
-    ] == "usable":
+    if (
+        weight_trend[
+            "status"
+        ]
+        == "usable"
+    ):
 
         best = (
             weight_trend[
@@ -1003,23 +1211,25 @@ def combined_deterministic_coaching():
 
         trend_observations.append(
             f"Hume weight has sufficient "
-            f"{best['window_days']}-day "
-            f"observation coverage; current "
-            f"value is {best['pct_vs_baseline']:+.1f}% "
-            "versus that source-consistent baseline."
+            f"{best['window_days']}-day observation coverage; "
+            f"current value is "
+            f"{best['pct_vs_baseline']:+.1f}% versus that "
+            "source-consistent baseline."
         )
 
     else:
 
         trend_observations.append(
-            "Hume weight history is not "
-            "yet deep enough for a robust "
-            "longer-term trend."
+            "Hume weight history is not yet deep enough "
+            "for a robust longer-term trend."
         )
 
-    if body_fat_trend[
-        "status"
-    ] == "usable":
+    if (
+        body_fat_trend[
+            "status"
+        ]
+        == "usable"
+    ):
 
         best = (
             body_fat_trend[
@@ -1029,18 +1239,17 @@ def combined_deterministic_coaching():
 
         trend_observations.append(
             f"Hume body fat has sufficient "
-            f"{best['window_days']}-day "
-            f"observation coverage; current "
-            f"value is {best['pct_vs_baseline']:+.1f}% "
-            "versus that source-consistent baseline."
+            f"{best['window_days']}-day observation coverage; "
+            f"current value is "
+            f"{best['pct_vs_baseline']:+.1f}% versus that "
+            "source-consistent baseline."
         )
 
     else:
 
         trend_observations.append(
-            "Hume body-fat history is not "
-            "yet deep enough for a robust "
-            "longer-term trend."
+            "Hume body-fat history is not yet deep enough "
+            "for a robust longer-term trend."
         )
 
     actions = []
@@ -1057,6 +1266,53 @@ def combined_deterministic_coaching():
         if existing:
             actions.append(
                 existing[0]
+            )
+
+    if goal_context.get(
+        "active"
+    ):
+
+        phase = goal_context.get(
+            "phase"
+        )
+
+        if (
+            phase == "lean_cut"
+            and training in (
+                "Push",
+                "Normal",
+            )
+        ):
+
+            actions.append(
+                "Prioritize a high-quality strength session "
+                "to support lean-mass retention during the cut."
+            )
+
+        elif (
+            phase == "lean_bulk"
+            and training in (
+                "Push",
+                "Normal",
+            )
+        ):
+
+            actions.append(
+                "Use today's readiness to prioritize "
+                "progressive strength training."
+            )
+
+        elif (
+            phase == "maintenance"
+            and training in (
+                "Push",
+                "Normal",
+            )
+        ):
+
+            actions.append(
+                "Train normally and prioritize consistency "
+                "rather than adding unnecessary volume."
             )
 
     actions.append(
@@ -1081,6 +1337,9 @@ def combined_deterministic_coaching():
         "confidence":
             confidence,
 
+        "active_goal":
+            goal_context,
+
         "physiology_reasons":
             physiology_reasons[:4],
 
@@ -1089,7 +1348,7 @@ def combined_deterministic_coaching():
                 steps_value,
 
             "configured_step_target":
-                DAILY_STEP_TARGET,
+                daily_step_target,
 
             "step_progress_percentage":
                 (
@@ -1159,24 +1418,18 @@ def combined_deterministic_coaching():
 
         "safety_note":
             (
-                "Training guidance is based "
-                "on personal wearable trends "
-                "and is not a medical diagnosis. "
-                "Symptoms, illness, injury, "
-                "medication changes, or clinician "
-                "advice should override wearable "
+                "Training guidance is based on personal "
+                "wearable trends and is not a medical diagnosis. "
+                "Symptoms, illness, injury, medication changes, "
+                "or clinician advice should override wearable-based "
                 "recommendations."
             ),
 
         "interpretation_note":
             (
-                "WHOOP remains authoritative "
-                "for readiness and training. "
-                "Apple Health activity trends "
-                "are usable when coverage is "
-                "sufficient. Hume weight/body-fat "
-                "trend language is allowed only "
-                "when source-consistent observation "
-                "thresholds are met."
+                "WHOOP remains authoritative for readiness and training. "
+                "The active goal profile changes how activity and "
+                "body-composition context are prioritized, but it does "
+                "not override recovery-based safety or training-readiness signals."
             ),
     }
