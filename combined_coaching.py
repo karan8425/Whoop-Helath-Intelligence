@@ -1,174 +1,1182 @@
 import os
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+
 from db import get_conn
 from freshness import freshness_status
 from healthkit_ingest import latest_apple_health
 from automation_status import latest_automation_run
+from apple_health_trends import apple_health_trends
+
 
 EASTERN = ZoneInfo("America/New_York")
-DAILY_STEP_TARGET = int(os.getenv("DAILY_STEP_TARGET", "7000"))
+DAILY_STEP_TARGET = int(
+    os.getenv("DAILY_STEP_TARGET", "7000")
+)
+
+BODY_TREND_MIN_OBSERVATIONS = {
+    7: 4,
+    14: 7,
+    30: 15,
+    90: 30,
+}
+
 
 def _lb(kg):
-    return None if kg is None else kg * 2.2046226218
+    if kg is None:
+        return None
+
+    return kg * 2.2046226218
+
 
 def _latest_whoop_daily(metric_date):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT metric_date,recovery_score,resting_heart_rate,hrv_rmssd_milli,
-                       sleep_duration_hours,sleep_performance_percentage,
-                       sleep_consistency_percentage,sleep_efficiency_percentage,
-                       respiratory_rate,cycle_strain,cycle_calories,workout_count,
-                       workout_total_strain,workout_total_duration_hours,workout_sports,
-                       has_cycle,has_recovery,has_sleep,has_workout
-                FROM whoop_daily_metrics WHERE metric_date=%s LIMIT 1
-            """,(metric_date,))
+            cur.execute(
+                """
+                SELECT
+                    metric_date,
+                    recovery_score,
+                    resting_heart_rate,
+                    hrv_rmssd_milli,
+                    sleep_duration_hours,
+                    sleep_performance_percentage,
+                    sleep_consistency_percentage,
+                    sleep_efficiency_percentage,
+                    respiratory_rate,
+                    cycle_strain,
+                    cycle_calories,
+                    workout_count,
+                    workout_total_strain,
+                    workout_total_duration_hours,
+                    workout_sports,
+                    has_cycle,
+                    has_recovery,
+                    has_sleep,
+                    has_workout
+                FROM whoop_daily_metrics
+                WHERE metric_date = %s
+                LIMIT 1
+                """,
+                (metric_date,),
+            )
+
             return cur.fetchone()
+
 
 def _today_baselines(metric_date):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT metric_name,current_value,baseline_7,n_7,pct_vs_7,
-                       baseline_30,n_30,pct_vs_30,baseline_90,n_90,pct_vs_90
+
+            cur.execute(
+                """
+                SELECT
+                    metric_name,
+                    current_value,
+                    baseline_7,
+                    n_7,
+                    pct_vs_7,
+                    baseline_30,
+                    n_30,
+                    pct_vs_30,
+                    baseline_90,
+                    n_90,
+                    pct_vs_90
                 FROM whoop_daily_baselines
-                WHERE metric_date=%s ORDER BY metric_name
-            """,(metric_date,))
-            return {r["metric_name"]:dict(r) for r in cur.fetchall()}
+                WHERE metric_date = %s
+                ORDER BY metric_name
+                """,
+                (metric_date,),
+            )
+
+            rows = cur.fetchall()
+
+    return {
+        row["metric_name"]: dict(row)
+        for row in rows
+    }
+
 
 def combined_daily_snapshot():
-    local_now=datetime.now(timezone.utc).astimezone(EASTERN)
-    local_today=local_now.date()
-    whoop_freshness=freshness_status()
-    whoop=_latest_whoop_daily(local_today)
-    apple=latest_apple_health()
-    body=apple.get("body") or {}
-    activity=apple.get("activity")
-    weight=body.get("body_weight")
-    body_fat=body.get("body_fat_percentage")
-    lean=body.get("lean_body_mass")
+    local_now = (
+        datetime.now(timezone.utc)
+        .astimezone(EASTERN)
+    )
 
-    body_summary={"weight":None,"body_fat_percentage":None,"lean_body_mass":None}
+    local_today = local_now.date()
+
+    whoop_freshness = freshness_status()
+
+    whoop = _latest_whoop_daily(
+        local_today
+    )
+
+    apple = latest_apple_health()
+
+    body = apple.get("body") or {}
+    activity = apple.get("activity")
+
+    weight = body.get(
+        "body_weight"
+    )
+
+    body_fat = body.get(
+        "body_fat_percentage"
+    )
+
+    lean_mass = body.get(
+        "lean_body_mass"
+    )
+
+    body_summary = {
+        "weight": None,
+        "body_fat_percentage": None,
+        "lean_body_mass": None,
+    }
+
     if weight:
-        body_summary["weight"]={"kg":weight.get("value"),"lb":_lb(weight.get("value")),
-        "source_name":weight.get("source_name"),"observed_at":weight.get("observed_at"),
-        "classification":weight.get("classification"),"coaching_eligible":weight.get("coaching_eligible")}
+        body_summary["weight"] = {
+            "kg":
+                weight.get("value"),
+
+            "lb":
+                _lb(
+                    weight.get("value")
+                ),
+
+            "source_name":
+                weight.get("source_name"),
+
+            "observed_at":
+                weight.get("observed_at"),
+
+            "classification":
+                weight.get("classification"),
+
+            "coaching_eligible":
+                weight.get(
+                    "coaching_eligible"
+                ),
+        }
+
     if body_fat:
-        body_summary["body_fat_percentage"]={"value":body_fat.get("value"),
-        "source_name":body_fat.get("source_name"),"observed_at":body_fat.get("observed_at"),
-        "classification":body_fat.get("classification"),"coaching_eligible":body_fat.get("coaching_eligible")}
-    if lean:
-        body_summary["lean_body_mass"]={"kg":lean.get("value"),"lb":_lb(lean.get("value")),
-        "source_name":lean.get("source_name"),"observed_at":lean.get("observed_at"),
-        "classification":lean.get("classification"),"coaching_eligible":lean.get("coaching_eligible")}
+        body_summary[
+            "body_fat_percentage"
+        ] = {
+            "value":
+                body_fat.get("value"),
 
-    whoop_ready=bool(whoop and whoop_freshness.get("status")=="fresh"
-                     and whoop_freshness.get("can_generate_current_recommendation") is True)
-    activity_ready=bool(activity and activity.get("classification")=="current"
-                        and activity.get("coaching_eligible") is True)
-    body_ready=bool(weight and weight.get("coaching_eligible") is True
-                    and body_fat and body_fat.get("coaching_eligible") is True)
-    readiness={"whoop_current":whoop_ready,"body_composition_current":body_ready,
-               "activity_current":activity_ready,
-               "lean_mass_current":bool(lean and lean.get("coaching_eligible") is True),
-               "combined_coaching_ready":bool(whoop_ready and body_ready and activity_ready)}
-    notes=[]
-    if lean and not lean.get("coaching_eligible"):
-        notes.append("Lean body mass is retained as context but excluded from current coaching because it is stale or from a non-preferred source.")
-    return {"status":"ok","coaching_date":local_today.isoformat(),"local_now":local_now.isoformat(),
-            "data_readiness":readiness,"whoop_freshness":whoop_freshness,"whoop":whoop,
-            "body_composition":body_summary,"activity":activity,"notes":notes}
+            "source_name":
+                body_fat.get(
+                    "source_name"
+                ),
 
-def _current_whoop_recommendation(metric_date):
-    run=latest_automation_run()
-    if not run or str(run.get("metric_date")) != metric_date.isoformat():
+            "observed_at":
+                body_fat.get(
+                    "observed_at"
+                ),
+
+            "classification":
+                body_fat.get(
+                    "classification"
+                ),
+
+            "coaching_eligible":
+                body_fat.get(
+                    "coaching_eligible"
+                ),
+        }
+
+    if lean_mass:
+        body_summary[
+            "lean_body_mass"
+        ] = {
+            "kg":
+                lean_mass.get("value"),
+
+            "lb":
+                _lb(
+                    lean_mass.get("value")
+                ),
+
+            "source_name":
+                lean_mass.get(
+                    "source_name"
+                ),
+
+            "observed_at":
+                lean_mass.get(
+                    "observed_at"
+                ),
+
+            "classification":
+                lean_mass.get(
+                    "classification"
+                ),
+
+            "coaching_eligible":
+                lean_mass.get(
+                    "coaching_eligible"
+                ),
+        }
+
+    whoop_ready = bool(
+        whoop
+        and whoop_freshness.get(
+            "status"
+        ) == "fresh"
+        and whoop_freshness.get(
+            "can_generate_current_recommendation"
+        ) is True
+    )
+
+    activity_current = bool(
+        activity
+        and activity.get(
+            "classification"
+        ) == "current"
+    )
+
+    current_body = bool(
+        weight
+        and weight.get(
+            "coaching_eligible"
+        ) is True
+        and body_fat
+        and body_fat.get(
+            "coaching_eligible"
+        ) is True
+    )
+
+    # WHOOP is required for training guidance.
+    # Hume and activity enrich coaching but
+    # do not block the recommendation.
+    readiness = {
+        "whoop_current":
+            whoop_ready,
+
+        "body_composition_current":
+            current_body,
+
+        "activity_current":
+            activity_current,
+
+        "lean_mass_current":
+            bool(
+                lean_mass
+                and lean_mass.get(
+                    "coaching_eligible"
+                ) is True
+            ),
+
+        "combined_coaching_ready":
+            whoop_ready,
+
+        "body_composition_required_for_training":
+            False,
+
+        "activity_required_for_training":
+            False,
+    }
+
+    notes = []
+
+    if not current_body:
+        notes.append(
+            "Today's preferred-source Hume "
+            "weight/body-fat measurement is "
+            "not yet current. Historical Hume "
+            "data may still be used for trend context."
+        )
+
+    if (
+        lean_mass
+        and not lean_mass.get(
+            "coaching_eligible"
+        )
+    ):
+        notes.append(
+            "Lean body mass is retained as "
+            "context but excluded from current coaching."
+        )
+
+    if not whoop_ready:
+        notes.append(
+            "WHOOP physiology is not current "
+            "enough for today's training recommendation."
+        )
+
+    return {
+        "status":
+            "ok",
+
+        "coaching_date":
+            local_today.isoformat(),
+
+        "local_now":
+            local_now.isoformat(),
+
+        "data_readiness":
+            readiness,
+
+        "whoop_freshness":
+            whoop_freshness,
+
+        "whoop":
+            whoop,
+
+        "body_composition":
+            body_summary,
+
+        "activity":
+            activity,
+
+        "notes":
+            notes,
+    }
+
+
+def _current_whoop_recommendation(
+    metric_date
+):
+    run = latest_automation_run()
+
+    if not run:
         return None
-    return run.get("deterministic_recommendation")
 
-def _metric_reason(name, baselines):
-    r=baselines.get(name)
-    if not r: return None
-    current=r.get("current_value"); b30=r.get("baseline_30"); pct=r.get("pct_vs_30")
-    if current is None or b30 is None or pct is None: return None
-    if name=="recovery_score": return f"Recovery is {current:.0f}, {pct:+.1f}% versus the 30-day personal baseline."
-    if name=="hrv_rmssd_milli": return f"HRV is {current:.1f} ms, {pct:+.1f}% versus the 30-day personal baseline."
-    if name=="resting_heart_rate": return f"Resting heart rate is {current:.0f} bpm, {pct:+.1f}% versus the 30-day personal baseline."
-    if name=="sleep_duration_hours": return f"Sleep duration is {current:.2f} hours, {pct:+.1f}% versus the 30-day personal baseline."
+    if (
+        str(
+            run.get("metric_date")
+        )
+        != metric_date.isoformat()
+    ):
+        return None
+
+    return run.get(
+        "deterministic_recommendation"
+    )
+
+
+def _metric_reason(
+    metric_name,
+    baselines
+):
+    row = baselines.get(
+        metric_name
+    )
+
+    if not row:
+        return None
+
+    current = row.get(
+        "current_value"
+    )
+
+    baseline_30 = row.get(
+        "baseline_30"
+    )
+
+    pct = row.get(
+        "pct_vs_30"
+    )
+
+    if (
+        current is None
+        or baseline_30 is None
+        or pct is None
+    ):
+        return None
+
+    if metric_name == "recovery_score":
+        return (
+            f"Recovery is {current:.0f}, "
+            f"{pct:+.1f}% versus the "
+            "30-day personal baseline."
+        )
+
+    if metric_name == "hrv_rmssd_milli":
+        return (
+            f"HRV is {current:.1f} ms, "
+            f"{pct:+.1f}% versus the "
+            "30-day personal baseline."
+        )
+
+    if metric_name == "resting_heart_rate":
+        return (
+            f"Resting heart rate is "
+            f"{current:.0f} bpm, "
+            f"{pct:+.1f}% versus the "
+            "30-day personal baseline."
+        )
+
+    if metric_name == "sleep_duration_hours":
+        return (
+            f"Sleep duration is "
+            f"{current:.2f} hours, "
+            f"{pct:+.1f}% versus the "
+            "30-day personal baseline."
+        )
+
     return None
 
+
+def _body_metric_trend(
+    metric_name,
+    metric_payload
+):
+    if (
+        not metric_payload
+        or not metric_payload.get(
+            "available"
+        )
+    ):
+        return {
+            "metric":
+                metric_name,
+
+            "status":
+                "unavailable",
+
+            "usable_windows":
+                [],
+
+            "reason":
+                (
+                    metric_payload.get(
+                        "reason"
+                    )
+                    if metric_payload
+                    else "No data available."
+                ),
+        }
+
+    usable = []
+
+    for window in (
+        7,
+        14,
+        30,
+        90,
+    ):
+
+        window_data = (
+            metric_payload
+            .get(
+                "windows",
+                {}
+            )
+            .get(
+                str(window),
+                {}
+            )
+        )
+
+        observations = int(
+            window_data.get(
+                "observations"
+            )
+            or 0
+        )
+
+        minimum = (
+            BODY_TREND_MIN_OBSERVATIONS[
+                window
+            ]
+        )
+
+        if observations >= minimum:
+
+            usable.append(
+                {
+                    "window_days":
+                        window,
+
+                    "observations":
+                        observations,
+
+                    "minimum_required":
+                        minimum,
+
+                    "baseline":
+                        window_data.get(
+                            "baseline"
+                        ),
+
+                    "pct_vs_baseline":
+                        window_data.get(
+                            "pct_vs_baseline"
+                        ),
+                }
+            )
+
+    return {
+        "metric":
+            metric_name,
+
+        "status":
+            (
+                "usable"
+                if usable
+                else "insufficient_history"
+            ),
+
+        "current_value":
+            metric_payload.get(
+                "current_value"
+            ),
+
+        "unit":
+            metric_payload.get(
+                "unit"
+            ),
+
+        "observed_at":
+            metric_payload.get(
+                "observed_at"
+            ),
+
+        "usable_windows":
+            usable,
+
+        "reason":
+            (
+                None
+                if usable
+                else
+                "Hume history does not yet "
+                "meet the minimum observation "
+                "threshold for trend interpretation."
+            ),
+    }
+
+
+def _activity_trend_summary(
+    activity_trends
+):
+    baselines = (
+        activity_trends.get(
+            "baselines"
+        )
+        or {}
+    )
+
+    b7 = baselines.get(
+        "7"
+    ) or {}
+
+    b30 = baselines.get(
+        "30"
+    ) or {}
+
+    b90 = baselines.get(
+        "90"
+    ) or {}
+
+    steps_7 = b7.get(
+        "steps"
+    )
+
+    steps_30 = b30.get(
+        "steps"
+    )
+
+    steps_90 = b90.get(
+        "steps"
+    )
+
+    def pct(a, b):
+
+        if (
+            a is None
+            or b in (
+                None,
+                0,
+            )
+        ):
+            return None
+
+        return (
+            (a - b)
+            / b
+        ) * 100.0
+
+    vs_30 = pct(
+        steps_7,
+        steps_30
+    )
+
+    vs_90 = pct(
+        steps_7,
+        steps_90
+    )
+
+    return {
+        "average_steps_7d":
+            steps_7,
+
+        "average_steps_30d":
+            steps_30,
+
+        "average_steps_90d":
+            steps_90,
+
+        "seven_day_vs_30_day_pct":
+            (
+                round(
+                    vs_30,
+                    1
+                )
+                if vs_30 is not None
+                else None
+            ),
+
+        "seven_day_vs_90_day_pct":
+            (
+                round(
+                    vs_90,
+                    1
+                )
+                if vs_90 is not None
+                else None
+            ),
+
+        "coverage_7_percentage":
+            b7.get(
+                "coverage_percentage"
+            ),
+
+        "coverage_30_percentage":
+            b30.get(
+                "coverage_percentage"
+            ),
+
+        "coverage_90_percentage":
+            b90.get(
+                "coverage_percentage"
+            ),
+    }
+
+
 def combined_deterministic_coaching():
-    snapshot=combined_daily_snapshot()
-    coaching_date=datetime.fromisoformat(snapshot["coaching_date"]).date()
 
-    if not snapshot["data_readiness"]["combined_coaching_ready"]:
-        return {"status":"not_ready","coaching_date":snapshot["coaching_date"],
-                "data_readiness":snapshot["data_readiness"],
-                "message":"Current WHOOP, body-composition, and activity data are not all ready for combined coaching.",
-                "notes":snapshot.get("notes",[])}
+    snapshot = (
+        combined_daily_snapshot()
+    )
 
-    baselines=_today_baselines(coaching_date)
-    whoop_rec=_current_whoop_recommendation(coaching_date)
+    coaching_date = (
+        datetime.fromisoformat(
+            snapshot[
+                "coaching_date"
+            ]
+        ).date()
+    )
+
+    if not snapshot[
+        "data_readiness"
+    ][
+        "combined_coaching_ready"
+    ]:
+
+        return {
+            "status":
+                "not_ready",
+
+            "coaching_date":
+                snapshot[
+                    "coaching_date"
+                ],
+
+            "data_readiness":
+                snapshot[
+                    "data_readiness"
+                ],
+
+            "message":
+                "Current WHOOP physiology "
+                "is not ready for coaching.",
+
+            "notes":
+                snapshot.get(
+                    "notes",
+                    []
+                ),
+        }
+
+    baselines = _today_baselines(
+        coaching_date
+    )
+
+    whoop_rec = (
+        _current_whoop_recommendation(
+            coaching_date
+        )
+    )
 
     if whoop_rec:
-        training=whoop_rec.get("training_recommendation","Normal")
-        overall=whoop_rec.get("overall_status","Current WHOOP readiness available")
-        confidence=whoop_rec.get("confidence","moderate")
+
+        training = (
+            whoop_rec.get(
+                "training_recommendation",
+                "Normal"
+            )
+        )
+
+        overall = (
+            whoop_rec.get(
+                "overall_status",
+                "Current WHOOP readiness available"
+            )
+        )
+
+        confidence = (
+            whoop_rec.get(
+                "confidence",
+                "moderate"
+            )
+        )
+
     else:
-        training="Normal"; overall="WHOOP recommendation not yet regenerated today"; confidence="low"
 
-    reasons=[]
-    for m in ("recovery_score","hrv_rmssd_milli","resting_heart_rate","sleep_duration_hours"):
-        x=_metric_reason(m,baselines)
-        if x: reasons.append(x)
+        training = "Normal"
 
-    activity=snapshot.get("activity") or {}
-    steps=int(activity.get("steps") or 0)
-    remaining=max(0,DAILY_STEP_TARGET-steps)
-    progress=(steps/DAILY_STEP_TARGET*100.0) if DAILY_STEP_TARGET>0 else None
-    hour=datetime.fromisoformat(snapshot["local_now"]).hour
+        overall = (
+            "WHOOP recommendation "
+            "not yet regenerated today"
+        )
 
-    if remaining==0:
-        activity_status="target_met"
-        activity_action="Daily step target is already met; additional movement can be based on preference and recovery."
-    elif hour<12:
-        activity_status="in_progress"
-        activity_action=f"Build movement through the day; about {remaining:,} steps remain to the configured daily target."
-    elif hour<18:
-        activity_status="below_target_so_far"
-        activity_action=f"Add purposeful walking this afternoon; about {remaining:,} steps remain to the configured daily target."
+        confidence = "low"
+
+    physiology_reasons = []
+
+    for metric in (
+        "recovery_score",
+        "hrv_rmssd_milli",
+        "resting_heart_rate",
+        "sleep_duration_hours",
+    ):
+
+        reason = _metric_reason(
+            metric,
+            baselines
+        )
+
+        if reason:
+            physiology_reasons.append(
+                reason
+            )
+
+    trends = (
+        apple_health_trends()
+    )
+
+    activity_trends = (
+        trends.get(
+            "activity"
+        )
+        or {}
+    )
+
+    body_trends = (
+        trends.get(
+            "body_composition"
+        )
+        or {}
+    )
+
+    activity_trend = (
+        _activity_trend_summary(
+            activity_trends
+        )
+    )
+
+    weight_trend = (
+        _body_metric_trend(
+            "weight",
+            body_trends.get(
+                "weight"
+            ),
+        )
+    )
+
+    body_fat_trend = (
+        _body_metric_trend(
+            "body_fat_percentage",
+            body_trends.get(
+                "body_fat_percentage"
+            ),
+        )
+    )
+
+    lean_mass_trend = (
+        _body_metric_trend(
+            "lean_body_mass",
+            body_trends.get(
+                "lean_body_mass"
+            ),
+        )
+    )
+
+    activity = (
+        snapshot.get(
+            "activity"
+        )
+        or {}
+    )
+
+    steps_value = activity.get(
+        "steps"
+    )
+
+    steps = int(
+        steps_value or 0
+    )
+
+    local_now = (
+        datetime.fromisoformat(
+            snapshot[
+                "local_now"
+            ]
+        )
+    )
+
+    hour = local_now.hour
+
+    if steps_value is None:
+
+        activity_status = (
+            "not_yet_available"
+        )
+
+        remaining = (
+            DAILY_STEP_TARGET
+        )
+
+        progress = None
+
+        activity_action = (
+            "Today's activity has not "
+            "populated yet. Use the historical "
+            "activity trend rather than "
+            "interpreting the current partial day."
+        )
+
     else:
-        activity_status="below_target_late_day"
-        activity_action=f"Activity is below the configured daily target; about {remaining:,} steps remain. Use an easy walk if it fits recovery and schedule."
 
-    body=snapshot.get("body_composition") or {}
-    body_context=[]
-    w=body.get("weight"); bf=body.get("body_fat_percentage"); lm=body.get("lean_body_mass")
-    if w and w.get("coaching_eligible"):
-        body_context.append(f"Current Hume weight is {w['lb']:.1f} lb.")
-    if bf and bf.get("coaching_eligible"):
-        body_context.append(f"Current Hume body fat is {bf['value']:.1f}%.")
-    if lm and not lm.get("coaching_eligible"):
-        body_context.append("Lean body mass is excluded from current coaching because the latest sample is not a current preferred-source measurement.")
+        remaining = max(
+            0,
+            DAILY_STEP_TARGET
+            - steps
+        )
 
-    actions=[]
+        progress = (
+            (
+                steps
+                / DAILY_STEP_TARGET
+            )
+            * 100.0
+        )
+
+        if remaining == 0:
+
+            activity_status = (
+                "target_met"
+            )
+
+            activity_action = (
+                "Daily step target is already "
+                "met; additional movement can "
+                "be based on preference and recovery."
+            )
+
+        elif hour < 12:
+
+            activity_status = (
+                "in_progress"
+            )
+
+            activity_action = (
+                f"Build movement through the day; "
+                f"about {remaining:,} steps remain "
+                "to the configured daily target."
+            )
+
+        elif hour < 18:
+
+            activity_status = (
+                "below_target_so_far"
+            )
+
+            activity_action = (
+                f"Add purposeful walking this "
+                f"afternoon; about {remaining:,} "
+                "steps remain to the configured "
+                "daily target."
+            )
+
+        else:
+
+            activity_status = (
+                "below_target_late_day"
+            )
+
+            activity_action = (
+                f"Activity is below the configured "
+                f"daily target; about {remaining:,} "
+                "steps remain. Use an easy walk "
+                "if it fits recovery and schedule."
+            )
+
+    body = (
+        snapshot.get(
+            "body_composition"
+        )
+        or {}
+    )
+
+    body_context = []
+
+    weight = body.get(
+        "weight"
+    )
+
+    body_fat = body.get(
+        "body_fat_percentage"
+    )
+
+    lean_mass = body.get(
+        "lean_body_mass"
+    )
+
+    if weight:
+
+        body_context.append(
+            f"Most recent Hume weight "
+            f"is {weight['lb']:.1f} lb."
+        )
+
+    if body_fat:
+
+        body_context.append(
+            f"Most recent Hume body fat "
+            f"is {body_fat['value']:.1f}%."
+        )
+
+    if (
+        lean_mass
+        and not lean_mass.get(
+            "coaching_eligible"
+        )
+    ):
+
+        body_context.append(
+            "Lean body mass is excluded "
+            "from current coaching because "
+            "the latest measurement is not "
+            "from the preferred current source."
+        )
+
+    trend_observations = []
+
+    activity_change = (
+        activity_trend.get(
+            "seven_day_vs_30_day_pct"
+        )
+    )
+
+    if activity_change is not None:
+
+        trend_observations.append(
+            f"7-day average steps are "
+            f"{activity_change:+.1f}% versus "
+            "the 30-day activity baseline."
+        )
+
+    if weight_trend[
+        "status"
+    ] == "usable":
+
+        best = (
+            weight_trend[
+                "usable_windows"
+            ][0]
+        )
+
+        trend_observations.append(
+            f"Hume weight has sufficient "
+            f"{best['window_days']}-day "
+            f"observation coverage; current "
+            f"value is {best['pct_vs_baseline']:+.1f}% "
+            "versus that source-consistent baseline."
+        )
+
+    else:
+
+        trend_observations.append(
+            "Hume weight history is not "
+            "yet deep enough for a robust "
+            "longer-term trend."
+        )
+
+    if body_fat_trend[
+        "status"
+    ] == "usable":
+
+        best = (
+            body_fat_trend[
+                "usable_windows"
+            ][0]
+        )
+
+        trend_observations.append(
+            f"Hume body fat has sufficient "
+            f"{best['window_days']}-day "
+            f"observation coverage; current "
+            f"value is {best['pct_vs_baseline']:+.1f}% "
+            "versus that source-consistent baseline."
+        )
+
+    else:
+
+        trend_observations.append(
+            "Hume body-fat history is not "
+            "yet deep enough for a robust "
+            "longer-term trend."
+        )
+
+    actions = []
+
     if whoop_rec:
-        existing=whoop_rec.get("highest_impact_actions") or []
-        if existing: actions.append(existing[0])
-    actions.append(activity_action)
 
-    return {"status":"ok","coaching_date":snapshot["coaching_date"],"overall_status":overall,
-            "training_recommendation":training,"confidence":confidence,
-            "physiology_reasons":reasons[:4],
-            "activity_guidance":{"steps_so_far":steps,"configured_step_target":DAILY_STEP_TARGET,
-            "step_progress_percentage":round(progress,1) if progress is not None else None,
-            "steps_remaining":remaining,"status":activity_status,
-            "active_energy_kcal":activity.get("active_energy_kcal"),
-            "resting_energy_kcal":activity.get("resting_energy_kcal"),
-            "walking_running_distance_km":activity.get("walking_running_distance_km"),
-            "actions":[activity_action]},
-            "body_composition_context":body_context,
-            "highest_impact_actions":actions[:3],
-            "data_readiness":snapshot["data_readiness"],
-            "safety_note":"Training guidance is based on personal wearable trends and is not a medical diagnosis. Symptoms, illness, injury, medication changes, or clinician advice should override wearable-based recommendations.",
-            "interpretation_note":"WHOOP remains authoritative for readiness/training. Hume and Apple Health add body-composition and activity context. Single-day weight/body-fat measurements are context only until historical trend baselines are built."}
+        existing = (
+            whoop_rec.get(
+                "highest_impact_actions"
+            )
+            or []
+        )
+
+        if existing:
+            actions.append(
+                existing[0]
+            )
+
+    actions.append(
+        activity_action
+    )
+
+    return {
+        "status":
+            "ok",
+
+        "coaching_date":
+            snapshot[
+                "coaching_date"
+            ],
+
+        "overall_status":
+            overall,
+
+        "training_recommendation":
+            training,
+
+        "confidence":
+            confidence,
+
+        "physiology_reasons":
+            physiology_reasons[:4],
+
+        "activity_guidance": {
+            "steps_so_far":
+                steps_value,
+
+            "configured_step_target":
+                DAILY_STEP_TARGET,
+
+            "step_progress_percentage":
+                (
+                    round(
+                        progress,
+                        1
+                    )
+                    if progress is not None
+                    else None
+                ),
+
+            "steps_remaining":
+                remaining,
+
+            "status":
+                activity_status,
+
+            "active_energy_kcal":
+                activity.get(
+                    "active_energy_kcal"
+                ),
+
+            "resting_energy_kcal":
+                activity.get(
+                    "resting_energy_kcal"
+                ),
+
+            "walking_running_distance_km":
+                activity.get(
+                    "walking_running_distance_km"
+                ),
+
+            "action":
+                activity_action,
+        },
+
+        "trend_context": {
+            "activity":
+                activity_trend,
+
+            "weight":
+                weight_trend,
+
+            "body_fat_percentage":
+                body_fat_trend,
+
+            "lean_body_mass":
+                lean_mass_trend,
+
+            "observations":
+                trend_observations,
+
+            "body_trend_minimum_observations":
+                BODY_TREND_MIN_OBSERVATIONS,
+        },
+
+        "body_composition_context":
+            body_context,
+
+        "highest_impact_actions":
+            actions[:3],
+
+        "data_readiness":
+            snapshot[
+                "data_readiness"
+            ],
+
+        "safety_note":
+            (
+                "Training guidance is based "
+                "on personal wearable trends "
+                "and is not a medical diagnosis. "
+                "Symptoms, illness, injury, "
+                "medication changes, or clinician "
+                "advice should override wearable "
+                "recommendations."
+            ),
+
+        "interpretation_note":
+            (
+                "WHOOP remains authoritative "
+                "for readiness and training. "
+                "Apple Health activity trends "
+                "are usable when coverage is "
+                "sufficient. Hume weight/body-fat "
+                "trend language is allowed only "
+                "when source-consistent observation "
+                "thresholds are met."
+            ),
+    }
