@@ -1,5 +1,6 @@
 import secrets
 from fastapi import FastAPI, Request, HTTPException, Form
+from combined_coaching import combined_daily_snapshot
 from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 from config import SESSION_SECRET, ADMIN_PASSWORD, validate_config
@@ -59,3 +60,8 @@ async def apple_health_latest(request: Request):
         "status": "ok",
         **latest_apple_health()
     }
+    
+@app.get("/coaching/combined/today")
+async def combined_today(request: Request):
+    require_admin(request)
+    return combined_daily_snapshot()
