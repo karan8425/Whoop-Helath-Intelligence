@@ -31,35 +31,49 @@ def init_apple_health_tables():
             resting_energy_kcal DOUBLE PRECISION, walking_running_distance_km DOUBLE PRECISION,
             raw_json JSONB NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
 
+def _upsert_body(cur, samples):
+    for s in samples:
+        cur.execute("""INSERT INTO apple_health_body_samples
+        (sample_id,metric_name,value,unit,observed_at,source_name,source_bundle_id,raw_json)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(sample_id) DO UPDATE SET
+        metric_name=EXCLUDED.metric_name,value=EXCLUDED.value,unit=EXCLUDED.unit,
+        observed_at=EXCLUDED.observed_at,source_name=EXCLUDED.source_name,
+        source_bundle_id=EXCLUDED.source_bundle_id,raw_json=EXCLUDED.raw_json,received_at=NOW()""",
+        (s.get("sample_id"),s.get("metric_name"),s.get("value"),s.get("unit"),
+         s.get("observed_at"),s.get("source_name"),s.get("source_bundle_id"),Jsonb(s)))
+
+def _upsert_activity(cur, activity):
+    cur.execute("""INSERT INTO apple_health_daily_activity
+    (activity_date,steps,active_energy_kcal,resting_energy_kcal,walking_running_distance_km,raw_json,received_at)
+    VALUES(%s,%s,%s,%s,%s,%s,NOW())
+    ON CONFLICT(activity_date) DO UPDATE SET
+    steps=EXCLUDED.steps,active_energy_kcal=EXCLUDED.active_energy_kcal,
+    resting_energy_kcal=EXCLUDED.resting_energy_kcal,
+    walking_running_distance_km=EXCLUDED.walking_running_distance_km,
+    raw_json=EXCLUDED.raw_json,received_at=NOW()""",
+    (activity.get("activity_date"),activity.get("steps"),activity.get("active_energy_kcal"),
+     activity.get("resting_energy_kcal"),activity.get("walking_running_distance_km"),Jsonb(activity)))
+
 def ingest_healthkit_payload(payload:dict):
     init_apple_health_tables()
     body=payload.get("body_samples") or []
-    activity=payload.get("daily_activity")
+    current_activity=payload.get("daily_activity")
+    history=payload.get("daily_activity_history") or []
+
     with get_conn() as conn:
         with conn.cursor() as cur:
-            for s in body:
-                cur.execute("""INSERT INTO apple_health_body_samples
-                (sample_id,metric_name,value,unit,observed_at,source_name,source_bundle_id,raw_json)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT(sample_id) DO UPDATE SET
-                metric_name=EXCLUDED.metric_name,value=EXCLUDED.value,unit=EXCLUDED.unit,
-                observed_at=EXCLUDED.observed_at,source_name=EXCLUDED.source_name,
-                source_bundle_id=EXCLUDED.source_bundle_id,raw_json=EXCLUDED.raw_json,received_at=NOW()""",
-                (s.get("sample_id"),s.get("metric_name"),s.get("value"),s.get("unit"),
-                 s.get("observed_at"),s.get("source_name"),s.get("source_bundle_id"),Jsonb(s)))
-            if activity:
-                cur.execute("""INSERT INTO apple_health_daily_activity
-                (activity_date,steps,active_energy_kcal,resting_energy_kcal,walking_running_distance_km,raw_json,received_at)
-                VALUES(%s,%s,%s,%s,%s,%s,NOW())
-                ON CONFLICT(activity_date) DO UPDATE SET
-                steps=EXCLUDED.steps,active_energy_kcal=EXCLUDED.active_energy_kcal,
-                resting_energy_kcal=EXCLUDED.resting_energy_kcal,
-                walking_running_distance_km=EXCLUDED.walking_running_distance_km,
-                raw_json=EXCLUDED.raw_json,received_at=NOW()""",
-                (activity.get("activity_date"),activity.get("steps"),activity.get("active_energy_kcal"),
-                 activity.get("resting_energy_kcal"),activity.get("walking_running_distance_km"),Jsonb(activity)))
-    return {"status":"ok","body_samples_received":len(body),
-            "activity_date":activity.get("activity_date") if activity else None}
+            _upsert_body(cur,body)
+            if current_activity:
+                _upsert_activity(cur,current_activity)
+            for activity in history:
+                _upsert_activity(cur,activity)
+
+    return {
+        "status":"ok",
+        "body_samples_received":len(body),
+        "activity_days_received":len(history) + (1 if current_activity else 0)
+    }
 
 def _preferred(name,bundle):
     return bundle in PREFERRED_BODY_SOURCE_BUNDLE_IDS or (name or "").strip().lower() in PREFERRED_BODY_SOURCE_NAMES
@@ -105,3 +119,31 @@ def latest_apple_health():
                 "classification":"current" if age==0 else "stale",
                 "coaching_eligible":age==0,"age_days":age}
     return result
+
+def apple_health_history_summary():
+    init_apple_health_tables()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT metric_name,COUNT(*) AS samples,
+                           MIN(observed_at) AS oldest,MAX(observed_at) AS newest,
+                           COUNT(*) FILTER (WHERE source_bundle_id='com.elink.fittrackhealth') AS hume_samples
+                           FROM apple_health_body_samples
+                           GROUP BY metric_name ORDER BY metric_name""")
+            body=cur.fetchall()
+            cur.execute("""SELECT COUNT(*) AS days,MIN(activity_date) AS oldest,
+                           MAX(activity_date) AS newest,
+                           COUNT(*) FILTER (WHERE steps IS NOT NULL) AS step_days
+                           FROM apple_health_daily_activity""")
+            activity=cur.fetchone()
+    return {
+        "body_metrics":[{
+            **r,
+            "oldest":r["oldest"].isoformat() if r["oldest"] else None,
+            "newest":r["newest"].isoformat() if r["newest"] else None,
+        } for r in body],
+        "activity":{
+            **activity,
+            "oldest":activity["oldest"].isoformat() if activity["oldest"] else None,
+            "newest":activity["newest"].isoformat() if activity["newest"] else None,
+        }
+    }
