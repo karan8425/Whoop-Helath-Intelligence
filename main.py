@@ -15,6 +15,7 @@ from automation_status import init_automation_tables, latest_stored_intelligence
 from debug_whoop_dates import latest_whoop_date_diagnostic
 from healthkit_ingest import (init_apple_health_tables,require_ingest_key,ingest_healthkit_payload,latest_apple_health,apple_health_history_summary)
 from ai_intelligence import validate_combined_ai_connection
+from apple_health_trends import apple_health_trends
 
 validate_config()
 app=FastAPI(title="WHOOP Health Intelligence",version="0.5.2")
@@ -96,3 +97,8 @@ async def apple_health_history_summary_route(request: Request):
         "status": "ok",
         **apple_health_history_summary()
     }
+
+@app.get("/apple-health/trends")
+async def apple_health_trends_route(request: Request):
+    require_admin(request)
+    return apple_health_trends()
