@@ -14,6 +14,7 @@ from freshness import freshness_status
 from automation_status import init_automation_tables, latest_stored_intelligence, latest_automation_run, automation_summary
 from debug_whoop_dates import latest_whoop_date_diagnostic
 from healthkit_ingest import init_apple_health_tables, require_ingest_key, ingest_healthkit_payload, latest_apple_health
+from ai_intelligence import validate_combined_ai_connection
 
 validate_config()
 app=FastAPI(title="WHOOP Health Intelligence",version="0.5.2")
@@ -74,3 +75,16 @@ async def combined_today(request: Request):
 async def combined_recommendation(request: Request):
     require_admin(request)
     return combined_deterministic_coaching()
+
+@app.get("/coaching/combined/ai")
+async def combined_ai(request: Request):
+    require_admin(request)
+
+    try:
+        return validate_combined_ai_connection()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Combined AI coaching failed: {exc}"
+        ) from exc
