@@ -198,3 +198,8 @@ async def mobile_combined_coaching(request: Request):
             detail=f"Combined AI coaching failed: {exc}"
         ) from exc
 
+@app.post("/goals/backfill-active-start")
+async def goals_backfill_active_start(request: Request):
+    require_admin(request)
+
+    return backfill_active_goal_start_snapshot()
