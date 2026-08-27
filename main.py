@@ -84,6 +84,11 @@ from daily_health_intelligence_store import (
     get_daily_health_intelligence,
 )
 
+from todays_plan import (
+    build_todays_plan,
+)
+
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -92,7 +97,7 @@ validate_config()
 
 app = FastAPI(
     title="WHOOP Health Intelligence",
-    version="0.5.4",
+    version="0.5.5",
 )
 
 app.add_middleware(
@@ -190,10 +195,22 @@ async def home(
             </h1>
 
             <p>
-                <b>Phase 5D.2</b>
+                <b>Phase 5D.3</b>
             </p>
 
             <ul>
+
+                <li>
+                    <a href="/health-intelligence/today">
+                        Daily Health Intelligence
+                    </a>
+                </li>
+
+                <li>
+                    <a href="/todays-plan">
+                        Today's Deterministic Plan
+                    </a>
+                </li>
 
                 <li>
                     <a href="/apple-health/latest">
@@ -281,9 +298,11 @@ async def health():
 
     return {
         "status": "ok",
-        "phase": "5D.2",
-        "version": "0.5.4",
+        "phase": "5D.3",
+        "version": "0.5.5",
         "daily_coaching_cache": True,
+        "daily_health_intelligence": True,
+        "todays_plan_api": True,
     }
 
 
@@ -481,10 +500,6 @@ async def combined_ai(
 
 # ============================================================
 # MOBILE COACHING API
-#
-# IMPORTANT:
-#
-# The iPhone now enters through get_daily_coaching().
 #
 # Repeated requests with unchanged meaningful inputs return
 # the stored daily snapshot instead of calling the LLM again.
@@ -707,6 +722,7 @@ async def goals_progress(
         goal_progress()
     )
 
+
 # ============================================================
 # DAILY HEALTH INTELLIGENCE
 # ============================================================
@@ -772,6 +788,79 @@ async def mobile_health_intelligence_today(
             status_code=500,
             detail=(
                 "Daily Health Intelligence failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# TODAY'S DETERMINISTIC PLAN
+#
+# This endpoint exposes the authoritative deterministic plan.
+#
+# It does NOT call OpenAI.
+# ============================================================
+
+@app.get(
+    "/todays-plan"
+)
+async def todays_plan(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    try:
+
+        return (
+            build_todays_plan()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Today's deterministic plan failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# MOBILE TODAY'S DETERMINISTIC PLAN
+#
+# Used by the iPhone for detailed Training, Nutrition,
+# Hydration and Sleep drill-down screens.
+#
+# This endpoint does NOT call OpenAI.
+# ============================================================
+
+@app.get(
+    "/api/v1/todays-plan"
+)
+async def mobile_todays_plan(
+    request: Request,
+):
+
+    require_ingest_key(
+        request
+    )
+
+    try:
+
+        return (
+            build_todays_plan()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Today's deterministic plan failed: "
                 f"{exc}"
             ),
         ) from exc
