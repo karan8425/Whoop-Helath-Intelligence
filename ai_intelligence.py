@@ -41,40 +41,52 @@ The application combines:
 3. Apple Health activity data
 4. A persistent personal fitness goal and phase
 5. A deterministic goal-progress engine
+6. Tonal strength-training history, Strength Scores and muscle-training priorities
 
-A deterministic engine has already decided the training recommendation.
-You MUST NOT change that training recommendation.
+WHOOP remains authoritative for recovery, readiness and training intensity.
+
+Tonal determines strength-training context such as:
+- what muscle groups need direct training
+- recent direct versus supporting muscle exposure
+- strength-balance context
+- the preferred strength-session focus
 
 Rules:
-1. Treat the deterministic training recommendation as authoritative.
-2. WHOOP is authoritative for recovery, HRV, resting heart rate, sleep, strain and readiness.
-3. Hume and Apple Health add body-composition and activity context.
-4. The active fitness phase and goal-progress engine provide the objective context for whether
-   current behaviors and body-composition data are moving toward the configured goal.
-5. Use only the supplied data.
-6. Do not infer body-composition trends from a single measurement.
-7. Do not claim weight loss, fat loss, muscle gain, or muscle loss unless the supplied trend data
-   explicitly supports that statement.
-8. If the goal-progress status is insufficient_data, building baseline, or otherwise uncertain,
-   explicitly preserve that uncertainty. Do not call the phase on-track or off-track.
-9. If lean body mass is excluded or stale, do not use it to make conclusions.
-10. If strength or nutrition tracking is marked not_connected, do not claim adherence to those goals.
-11. A configured protein target is a target only. It is not evidence of actual protein intake.
-12. Personal baselines take priority over population norms.
-13. Distinguish observations from hypotheses and never imply causation.
-14. Keep the briefing concise and decision-oriented.
-15. Do not diagnose medical conditions.
-16. Return JSON only with exactly the requested keys.
+1. When WHOOP readiness is available, the deterministic WHOOP training recommendation is authoritative.
+2. You MUST NOT change the deterministic WHOOP training recommendation.
+3. When WHOOP readiness is unavailable, you MUST NOT invent a training recommendation or intensity.
+4. When WHOOP is unavailable, training_recommendation MUST remain null.
+5. Tonal may still provide a strength-training focus while WHOOP is pending.
+6. Do not describe a Tonal strength focus as approval to train at a particular intensity when WHOOP is pending.
+7. WHOOP is authoritative for recovery, HRV, resting heart rate, sleep, strain and readiness.
+8. Hume and Apple Health add body-composition and activity context.
+9. The active fitness phase and goal-progress engine provide objective context for progress.
+10. Use only the supplied data.
+11. Do not infer body-composition trends from a single measurement.
+12. Do not claim weight loss, fat loss, muscle gain, or muscle loss unless supplied trend data explicitly supports it.
+13. If goal progress is insufficient_data, building baseline, or otherwise uncertain, preserve that uncertainty.
+14. If lean body mass is excluded or stale, do not use it to make conclusions.
+15. If nutrition tracking is marked not_connected, do not claim adherence.
+16. A configured protein target is a target only, not evidence of actual intake.
+17. Direct Tonal muscle exposure and secondary/supporting exposure are different.
+18. Secondary Tonal exposure must not be described as equivalent to direct weekly training frequency.
+19. Personal baselines take priority over population norms.
+20. Distinguish observations from hypotheses and never imply causation.
+21. Keep the briefing concise and decision-oriented.
+22. Do not diagnose medical conditions.
+23. Return JSON only with exactly the requested keys.
 """
 
 
 def _client():
+
     api_key = os.getenv(
         "OPENAI_API_KEY",
         ""
     )
 
     if not api_key:
+
         raise RuntimeError(
             "OPENAI_API_KEY is not configured in Render. "
             "Add it as a secret environment variable."
@@ -86,13 +98,17 @@ def _client():
 
 
 def _model():
+
     return os.getenv(
         "OPENAI_MODEL",
         "gpt-5.6-luna"
     )
 
 
-def _strip_json_fence(text):
+def _strip_json_fence(
+    text
+):
+
     text = text.strip()
 
     if text.startswith("```"):
@@ -117,8 +133,14 @@ def _strip_json_fence(text):
 # ============================================================
 
 def build_ai_payload():
-    recommendation = daily_recommendation()
-    signals = latest_signals()
+
+    recommendation = (
+        daily_recommendation()
+    )
+
+    signals = (
+        latest_signals()
+    )
 
     return {
         "metric_date":
@@ -243,7 +265,10 @@ def build_ai_payload():
 
 
 def generate_daily_ai_brief():
-    payload = build_ai_payload()
+
+    payload = (
+        build_ai_payload()
+    )
 
     fixed_training = (
         payload[
@@ -285,24 +310,32 @@ DATA:
 {json.dumps(payload, default=str)}
 """
 
-    client = _client()
-
-    response = client.responses.create(
-        model=_model(),
-        instructions=SYSTEM_PROMPT,
-        input=user_prompt,
+    client = (
+        _client()
     )
 
-    raw = _strip_json_fence(
-        response.output_text
+    response = (
+        client.responses.create(
+            model=_model(),
+            instructions=SYSTEM_PROMPT,
+            input=user_prompt,
+        )
+    )
+
+    raw = (
+        _strip_json_fence(
+            response.output_text
+        )
     )
 
     try:
+
         parsed = json.loads(
             raw
         )
 
     except json.JSONDecodeError as exc:
+
         raise RuntimeError(
             "OpenAI returned output "
             f"that was not valid JSON: {raw[:500]}"
@@ -340,6 +373,7 @@ DATA:
     )
 
     if missing:
+
         raise RuntimeError(
             "OpenAI JSON is missing required fields: "
             + ", ".join(
@@ -362,7 +396,10 @@ DATA:
 
 
 def validate_ai_connection():
-    result = generate_daily_ai_brief()
+
+    result = (
+        generate_daily_ai_brief()
+    )
 
     checks = {
         "model_present":
@@ -439,11 +476,13 @@ def validate_ai_connection():
 
     return {
         "status":
-            "ok"
-            if all(
-                checks.values()
-            )
-            else "check_failed",
+            (
+                "ok"
+                if all(
+                    checks.values()
+                )
+                else "check_failed"
+            ),
 
         "checks":
             checks,
@@ -453,7 +492,7 @@ def validate_ai_connection():
 
 
 # ============================================================
-# GOAL-AWARE COMBINED AI BRIEF
+# GOAL + TONAL AWARE COMBINED AI BRIEF
 # ============================================================
 
 def build_combined_ai_payload():
@@ -462,18 +501,29 @@ def build_combined_ai_payload():
         combined_deterministic_coaching()
     )
 
-    if combined.get(
-        "status"
-    ) != "ok":
+    combined_status = (
+        combined.get(
+            "status"
+        )
+    )
+
+    if combined_status not in (
+        "ok",
+        "not_ready",
+    ):
 
         raise RuntimeError(
             "Combined deterministic coaching "
-            "is not ready: "
-            + combined.get(
-                "message",
-                "Unknown reason"
+            "returned unexpected status: "
+            + str(
+                combined_status
             )
         )
+
+    whoop_ready = (
+        combined_status
+        == "ok"
+    )
 
     progress = (
         goal_progress()
@@ -485,6 +535,7 @@ def build_combined_ai_payload():
         "ok",
         "no_active_goal",
     ):
+
         raise RuntimeError(
             "Goal progress engine returned "
             "an unexpected status: "
@@ -495,15 +546,32 @@ def build_combined_ai_payload():
             )
         )
 
+    tonal = (
+        combined.get(
+            "tonal_training"
+        )
+        or {}
+    )
+
     return {
         "coaching_date":
             combined.get(
                 "coaching_date"
             ),
 
+        "combined_status":
+            combined_status,
+
+        "whoop_ready":
+            whoop_ready,
+
         "deterministic_training_recommendation":
-            combined.get(
-                "training_recommendation"
+            (
+                combined.get(
+                    "training_recommendation"
+                )
+                if whoop_ready
+                else None
             ),
 
         "overall_status":
@@ -550,6 +618,67 @@ def build_combined_ai_payload():
             combined.get(
                 "interpretation_note"
             ),
+
+        "message":
+            combined.get(
+                "message"
+            ),
+
+        "notes":
+            combined.get(
+                "notes",
+                []
+            ),
+
+        "tonal_training": {
+            "status":
+                tonal.get(
+                    "status"
+                ),
+
+            "training_focus":
+                tonal.get(
+                    "training_focus"
+                ),
+
+            "recommended_session":
+                tonal.get(
+                    "recommended_session"
+                ),
+
+            "priority_muscles":
+                tonal.get(
+                    "priority_muscles",
+                    []
+                ),
+
+            "covered_muscles":
+                tonal.get(
+                    "covered_muscles",
+                    []
+                ),
+
+            "strength_scores":
+                tonal.get(
+                    "strength_scores"
+                ),
+
+            "strength_balance":
+                tonal.get(
+                    "strength_balance"
+                ),
+
+            "rationale":
+                tonal.get(
+                    "rationale",
+                    []
+                ),
+
+            "interpretation_note":
+                tonal.get(
+                    "interpretation_note"
+                ),
+        },
 
         "goal_progress": {
             "status":
@@ -621,15 +750,28 @@ def generate_combined_ai_brief():
         build_combined_ai_payload()
     )
 
+    whoop_ready = (
+        payload.get(
+            "whoop_ready"
+        )
+    )
+
     fixed_training = (
-        payload[
+        payload.get(
             "deterministic_training_recommendation"
-        ]
+        )
     )
 
     goal = (
         payload.get(
             "goal_progress"
+        )
+        or {}
+    )
+
+    tonal = (
+        payload.get(
+            "tonal_training"
         )
         or {}
     )
@@ -648,26 +790,72 @@ def generate_combined_ai_brief():
         or "unknown"
     )
 
+    tonal_focus = (
+        tonal.get(
+            "training_focus"
+        )
+    )
+
+    if whoop_ready:
+
+        training_instruction = f"""
+WHOOP readiness is available.
+
+The deterministic training recommendation MUST remain exactly:
+{fixed_training}
+
+You may explain how the Tonal strength focus should be performed
+within that readiness level.
+
+You MUST NOT change the training recommendation.
+"""
+
+        recommendation_schema = (
+            f'"{fixed_training}"'
+        )
+
+    else:
+
+        training_instruction = """
+WHOOP physiology is not ready for today's training recommendation.
+
+You MUST NOT invent or infer Push, Normal, Moderate,
+Active Recovery, Rest, or any other readiness/intensity category.
+
+The training_recommendation field MUST be null.
+
+You may still explain Tonal strength priorities and the preferred
+strength-session focus, but clearly distinguish that from WHOOP
+readiness or permission to train at a particular intensity.
+"""
+
+        recommendation_schema = (
+            "null"
+        )
+
     user_prompt = f"""
 Create today's combined health and fitness coaching brief.
 
-The training recommendation MUST remain exactly:
-{fixed_training}
+{training_instruction}
 
-The active fitness phase is:
+Active fitness phase:
 {phase}
 
-The deterministic goal-progress direction is:
+Deterministic goal-progress direction:
 {direction}
+
+Tonal strength-training focus:
+{tonal_focus}
 
 Return one JSON object with exactly these keys:
 
 {{
   "date": "YYYY-MM-DD",
   "headline": "short overall status",
-  "training_recommendation": "{fixed_training}",
+  "training_recommendation": {recommendation_schema},
+  "strength_focus": "Tonal strength-session focus or null",
   "today_summary": "2-4 concise sentences",
-  "training_focus": "one concise training instruction",
+  "training_focus": "one concise instruction that respects WHOOP readiness availability",
   "activity_priority": "one concise activity instruction",
   "body_composition_context": "one concise evidence-based statement",
   "goal_context": "one concise statement describing how today's recommendation supports the active goal",
@@ -682,32 +870,37 @@ Return one JSON object with exactly these keys:
 }}
 
 Important:
+- Return JSON only.
 - Do not add markdown.
 - Do not add any keys.
-- Do not change the training recommendation.
-- Explicitly connect today's recommendation to the active goal phase when a goal is configured.
-- The goal-progress engine is authoritative for the direction of goal progress.
+- If WHOOP readiness is available, do not change the deterministic training recommendation.
+- If WHOOP readiness is unavailable, training_recommendation MUST be null.
+- If WHOOP readiness is unavailable, do not imply that Tonal determines training intensity.
+- Tonal determines what muscle groups need training.
+- WHOOP determines readiness and intensity.
+- Direct Tonal muscle exposure is different from secondary/supporting exposure.
+- Secondary Tonal exposure must not be described as satisfying direct weekly frequency.
+- Explicitly connect today's guidance to the active goal phase when configured.
+- The goal-progress engine is authoritative for goal direction.
 - If goal direction is "insufficient_data", do NOT say the user is on-track or off-track.
-- If the phase is "lean_cut", prioritize preservation of training quality, reasonable activity consistency,
-  and body-fat progress. Do not recommend extra training volume merely to burn calories.
-- If the phase is "maintenance", prioritize consistency and stability.
-- If the phase is "lean_bulk", prioritize progressive resistance training and controlled progress rather
-  than maximizing calorie expenditure.
-- A protein target is only a configured target. If protein status is "not_connected", do not claim actual
-  protein intake or adherence.
-- A strength-session target is only a configured target. If strength status is "not_connected", do not claim
-  that the target has or has not been achieved.
+- If the phase is "lean_cut", prioritize preservation of training quality,
+  reasonable activity consistency and body-fat progress.
+- Do not recommend extra training volume merely to burn calories.
+- A protein target is only a configured target.
+- If protein status is "not_connected", do not claim actual protein intake or adherence.
 - Do not describe today's weight or body-fat measurement as a trend.
-- Do not claim fat loss or weight loss unless the supplied goal-progress/trend data supports it.
+- Do not claim fat loss or weight loss unless supplied trend data supports it.
 - If lean mass is unavailable or excluded, do not infer muscle gain or loss.
-- Activity guidance should account for time-of-day information already embedded in deterministic data.
-- Use WHOOP physiology as the primary basis for training readiness.
+- Use only supplied data.
+- Never diagnose medical conditions.
 
 DATA:
 {json.dumps(payload, default=str)}
 """
 
-    client = _client()
+    client = (
+        _client()
+    )
 
     response = (
         client.responses.create(
@@ -718,11 +911,14 @@ DATA:
         )
     )
 
-    raw = _strip_json_fence(
-        response.output_text
+    raw = (
+        _strip_json_fence(
+            response.output_text
+        )
     )
 
     try:
+
         parsed = json.loads(
             raw
         )
@@ -736,12 +932,8 @@ DATA:
         ) from exc
 
     # --------------------------------------------------------
-    # Hard consistency guardrails
+    # HARD CONSISTENCY GUARDRAILS
     # --------------------------------------------------------
-
-    parsed[
-        "training_recommendation"
-    ] = fixed_training
 
     parsed[
         "date"
@@ -749,10 +941,27 @@ DATA:
         "coaching_date"
     )
 
+    parsed[
+        "strength_focus"
+    ] = tonal_focus
+
+    if whoop_ready:
+
+        parsed[
+            "training_recommendation"
+        ] = fixed_training
+
+    else:
+
+        parsed[
+            "training_recommendation"
+        ] = None
+
     required = {
         "date",
         "headline",
         "training_recommendation",
+        "strength_focus",
         "today_summary",
         "training_focus",
         "activity_priority",
@@ -774,6 +983,7 @@ DATA:
     )
 
     if missing:
+
         raise RuntimeError(
             "OpenAI combined JSON "
             "is missing required fields: "
@@ -788,8 +998,14 @@ DATA:
         "model":
             _model(),
 
+        "whoop_ready":
+            whoop_ready,
+
         "deterministic_training_recommendation":
             fixed_training,
+
+        "tonal_training_focus":
+            tonal_focus,
 
         "goal_progress_direction":
             goal.get(
@@ -812,6 +1028,19 @@ def validate_combined_ai_connection():
         generate_combined_ai_brief()
     )
 
+    brief = (
+        result.get(
+            "brief"
+        )
+        or {}
+    )
+
+    whoop_ready = (
+        result.get(
+            "whoop_ready"
+        )
+    )
+
     checks = {
         "model_present":
             bool(
@@ -820,32 +1049,10 @@ def validate_combined_ai_connection():
                 )
             ),
 
-        "deterministic_recommendation_present":
-            bool(
-                result.get(
-                    "deterministic_training_recommendation"
-                )
-            ),
-
         "brief_present":
             isinstance(
-                result.get(
-                    "brief"
-                ),
+                brief,
                 dict
-            ),
-
-        "recommendation_preserved":
-            (
-                result[
-                    "brief"
-                ].get(
-                    "training_recommendation"
-                )
-                ==
-                result.get(
-                    "deterministic_training_recommendation"
-                )
             ),
 
         "active_phase_present":
@@ -862,77 +1069,105 @@ def validate_combined_ai_connection():
                 )
             ),
 
+        "strength_focus_present":
+            bool(
+                brief.get(
+                    "strength_focus"
+                )
+            ),
+
         "headline_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "headline"
                 )
             ),
 
         "training_focus_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "training_focus"
                 )
             ),
 
         "activity_priority_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "activity_priority"
                 )
             ),
 
         "body_context_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "body_composition_context"
                 )
             ),
 
         "goal_context_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "goal_context"
                 )
             ),
 
         "action_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "highest_impact_action"
                 )
             ),
 
         "safety_note_present":
             bool(
-                result[
-                    "brief"
-                ].get(
+                brief.get(
                     "medical_safety_note"
                 )
             ),
     }
 
+    if whoop_ready:
+
+        checks[
+            "deterministic_recommendation_present"
+        ] = bool(
+            result.get(
+                "deterministic_training_recommendation"
+            )
+        )
+
+        checks[
+            "recommendation_preserved"
+        ] = (
+            brief.get(
+                "training_recommendation"
+            )
+            ==
+            result.get(
+                "deterministic_training_recommendation"
+            )
+        )
+
+    else:
+
+        checks[
+            "pending_whoop_training_is_null"
+        ] = (
+            brief.get(
+                "training_recommendation"
+            )
+            is None
+        )
+
     return {
         "status":
-            "ok"
-            if all(
-                checks.values()
-            )
-            else "check_failed",
+            (
+                "ok"
+                if all(
+                    checks.values()
+                )
+                else "check_failed"
+            ),
 
         "checks":
             checks,
