@@ -1,12 +1,34 @@
 import secrets
 
-from fastapi import FastAPI, Request, HTTPException, Form
-from fastapi.responses import RedirectResponse, HTMLResponse
-from starlette.middleware.sessions import SessionMiddleware
-from goal_progress import goal_progress
+from fastapi import (
+    FastAPI,
+    Request,
+    HTTPException,
+    Form,
+)
 
-from config import SESSION_SECRET, ADMIN_PASSWORD, validate_config
-from db import init_db
+from fastapi.responses import (
+    RedirectResponse,
+    HTMLResponse,
+)
+
+from starlette.middleware.sessions import (
+    SessionMiddleware,
+)
+
+from goal_progress import (
+    goal_progress,
+)
+
+from config import (
+    SESSION_SECRET,
+    ADMIN_PASSWORD,
+    validate_config,
+)
+
+from db import (
+    init_db,
+)
 
 from analytics import (
     init_analytics,
@@ -16,7 +38,9 @@ from baselines import (
     init_baselines,
 )
 
-from freshness import freshness_status
+from freshness import (
+    freshness_status,
+)
 
 from automation_status import (
     init_automation_tables,
@@ -31,7 +55,9 @@ from healthkit_ingest import (
     apple_health_history_summary,
 )
 
-from apple_health_trends import apple_health_trends
+from apple_health_trends import (
+    apple_health_trends,
+)
 
 from combined_coaching import (
     combined_daily_snapshot,
@@ -50,16 +76,20 @@ from goals import (
     backfill_active_goal_start_snapshot,
 )
 
+from daily_coaching_service import (
+    get_daily_coaching,
+)
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 validate_config()
 
 app = FastAPI(
     title="WHOOP Health Intelligence",
-    version="0.5.3",
+    version="0.5.4",
 )
 
 app.add_middleware(
@@ -70,12 +100,13 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------
-# Startup
-# ---------------------------------------------------------
+# ============================================================
+# STARTUP
+# ============================================================
 
 @app.on_event("startup")
 def startup():
+
     init_db()
     init_analytics()
     init_baselines()
@@ -84,38 +115,64 @@ def startup():
     init_goal_profiles()
 
 
-# ---------------------------------------------------------
-# Authentication
-# ---------------------------------------------------------
+# ============================================================
+# AUTHENTICATION
+# ============================================================
 
-def require_admin(request: Request):
-    if request.session.get("admin_authenticated") is not True:
+def require_admin(
+    request: Request,
+):
+
+    if (
+        request.session.get(
+            "admin_authenticated"
+        )
+        is not True
+    ):
+
         raise HTTPException(
             status_code=401,
             detail="Admin login required.",
         )
 
 
-# ---------------------------------------------------------
-# Home / Health
-# ---------------------------------------------------------
+# ============================================================
+# HOME
+# ============================================================
 
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
+@app.get(
+    "/",
+    response_class=HTMLResponse,
+)
+async def home(
+    request: Request,
+):
 
-    if request.session.get("admin_authenticated") is not True:
+    if (
+        request.session.get(
+            "admin_authenticated"
+        )
+        is not True
+    ):
+
         return """
         <html>
             <body>
                 <h1>WHOOP Health Intelligence</h1>
 
-                <form method="post" action="/admin/login">
+                <form
+                    method="post"
+                    action="/admin/login"
+                >
                     <input
                         type="password"
                         name="password"
                         placeholder="Admin password"
                     >
-                    <button>Sign in</button>
+
+                    <button>
+                        Sign in
+                    </button>
                 </form>
             </body>
         </html>
@@ -124,11 +181,17 @@ async def home(request: Request):
     return """
     <html>
         <body>
-            <h1>WHOOP Health Intelligence</h1>
 
-            <p><b>Phase 5D.1</b></p>
+            <h1>
+                WHOOP Health Intelligence
+            </h1>
+
+            <p>
+                <b>Phase 5D.2</b>
+            </p>
 
             <ul>
+
                 <li>
                     <a href="/apple-health/latest">
                         Latest Apple Health / Hume data
@@ -164,13 +227,21 @@ async def home(request: Request):
                         Latest automation run
                     </a>
                 </li>
+
             </ul>
+
         </body>
     </html>
     """
 
 
-@app.post("/admin/login")
+# ============================================================
+# ADMIN LOGIN
+# ============================================================
+
+@app.post(
+    "/admin/login"
+)
 async def login(
     request: Request,
     password: str = Form(...),
@@ -180,12 +251,15 @@ async def login(
         password,
         ADMIN_PASSWORD,
     ):
+
         raise HTTPException(
             status_code=401,
             detail="Incorrect admin password.",
         )
 
-    request.session["admin_authenticated"] = True
+    request.session[
+        "admin_authenticated"
+    ] = True
 
     return RedirectResponse(
         "/",
@@ -193,22 +267,37 @@ async def login(
     )
 
 
-@app.get("/health")
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get(
+    "/health"
+)
 async def health():
+
     return {
         "status": "ok",
-        "phase": "5D.1",
-        "version": "0.5.3",
+        "phase": "5D.2",
+        "version": "0.5.4",
+        "daily_coaching_cache": True,
     }
 
 
-# ---------------------------------------------------------
+# ============================================================
 # WHOOP
-# ---------------------------------------------------------
+# ============================================================
 
-@app.get("/freshness")
-async def freshness(request: Request):
-    require_admin(request)
+@app.get(
+    "/freshness"
+)
+async def freshness(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     return {
         "status": "ok",
@@ -216,43 +305,68 @@ async def freshness(request: Request):
     }
 
 
-# ---------------------------------------------------------
-# Automation
-# ---------------------------------------------------------
+# ============================================================
+# AUTOMATION
+# ============================================================
 
-@app.get("/automation/latest-run")
-async def latest_run(request: Request):
-    require_admin(request)
+@app.get(
+    "/automation/latest-run"
+)
+async def latest_run(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     return {
         "status": "ok",
-        "run": latest_automation_run(),
+        "run":
+            latest_automation_run(),
     }
 
 
-# ---------------------------------------------------------
-# Apple Health Ingest
-# ---------------------------------------------------------
+# ============================================================
+# APPLE HEALTH INGEST
+# ============================================================
 
-@app.post("/api/v1/apple-health/ingest")
-async def apple_health_ingest(request: Request):
+@app.post(
+    "/api/v1/apple-health/ingest"
+)
+async def apple_health_ingest(
+    request: Request,
+):
 
-    require_ingest_key(request)
+    require_ingest_key(
+        request
+    )
 
-    payload = await request.json()
+    payload = (
+        await request.json()
+    )
 
-    return ingest_healthkit_payload(
-        payload
+    return (
+        ingest_healthkit_payload(
+            payload
+        )
     )
 
 
-# ---------------------------------------------------------
-# Apple Health Admin Endpoints
-# ---------------------------------------------------------
+# ============================================================
+# APPLE HEALTH ADMIN ENDPOINTS
+# ============================================================
 
-@app.get("/apple-health/latest")
-async def apple_health_latest(request: Request):
-    require_admin(request)
+@app.get(
+    "/apple-health/latest"
+)
+async def apple_health_latest(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     return {
         "status": "ok",
@@ -260,11 +374,16 @@ async def apple_health_latest(request: Request):
     }
 
 
-@app.get("/apple-health/history/summary")
+@app.get(
+    "/apple-health/history/summary"
+)
 async def apple_health_history_summary_route(
     request: Request,
 ):
-    require_admin(request)
+
+    require_admin(
+        request
+    )
 
     return {
         "status": "ok",
@@ -272,43 +391,82 @@ async def apple_health_history_summary_route(
     }
 
 
-@app.get("/apple-health/trends")
+@app.get(
+    "/apple-health/trends"
+)
 async def apple_health_trends_route(
     request: Request,
 ):
-    require_admin(request)
 
-    return apple_health_trends()
+    require_admin(
+        request
+    )
 
-
-# ---------------------------------------------------------
-# Combined Coaching
-# ---------------------------------------------------------
-
-@app.get("/coaching/combined/today")
-async def combined_today(request: Request):
-    require_admin(request)
-
-    return combined_daily_snapshot()
+    return (
+        apple_health_trends()
+    )
 
 
-@app.get("/coaching/combined/recommendation")
+# ============================================================
+# COMBINED COACHING ADMIN ENDPOINTS
+#
+# These remain available for diagnostics.
+#
+# The AI diagnostic endpoint below can still intentionally
+# call the LLM. It is NOT used by the iPhone application.
+# ============================================================
+
+@app.get(
+    "/coaching/combined/today"
+)
+async def combined_today(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    return (
+        combined_daily_snapshot()
+    )
+
+
+@app.get(
+    "/coaching/combined/recommendation"
+)
 async def combined_recommendation(
     request: Request,
 ):
-    require_admin(request)
 
-    return combined_deterministic_coaching()
+    require_admin(
+        request
+    )
+
+    return (
+        combined_deterministic_coaching()
+    )
 
 
-@app.get("/coaching/combined/ai")
-async def combined_ai(request: Request):
-    require_admin(request)
+@app.get(
+    "/coaching/combined/ai"
+)
+async def combined_ai(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     try:
-        return validate_combined_ai_connection()
+
+        return (
+            validate_combined_ai_connection()
+        )
 
     except Exception as exc:
+
         raise HTTPException(
             status_code=500,
             detail=(
@@ -318,142 +476,230 @@ async def combined_ai(request: Request):
         ) from exc
 
 
-# ---------------------------------------------------------
-# Mobile Coaching API
-# ---------------------------------------------------------
+# ============================================================
+# MOBILE COACHING API
+#
+# IMPORTANT:
+#
+# The iPhone now enters through get_daily_coaching().
+#
+# Repeated requests with unchanged meaningful inputs return
+# the stored daily snapshot instead of calling the LLM again.
+# ============================================================
 
-@app.get("/api/v1/coaching/today")
+@app.get(
+    "/api/v1/coaching/today"
+)
 async def mobile_combined_coaching(
     request: Request,
 ):
 
-    require_ingest_key(request)
+    require_ingest_key(
+        request
+    )
 
     try:
-        return validate_combined_ai_connection()
+
+        return (
+            get_daily_coaching(
+                force_refresh=False
+            )
+        )
 
     except Exception as exc:
+
         raise HTTPException(
             status_code=500,
             detail=(
-                "Combined AI coaching failed: "
+                "Daily coaching failed: "
                 f"{exc}"
             ),
         ) from exc
-        
-@app.get("/api/v1/goals/progress")
+
+
+# ============================================================
+# MOBILE GOAL PROGRESS
+# ============================================================
+
+@app.get(
+    "/api/v1/goals/progress"
+)
 async def mobile_goal_progress(
     request: Request,
 ):
-    require_ingest_key(request)
 
-    return goal_progress()
+    require_ingest_key(
+        request
+    )
 
-# ---------------------------------------------------------
-# Goal Admin Endpoints
-# ---------------------------------------------------------
+    return (
+        goal_progress()
+    )
 
-@app.get("/goals/active")
-async def goals_active(request: Request):
-    require_admin(request)
+
+# ============================================================
+# GOAL ADMIN ENDPOINTS
+# ============================================================
+
+@app.get(
+    "/goals/active"
+)
+async def goals_active(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     return {
         "status": "ok",
-        "goal": get_active_goal(),
+        "goal":
+            get_active_goal(),
     }
 
 
-@app.get("/goals/history")
-async def goals_history(request: Request):
-    require_admin(request)
+@app.get(
+    "/goals/history"
+)
+async def goals_history(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     return {
         "status": "ok",
-        "goals": get_goal_history(),
+        "goals":
+            get_goal_history(),
     }
 
 
-@app.post("/goals")
-async def goals_save(request: Request):
-    require_admin(request)
+@app.post(
+    "/goals"
+)
+async def goals_save(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
 
     try:
-        payload = await request.json()
+
+        payload = (
+            await request.json()
+        )
 
         return {
             "status": "ok",
-            "goal": save_goal_profile(
-                payload
-            ),
+            "goal":
+                save_goal_profile(
+                    payload
+                ),
         }
 
     except ValueError as exc:
+
         raise HTTPException(
             status_code=400,
-            detail=str(exc),
+            detail=str(
+                exc
+            ),
         ) from exc
 
 
-# ---------------------------------------------------------
-# One-Time Goal Snapshot Backfill
-# ---------------------------------------------------------
+# ============================================================
+# ONE-TIME GOAL SNAPSHOT BACKFILL
+# ============================================================
 
-@app.post("/goals/backfill-active-start")
+@app.post(
+    "/goals/backfill-active-start"
+)
 async def goals_backfill_active_start(
     request: Request,
 ):
 
-    require_admin(request)
+    require_admin(
+        request
+    )
 
     return (
         backfill_active_goal_start_snapshot()
     )
 
 
-# ---------------------------------------------------------
-# Mobile Goal API
-# ---------------------------------------------------------
+# ============================================================
+# MOBILE GOAL API
+# ============================================================
 
-@app.get("/api/v1/goals/active")
+@app.get(
+    "/api/v1/goals/active"
+)
 async def mobile_goals_active(
     request: Request,
 ):
 
-    require_ingest_key(request)
+    require_ingest_key(
+        request
+    )
 
     return {
         "status": "ok",
-        "goal": get_active_goal(),
+        "goal":
+            get_active_goal(),
     }
 
 
-@app.post("/api/v1/goals")
+@app.post(
+    "/api/v1/goals"
+)
 async def mobile_goals_save(
     request: Request,
 ):
 
-    require_ingest_key(request)
+    require_ingest_key(
+        request
+    )
 
     try:
-        payload = await request.json()
+
+        payload = (
+            await request.json()
+        )
 
         return {
             "status": "ok",
-            "goal": save_goal_profile(
-                payload
-            ),
+            "goal":
+                save_goal_profile(
+                    payload
+                ),
         }
 
     except ValueError as exc:
+
         raise HTTPException(
             status_code=400,
-            detail=str(exc),
+            detail=str(
+                exc
+            ),
         ) from exc
 
-@app.get("/goals/progress")
+
+@app.get(
+    "/goals/progress"
+)
 async def goals_progress(
     request: Request,
 ):
-    require_admin(request)
 
-    return goal_progress()
+    require_admin(
+        request
+    )
+
+    return (
+        goal_progress()
+    )
