@@ -80,6 +80,9 @@ from daily_coaching_service import (
     get_daily_coaching,
 )
 
+from daily_health_intelligence_store import (
+    get_daily_health_intelligence,
+)
 
 # ============================================================
 # CONFIGURATION
@@ -703,3 +706,72 @@ async def goals_progress(
     return (
         goal_progress()
     )
+
+# ============================================================
+# DAILY HEALTH INTELLIGENCE
+# ============================================================
+
+@app.get(
+    "/health-intelligence/today"
+)
+async def health_intelligence_today(
+    request: Request,
+    force_refresh: bool = False,
+):
+
+    require_admin(
+        request
+    )
+
+    try:
+
+        return (
+            get_daily_health_intelligence(
+                force_refresh=
+                    force_refresh
+            )
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Daily Health Intelligence failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# MOBILE DAILY HEALTH INTELLIGENCE
+# ============================================================
+
+@app.get(
+    "/api/v1/health-intelligence/today"
+)
+async def mobile_health_intelligence_today(
+    request: Request,
+):
+
+    require_ingest_key(
+        request
+    )
+
+    try:
+
+        return (
+            get_daily_health_intelligence(
+                force_refresh=False
+            )
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Daily Health Intelligence failed: "
+                f"{exc}"
+            ),
+        ) from exc
