@@ -8,6 +8,7 @@ from healthkit_ingest import latest_apple_health
 from automation_status import latest_automation_run
 from apple_health_trends import apple_health_trends
 from goals import get_active_goal
+from integrations.tonal.training_priority import build_training_priority
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -858,6 +859,25 @@ def combined_deterministic_coaching():
         ).date()
     )
 
+    # Tonal strength priorities are independent of
+    # today's WHOOP readiness. Calculate them early
+    # so they remain available while WHOOP is pending.
+    try:
+        tonal_training = build_training_priority()
+
+    except Exception:
+        tonal_training = {
+            "status": "unavailable",
+            "training_focus": None,
+            "recommended_session": None,
+            "priority_muscles": [],
+            "strength_balance": None,
+            "rationale": [],
+            "message": (
+                "Tonal training context is temporarily unavailable."
+            ),
+        }
+
     if not snapshot[
         "data_readiness"
     ][
@@ -877,6 +897,9 @@ def combined_deterministic_coaching():
                 snapshot[
                     "data_readiness"
                 ],
+
+            "tonal_training":
+                tonal_training,
 
             "message":
                 "Current WHOOP physiology "
@@ -1339,6 +1362,9 @@ def combined_deterministic_coaching():
 
         "active_goal":
             goal_context,
+
+        "tonal_training":
+            tonal_training,
 
         "physiology_reasons":
             physiology_reasons[:4],
