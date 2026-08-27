@@ -6,6 +6,7 @@ from db import get_conn
 
 from daily_health_intelligence import (
     build_daily_health_ai_payload,
+    generate_daily_health_intelligence,
     _mock_daily_health_intelligence,
 )
 
@@ -338,6 +339,21 @@ def save_intelligence(
 
     return dict(
         row
+    )
+
+# ============================================================
+# PRODUCTION SERVICE
+# ============================================================
+
+def get_daily_health_intelligence(
+    force_refresh=False,
+):
+
+    return get_or_create_intelligence(
+        generator=
+            generate_daily_health_intelligence,
+        force_refresh=
+            force_refresh,
     )
 
 
