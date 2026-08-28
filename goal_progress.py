@@ -436,8 +436,10 @@ def _summary(
     )
 
 
-def goal_progress():
-    goal = get_active_goal()
+def goal_progress(goal=None, trends=None):
+
+    if goal is None:
+        goal = get_active_goal()
 
     if not goal:
         return {
@@ -451,14 +453,16 @@ def goal_progress():
                 ),
         }
 
-    trends = (
-        apple_health_trends()
-    )
+    if trends is None:
+        trends = (
+            apple_health_trends()
+        )
 
     body_composition = trends.get(
         "body_composition",
         {},
     )
+    
 
     activity = trends.get(
         "activity",

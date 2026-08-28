@@ -101,11 +101,15 @@ def _current_weight_kg(
     )
 
 
-def _training_context():
+def _training_context(workout=None):
 
-    workout = (
-        build_daily_workout_prescription()
-    )
+    if workout is None:
+
+        workout = (
+
+            build_daily_workout_prescription()
+
+        )
 
     if workout.get(
         "status"
@@ -206,11 +210,12 @@ def _training_context():
 # PUBLIC ENGINE
 # ============================================================
 
-def build_hydration_prescription():
+def build_hydration_prescription(workout=None, trends=None):
 
-    trends = (
-        apple_health_trends()
-    )
+    if trends is None:
+        trends = (
+            apple_health_trends()
+        )
 
     weight_kg = (
         _current_weight_kg(
@@ -232,7 +237,7 @@ def build_hydration_prescription():
         }
 
     training = (
-        _training_context()
+        _training_context(workout)
     )
 
     baseline_ml = (

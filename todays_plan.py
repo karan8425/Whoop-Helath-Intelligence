@@ -1,6 +1,10 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from goals import get_active_goal
+from goal_progress import goal_progress
+from apple_health_trends import apple_health_trends
+
 from nutrition_prescription import build_nutrition_prescription
 from sleep_prescription import build_sleep_prescription
 from hydration_prescription import build_hydration_prescription
@@ -57,9 +61,7 @@ def _training_card(workout):
     readiness = workout.get("readiness") or {}
     session = workout.get("session") or {}
 
-    # The workout prescription stores exercises inside session.
     exercises = session.get("exercises") or []
-
     exercise_details = []
 
     for exercise in exercises:
@@ -184,7 +186,7 @@ def _nutrition_card(nutrition):
 
     macros = nutrition.get("macros") or {}
     activity = nutrition.get("activity") or {}
-    goal_progress = nutrition.get("goal_progress") or {}
+    goal_progress_data = nutrition.get("goal_progress") or {}
 
     return {
         "status": "ok",
@@ -201,7 +203,7 @@ def _nutrition_card(nutrition):
         "current_weight_lb": nutrition.get("current_weight_lb"),
 
         "activity": activity,
-        "goal_progress": goal_progress,
+        "goal_progress": goal_progress_data,
 
         "priority": nutrition.get("nutrition_priority"),
         "rationale": nutrition.get("rationale"),
@@ -336,18 +338,68 @@ def _sleep_card(sleep):
 # ============================================================
 
 def build_todays_plan():
+    # --------------------------------------------------------
+    # SHARED CONTEXT
+    # Expensive data is calculated once and reused.
+    # --------------------------------------------------------
+
+    goal = _safe_engine(
+        get_active_goal,
+        "goal",
+    )
+
+    trends = _safe_engine(
+        apple_health_trends,
+        "apple_health_trends",
+    )
+
+    if (
+        isinstance(goal, dict)
+        and goal.get("status") == "error"
+    ):
+        active_goal = None
+    else:
+        active_goal = goal
+
+    if (
+        isinstance(trends, dict)
+        and trends.get("status") == "error"
+    ):
+        shared_trends = None
+    else:
+        shared_trends = trends
+
+    progress = _safe_engine(
+        lambda: goal_progress(
+            goal=active_goal,
+            trends=shared_trends,
+        ),
+        "goal_progress",
+    )
+
+    # --------------------------------------------------------
+    # PRESCRIPTION ENGINES
+    # --------------------------------------------------------
+
     workout = _safe_engine(
         build_daily_workout_prescription,
         "training",
     )
 
     nutrition = _safe_engine(
-        build_nutrition_prescription,
+        lambda: build_nutrition_prescription(
+            goal=active_goal,
+            trends=shared_trends,
+            progress=progress,
+        ),
         "nutrition",
     )
 
     hydration = _safe_engine(
-        build_hydration_prescription,
+        lambda: build_hydration_prescription(
+            workout=workout,
+            trends=shared_trends,
+        ),
         "hydration",
     )
 
@@ -355,6 +407,10 @@ def build_todays_plan():
         build_sleep_prescription,
         "sleep",
     )
+
+    # --------------------------------------------------------
+    # API CARDS
+    # --------------------------------------------------------
 
     training_card = _training_card(workout)
     nutrition_card = _nutrition_card(nutrition)
@@ -379,7 +435,6 @@ def build_todays_plan():
         "version": "1.2",
         "plan_date": _today(),
         "available_sections": available_cards,
-
         "training": training_card,
         "nutrition": nutrition_card,
         "hydration": hydration_card,

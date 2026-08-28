@@ -459,14 +459,18 @@ def _rationale(
 # PUBLIC PRESCRIPTION
 # ============================================================
 
-def build_nutrition_prescription():
+def build_nutrition_prescription(
+    goal=None,
+    trends=None,
+    progress=None,
+):
 
-    goal = (
-        get_active_goal()
-    )
+    if goal is None:
+        goal = (
+            get_active_goal()
+        )
 
     if not goal:
-
         return {
             "status":
                 "not_ready",
@@ -475,9 +479,18 @@ def build_nutrition_prescription():
                 "No active goal is configured.",
         }
 
-    trends = (
-        apple_health_trends()
-    )
+    if trends is None:
+        trends = (
+            apple_health_trends()
+        )
+
+    if progress is None:
+        progress = (
+            goal_progress(
+                goal=goal,
+                trends=trends,
+            )
+        )
 
     progress = (
         goal_progress()
