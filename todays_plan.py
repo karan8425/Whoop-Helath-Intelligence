@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -336,30 +337,30 @@ def _sleep_card(sleep):
 # ============================================================
 
 def build_todays_plan():
-    workout = _safe_engine(
-        build_daily_workout_prescription,
-        "training",
-    )
+    engines = {
+        "training": build_daily_workout_prescription,
+        "nutrition": build_nutrition_prescription,
+        "hydration": build_hydration_prescription,
+        "sleep": build_sleep_prescription,
+    }
 
-    nutrition = _safe_engine(
-        build_nutrition_prescription,
-        "nutrition",
-    )
+    # Run independent prescription engines concurrently so their
+    # database/network wait times do not accumulate sequentially.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            name: executor.submit(_safe_engine, engine, name)
+            for name, engine in engines.items()
+        }
 
-    hydration = _safe_engine(
-        build_hydration_prescription,
-        "hydration",
-    )
+        results = {
+            name: future.result()
+            for name, future in futures.items()
+        }
 
-    sleep = _safe_engine(
-        build_sleep_prescription,
-        "sleep",
-    )
-
-    training_card = _training_card(workout)
-    nutrition_card = _nutrition_card(nutrition)
-    hydration_card = _hydration_card(hydration)
-    sleep_card = _sleep_card(sleep)
+    training_card = _training_card(results["training"])
+    nutrition_card = _nutrition_card(results["nutrition"])
+    hydration_card = _hydration_card(results["hydration"])
+    sleep_card = _sleep_card(results["sleep"])
 
     cards = {
         "training": training_card,
@@ -379,7 +380,6 @@ def build_todays_plan():
         "version": "1.2",
         "plan_date": _today(),
         "available_sections": available_cards,
-
         "training": training_card,
         "nutrition": nutrition_card,
         "hydration": hydration_card,
