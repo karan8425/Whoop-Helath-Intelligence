@@ -88,6 +88,10 @@ from todays_plan import (
     build_todays_plan,
 )
 
+from whoop_webhook import (
+    router as whoop_webhook_router,
+)
+
 
 # ============================================================
 # CONFIGURATION
@@ -98,6 +102,10 @@ validate_config()
 app = FastAPI(
     title="WHOOP Health Intelligence",
     version="0.5.5",
+)
+
+app.include_router(
+    whoop_webhook_router
 )
 
 app.add_middleware(
@@ -303,6 +311,7 @@ async def health():
         "daily_coaching_cache": True,
         "daily_health_intelligence": True,
         "todays_plan_api": True,
+        "whoop_webhook": True,
     }
 
 
