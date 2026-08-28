@@ -15,27 +15,35 @@ from fastapi import (
 router = APIRouter()
 
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
 # WHOOP signs webhook requests using the application's
 # existing WHOOP Client Secret.
 #
-# We intentionally read it from the environment here.
-# Never hard-code the secret in this file.
+# This value must remain in the Render environment.
+# Never hard-code it here.
 WHOOP_CLIENT_SECRET = os.getenv(
     "WHOOP_CLIENT_SECRET",
     ""
 )
 
-# Reject signed requests whose timestamp is too far from
-# the current server time. This reduces replay risk.
+# Reject webhook requests whose signed timestamp is more than
+# five minutes away from the current server time.
 MAX_TIMESTAMP_AGE_SECONDS = 300
 
+
+# ============================================================
+# TIMESTAMP VALIDATION
+# ============================================================
 
 def _validate_timestamp(
     timestamp: str,
 ) -> None:
 
     try:
-        timestamp_value = int(
+        timestamp_milliseconds = int(
             timestamp
         )
 
@@ -46,22 +54,44 @@ def _validate_timestamp(
 
         raise HTTPException(
             status_code=401,
-            detail="Invalid WHOOP webhook timestamp.",
+            detail=(
+                "Invalid WHOOP webhook "
+                "timestamp."
+            ),
         ) from exc
 
-    now = int(
+    # WHOOP sends milliseconds since Unix epoch.
+    timestamp_seconds = (
+        timestamp_milliseconds
+        / 1000.0
+    )
+
+    current_time_seconds = (
         time.time()
     )
 
-    if abs(
-        now - timestamp_value
-    ) > MAX_TIMESTAMP_AGE_SECONDS:
+    age_seconds = abs(
+        current_time_seconds
+        - timestamp_seconds
+    )
+
+    if (
+        age_seconds
+        > MAX_TIMESTAMP_AGE_SECONDS
+    ):
 
         raise HTTPException(
             status_code=401,
-            detail="Expired WHOOP webhook timestamp.",
+            detail=(
+                "Expired WHOOP webhook "
+                "timestamp."
+            ),
         )
 
+
+# ============================================================
+# SIGNATURE VALIDATION
+# ============================================================
 
 def _validate_signature(
     timestamp: str,
@@ -79,8 +109,16 @@ def _validate_signature(
             ),
         )
 
+    # WHOOP signature input:
+    #
+    # timestamp header string + exact raw HTTP request body
+    #
+    # It is important that we use the raw bytes and do not
+    # re-serialize the JSON before calculating the HMAC.
     signed_payload = (
-        timestamp.encode("utf-8")
+        timestamp.encode(
+            "utf-8"
+        )
         + body
     )
 
@@ -107,9 +145,16 @@ def _validate_signature(
 
         raise HTTPException(
             status_code=401,
-            detail="Invalid WHOOP webhook signature.",
+            detail=(
+                "Invalid WHOOP webhook "
+                "signature."
+            ),
         )
 
+
+# ============================================================
+# WEBHOOK ENDPOINT
+# ============================================================
 
 @router.post(
     "/webhooks/whoop"
@@ -126,7 +171,10 @@ async def receive_whoop_webhook(
         "X-WHOOP-Signature"
     )
 
-    if not timestamp or not signature:
+    if (
+        not timestamp
+        or not signature
+    ):
 
         raise HTTPException(
             status_code=401,
@@ -136,6 +184,8 @@ async def receive_whoop_webhook(
             ),
         )
 
+    # Read the exact raw request body before parsing JSON.
+    # WHOOP uses these bytes when generating its signature.
     body = await request.body()
 
     _validate_timestamp(
@@ -157,7 +207,9 @@ async def receive_whoop_webhook(
 
         raise HTTPException(
             status_code=400,
-            detail="Invalid webhook JSON.",
+            detail=(
+                "Invalid webhook JSON."
+            ),
         ) from exc
 
     event_type = payload.get(
@@ -176,8 +228,10 @@ async def receive_whoop_webhook(
         "user_id"
     )
 
-    # Deliberately log only safe event metadata.
-    # Do not log the raw webhook payload.
+    # Log only event metadata.
+    #
+    # Do not log authorization tokens, secrets,
+    # signatures, or the full webhook payload.
     print(
         "[whoop-webhook] "
         f"type={event_type} "
@@ -187,6 +241,13 @@ async def receive_whoop_webhook(
         flush=True,
     )
 
+    # Phase 1 behavior:
+    #
+    # We intentionally acknowledge the authenticated event
+    # without running the health-intelligence pipeline yet.
+    #
+    # Once real webhook delivery is verified, recovery.updated
+    # will become the trigger for the existing daily pipeline.
     return {
         "status": "accepted",
         "event_type": event_type,
