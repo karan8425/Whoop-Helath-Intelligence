@@ -28,6 +28,8 @@ BODY_COMPOSITION_HORIZONS = (
 
 CURRENT_SMOOTHING_DAYS = 7
 
+MIN_GOAL_PHASE_AGE_DAYS = 7
+
 HUME_BUNDLE_ID = (
     "com.elink.fittrackhealth"
 )
@@ -3528,6 +3530,7 @@ def _body_composition_progress(
     body_fat_mass,
     derived_lean_mass,
 ):
+
     active_goal = (
         get_active_goal()
     )
@@ -3540,6 +3543,56 @@ def _body_composition_progress(
             "reason":
                 "No active goal profile exists.",
         }
+
+    phase_start_date = (
+        active_goal.get(
+            "phase_start_date"
+        )
+    )
+
+    today = (
+        datetime.now(
+            timezone.utc
+        )
+        .astimezone(
+            EASTERN
+        )
+        .date()
+    )
+
+    phase_age_days = None
+
+    if phase_start_date:
+
+        if isinstance(
+            phase_start_date,
+            str,
+        ):
+            parsed_phase_start_date = (
+                datetime.strptime(
+                    phase_start_date,
+                    "%Y-%m-%d",
+                ).date()
+            )
+
+        else:
+            parsed_phase_start_date = (
+                phase_start_date
+            )
+
+        phase_age_days = max(
+            0,
+            (
+                today
+                - parsed_phase_start_date
+            ).days,
+        )
+
+    phase_status_mature = (
+        phase_age_days is not None
+        and phase_age_days
+        >= MIN_GOAL_PHASE_AGE_DAYS
+    )
 
     start_weight_lb = (
         active_goal.get(
@@ -3799,7 +3852,12 @@ def _body_composition_progress(
         != "insufficient_data"
     ]
 
-    if not goal_statuses:
+    if not phase_status_mature:
+        overall_goal_status = (
+            "insufficient_data"
+        )
+
+    elif not goal_statuses:
         overall_goal_status = (
             "insufficient_data"
         )
@@ -3945,6 +4003,15 @@ def _body_composition_progress(
                 active_goal.get(
                     "phase_end_date"
                 ),
+
+            "phase_age_days":
+                phase_age_days,
+
+            "minimum_status_age_days":
+                MIN_GOAL_PHASE_AGE_DAYS,
+
+            "status_mature":
+                phase_status_mature,
         },
 
         "methodology": {
@@ -3999,6 +4066,15 @@ def _body_composition_progress(
                     "Current trend scoring is Hume-only. "
                     "Fitdays remains historical context and "
                     "is not normalized into Hume."
+                ),
+
+            "goal_phase_maturity":
+                (
+                    "Overall goal status is withheld until "
+                    f"the active goal phase is at least "
+                    f"{MIN_GOAL_PHASE_AGE_DAYS} days old. "
+                    "Individual metric calculations remain "
+                    "available during the initial period."
                 ),
         },
 
