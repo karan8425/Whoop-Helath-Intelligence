@@ -772,6 +772,57 @@ async def weekly_health_analytics(
             ),
         ) from exc
 
+# ============================================================
+# BODY COMPOSITION TREND ANALYTICS
+#
+# Admin-only diagnostic endpoint used to validate Hume
+# longitudinal body-composition calculations before these
+# values become part of goal progress or the mobile API.
+#
+# This endpoint does NOT call OpenAI.
+# ============================================================
+
+@app.get(
+    "/health-intelligence/body-composition/analytics"
+)
+async def body_composition_analytics(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    try:
+
+        trends = (
+            apple_health_trends()
+        )
+
+        return {
+            "status":
+                "ok",
+
+            "methodology":
+                trends.get(
+                    "methodology"
+                ),
+
+            "body_composition":
+                trends.get(
+                    "body_composition"
+                ),
+        }
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Body Composition Analytics failed: "
+                f"{exc}"
+            ),
+        ) from exc
 
 # ============================================================
 # DAILY HEALTH INTELLIGENCE
