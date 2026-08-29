@@ -8,8 +8,6 @@ EASTERN = ZoneInfo(
     "America/New_York"
 )
 
-# Existing windows are preserved because current
-# goal_progress.py depends on windows["7"] and windows["30"].
 LEGACY_WINDOWS = (
     7,
     14,
@@ -17,11 +15,6 @@ LEGACY_WINDOWS = (
     90,
 )
 
-# New body-composition trend horizons.
-#
-# 7 days is deliberately NOT included here as a user-facing
-# trend horizon. Instead, a 7-day average is used internally
-# as the smoothed "current" value.
 BODY_COMPOSITION_HORIZONS = (
     28,
     90,
@@ -35,13 +28,13 @@ HUME_BUNDLE_ID = (
     "com.elink.fittrackhealth"
 )
 
+FITDAYS_BUNDLE_ID = (
+    "cn.fitdays.fitdays"
+)
+
 KG_TO_LB = 2.2046226218
 
 
-# Approximate minimum changes required before a smoothed
-# body-composition trend is labeled increasing/decreasing.
-#
-# These are noise-control thresholds, not medical thresholds.
 TREND_TOLERANCES = {
     "body_weight": 0.25,
     "body_fat_percentage": 0.30,
@@ -49,6 +42,10 @@ TREND_TOLERANCES = {
     "body_fat_mass": 0.25,
 }
 
+
+# ---------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------
 
 def _pct_change(
     current,
@@ -92,15 +89,56 @@ def _iso(
     return value.isoformat()
 
 
+def _weekly_rate(
+    change,
+    horizon_days,
+):
+    """
+    The trend compares:
+
+        reference 7-day window
+        versus
+        current 7-day window
+
+    Their approximate centers are separated by
+    horizon_days - CURRENT_SMOOTHING_DAYS.
+
+    Therefore rate/week should use that effective
+    separation rather than the full horizon.
+    """
+
+    if change is None:
+        return None
+
+    effective_days = (
+        horizon_days
+        - CURRENT_SMOOTHING_DAYS
+    )
+
+    if effective_days <= 0:
+        return None
+
+    effective_weeks = (
+        effective_days
+        / 7.0
+    )
+
+    return (
+        change
+        / effective_weeks
+    )
+
+
+# ---------------------------------------------------------
+# Activity
+# ---------------------------------------------------------
+
 def _activity_baselines():
     """
     Calculate activity averages over the preceding
     7 / 14 / 30 / 90 calendar days.
 
-    Today's partial activity is NOT included in the baseline.
-
-    This behavior is intentionally unchanged from the
-    previous implementation.
+    Today's partial activity is NOT included.
     """
 
     today = (
@@ -118,7 +156,6 @@ def _activity_baselines():
     with get_conn() as conn:
         with conn.cursor() as cur:
 
-            # Current day
             cur.execute(
                 """
                 SELECT
@@ -145,7 +182,6 @@ def _activity_baselines():
                 else None
             )
 
-            # Historical baselines
             baselines = {}
 
             for window in (
@@ -155,18 +191,25 @@ def _activity_baselines():
                 cur.execute(
                     """
                     SELECT
-                        AVG(steps) AS steps,
+                        AVG(steps)
+                            AS steps,
+
                         AVG(active_energy_kcal)
                             AS active_energy_kcal,
+
                         AVG(resting_energy_kcal)
                             AS resting_energy_kcal,
+
                         AVG(
                             walking_running_distance_km
                         )
                             AS walking_running_distance_km,
+
                         COUNT(steps)
                             AS step_days
+
                     FROM apple_health_daily_activity
+
                     WHERE activity_date >=
                         %s - (
                             %s * INTERVAL '1 day'
@@ -283,6 +326,10 @@ def _activity_baselines():
     return result
 
 
+# ---------------------------------------------------------
+# Hume current measurements
+# ---------------------------------------------------------
+
 def _latest_hume_sample(
     metric_name,
 ):
@@ -297,10 +344,14 @@ def _latest_hume_sample(
                     observed_at,
                     source_name,
                     source_bundle_id
+
                 FROM apple_health_body_samples
+
                 WHERE metric_name = %s
                   AND source_bundle_id = %s
+
                 ORDER BY observed_at DESC
+
                 LIMIT 1
                 """,
                 (
@@ -319,11 +370,8 @@ def _legacy_hume_windows(
     latest,
 ):
     """
-    Preserve the original current-value-versus-prior-window
-    calculations.
-
-    goal_progress.py currently consumes these values, so they
-    must remain stable until that module is upgraded.
+    Preserve the existing output consumed by
+    goal_progress.py.
     """
 
     latest_time = (
@@ -346,13 +394,18 @@ def _legacy_hume_windows(
                     SELECT
                         AVG(value)
                             AS baseline,
+
                         COUNT(*)
                             AS observations,
+
                         MIN(observed_at)
                             AS oldest,
+
                         MAX(observed_at)
                             AS newest
+
                     FROM apple_health_body_samples
+
                     WHERE metric_name = %s
                       AND source_bundle_id = %s
                       AND observed_at >=
@@ -428,73 +481,124 @@ def _legacy_hume_windows(
     return windows
 
 
-def _hume_daily_history(
+# ---------------------------------------------------------
+# Daily body-composition aggregation
+# ---------------------------------------------------------
+
+def _source_daily_history(
     metric_name,
-    latest_time,
-    history_days=365,
+    source_bundle_id,
+    start_time=None,
+    end_time=None,
 ):
     """
-    Return one Hume value per local calendar day.
+    Return one value per local calendar day for one source.
 
-    If multiple samples exist on one day, the daily average is
-    used. This keeps the future chart stable without blending
-    different devices because the query is Hume-only.
+    Multiple measurements on the same local date are averaged.
+
+    This prevents days containing multiple scale measurements
+    from receiving more statistical weight than other days.
+    """
+
+    conditions = [
+        "metric_name = %s",
+        "source_bundle_id = %s",
+    ]
+
+    parameters = [
+        metric_name,
+        source_bundle_id,
+    ]
+
+    if start_time is not None:
+        conditions.append(
+            "observed_at >= %s"
+        )
+
+        parameters.append(
+            start_time
+        )
+
+    if end_time is not None:
+        conditions.append(
+            "observed_at <= %s"
+        )
+
+        parameters.append(
+            end_time
+        )
+
+    where_clause = (
+        " AND ".join(
+            conditions
+        )
+    )
+
+    query = f"""
+        SELECT
+            (
+                observed_at
+                AT TIME ZONE
+                'America/New_York'
+            )::date
+                AS measurement_date,
+
+            AVG(value)
+                AS value,
+
+            COUNT(*)
+                AS observations,
+
+            MIN(observed_at)
+                AS first_observed_at,
+
+            MAX(observed_at)
+                AS last_observed_at
+
+        FROM apple_health_body_samples
+
+        WHERE {where_clause}
+
+        GROUP BY
+            measurement_date
+
+        ORDER BY
+            measurement_date ASC
     """
 
     with get_conn() as conn:
         with conn.cursor() as cur:
 
             cur.execute(
-                """
-                SELECT
-                    (
-                        observed_at
-                        AT TIME ZONE
-                        'America/New_York'
-                    )::date
-                        AS measurement_date,
-
-                    AVG(value)
-                        AS value,
-
-                    COUNT(*)
-                        AS observations,
-
-                    MIN(observed_at)
-                        AS first_observed_at,
-
-                    MAX(observed_at)
-                        AS last_observed_at
-
-                FROM apple_health_body_samples
-
-                WHERE metric_name = %s
-                  AND source_bundle_id = %s
-                  AND observed_at >=
-                      %s - (
-                          %s
-                          * INTERVAL '1 day'
-                      )
-                  AND observed_at <= %s
-
-                GROUP BY
-                    measurement_date
-
-                ORDER BY
-                    measurement_date ASC
-                """,
-                (
-                    metric_name,
-                    HUME_BUNDLE_ID,
-                    latest_time,
-                    history_days,
-                    latest_time,
+                query,
+                tuple(
+                    parameters
                 ),
             )
 
-            rows = (
+            return (
                 cur.fetchall()
             )
+
+
+def _hume_daily_history(
+    metric_name,
+    latest_time,
+    history_days=365,
+):
+    rows = (
+        _source_daily_history(
+            metric_name,
+            HUME_BUNDLE_ID,
+            start_time=(
+                latest_time
+                - timedelta(
+                    days=history_days
+                )
+            ),
+            end_time=latest_time,
+        )
+    )
 
     return [
         {
@@ -536,15 +640,18 @@ def _hume_daily_history(
     ]
 
 
-def _average_in_window(
+def _daily_average_in_window(
     metric_name,
+    source_bundle_id,
     start_time,
     end_time,
 ):
     """
-    Average Hume samples in a half-open interval:
+    Calculate an average of DAILY averages rather than
+    averaging every raw measurement.
 
-        start_time <= observed_at < end_time
+    This means a day containing two scale readings counts
+    once, exactly like a day containing one reading.
     """
 
     with get_conn() as conn:
@@ -552,29 +659,62 @@ def _average_in_window(
 
             cur.execute(
                 """
+                WITH daily AS (
+                    SELECT
+                        (
+                            observed_at
+                            AT TIME ZONE
+                            'America/New_York'
+                        )::date
+                            AS measurement_date,
+
+                        AVG(value)
+                            AS daily_value,
+
+                        COUNT(*)
+                            AS raw_observations,
+
+                        MIN(observed_at)
+                            AS first_observed_at,
+
+                        MAX(observed_at)
+                            AS last_observed_at
+
+                    FROM apple_health_body_samples
+
+                    WHERE metric_name = %s
+                      AND source_bundle_id = %s
+                      AND observed_at >= %s
+                      AND observed_at < %s
+
+                    GROUP BY
+                        measurement_date
+                )
+
                 SELECT
-                    AVG(value)
+                    AVG(daily_value)
                         AS average_value,
 
                     COUNT(*)
-                        AS observations,
+                        AS measurement_days,
 
-                    MIN(observed_at)
+                    COALESCE(
+                        SUM(raw_observations),
+                        0
+                    )
+                        AS raw_observations,
+
+                    MIN(first_observed_at)
                         AS oldest,
 
-                    MAX(observed_at)
+                    MAX(last_observed_at)
                         AS newest
 
-                FROM apple_health_body_samples
-
-                WHERE metric_name = %s
-                  AND source_bundle_id = %s
-                  AND observed_at >= %s
-                  AND observed_at < %s
+                FROM daily
                 """,
                 (
                     metric_name,
-                    HUME_BUNDLE_ID,
+                    source_bundle_id,
                     start_time,
                     end_time,
                 ),
@@ -585,6 +725,10 @@ def _average_in_window(
             )
 
 
+# ---------------------------------------------------------
+# Hume trend calculations
+# ---------------------------------------------------------
+
 def _trend_label(
     metric_name,
     change,
@@ -592,8 +736,7 @@ def _trend_label(
     """
     Measurement direction only.
 
-    This deliberately does NOT say whether the change is good
-    or bad. Goal interpretation belongs in goal_progress.py.
+    Goal interpretation belongs in goal_progress.py.
     """
 
     if change is None:
@@ -622,22 +765,6 @@ def _trend_horizon(
     latest_time,
     horizon_days,
 ):
-    """
-    Compare a recent smoothed 7-day average against a reference
-    7-day average near the beginning of the selected horizon.
-
-    Example for 28 days:
-
-        reference:
-            days -28 through -21
-
-        current:
-            most recent 7 days
-
-    This is less sensitive to a single anomalous scale reading
-    than comparing today's value with one historical value.
-    """
-
     current_start = (
         latest_time
         - timedelta(
@@ -667,16 +794,18 @@ def _trend_horizon(
     )
 
     current = (
-        _average_in_window(
+        _daily_average_in_window(
             metric_name,
+            HUME_BUNDLE_ID,
             current_start,
             current_end,
         )
     )
 
     reference = (
-        _average_in_window(
+        _daily_average_in_window(
             metric_name,
+            HUME_BUNDLE_ID,
             reference_start,
             reference_end,
         )
@@ -698,10 +827,10 @@ def _trend_horizon(
         else None
     )
 
-    current_observations = int(
+    current_days = int(
         (
             current[
-                "observations"
+                "measurement_days"
             ]
             if current
             else 0
@@ -709,10 +838,10 @@ def _trend_horizon(
         or 0
     )
 
-    reference_observations = int(
+    reference_days = int(
         (
             reference[
-                "observations"
+                "measurement_days"
             ]
             if reference
             else 0
@@ -720,10 +849,36 @@ def _trend_horizon(
         or 0
     )
 
-    if (
-        current_average is None
-        or reference_average is None
-    ):
+    current_raw = int(
+        (
+            current[
+                "raw_observations"
+            ]
+            if current
+            else 0
+        )
+        or 0
+    )
+
+    reference_raw = int(
+        (
+            reference[
+                "raw_observations"
+            ]
+            if reference
+            else 0
+        )
+        or 0
+    )
+
+    sufficient_data = (
+        current_average is not None
+        and reference_average is not None
+        and current_days >= 2
+        and reference_days >= 2
+    )
+
+    if not sufficient_data:
         change = None
         pct_change = None
         rate_per_week = None
@@ -749,16 +904,11 @@ def _trend_horizon(
             )
         )
 
-        weeks = (
-            horizon_days
-            / 7.0
-        )
-
         rate_per_week = (
-            change
-            / weeks
-            if weeks > 0
-            else None
+            _weekly_rate(
+                change,
+                horizon_days,
+            )
         )
 
     return {
@@ -773,8 +923,13 @@ def _trend_horizon(
                 current_average
             ),
 
+        "current_measurement_days":
+            current_days,
+
+        # Retained for easier compatibility with any
+        # consumers already reading this field.
         "current_observations":
-            current_observations,
+            current_raw,
 
         "current_oldest":
             _iso(
@@ -799,8 +954,11 @@ def _trend_horizon(
                 reference_average
             ),
 
+        "reference_measurement_days":
+            reference_days,
+
         "reference_observations":
-            reference_observations,
+            reference_raw,
 
         "reference_oldest":
             _iso(
@@ -837,36 +995,23 @@ def _trend_horizon(
             ),
 
         "trend":
-            _trend_label(
-                metric_name,
-                change,
+            (
+                _trend_label(
+                    metric_name,
+                    change,
+                )
+                if sufficient_data
+                else "insufficient_data"
             ),
 
         "sufficient_data":
-            (
-                current_observations
-                >= 2
-                and reference_observations
-                >= 2
-            ),
+            sufficient_data,
     }
 
 
 def _hume_metric_trend(
     metric_name,
 ):
-    """
-    Body-composition trends deliberately use Hume only.
-
-    Existing output fields are retained for backward
-    compatibility.
-
-    New output adds:
-        - current_7d_average
-        - trend_horizons
-        - history
-    """
-
     latest = (
         _latest_hume_sample(
             metric_name
@@ -899,8 +1044,9 @@ def _hume_metric_trend(
     )
 
     current_7d = (
-        _average_in_window(
+        _daily_average_in_window(
             metric_name,
+            HUME_BUNDLE_ID,
             latest_time
             - timedelta(
                 days=CURRENT_SMOOTHING_DAYS
@@ -933,11 +1079,18 @@ def _hume_metric_trend(
         )
     )
 
+    current_7d_value = (
+        current_7d[
+            "average_value"
+        ]
+        if current_7d
+        else None
+    )
+
     result = {
         "available":
             True,
 
-        # Existing compatibility fields
         "current_value":
             _round(
                 latest[
@@ -966,21 +1119,28 @@ def _hume_metric_trend(
         "windows":
             legacy_windows,
 
-        # New analytics
         "current_7d_average":
             _round(
-                current_7d[
-                    "average_value"
-                ]
-                if current_7d
-                else None
+                current_7d_value
+            ),
+
+        "current_7d_measurement_days":
+            int(
+                (
+                    current_7d[
+                        "measurement_days"
+                    ]
+                    if current_7d
+                    else 0
+                )
+                or 0
             ),
 
         "current_7d_observations":
             int(
                 (
                     current_7d[
-                        "observations"
+                        "raw_observations"
                     ]
                     if current_7d
                     else 0
@@ -1012,14 +1172,6 @@ def _hume_metric_trend(
             1,
         )
 
-        current_7d_value = (
-            current_7d[
-                "average_value"
-            ]
-            if current_7d
-            else None
-        )
-
         result[
             "current_7d_average_lb"
         ] = (
@@ -1038,17 +1190,15 @@ def _hume_metric_trend(
     return result
 
 
+# ---------------------------------------------------------
+# Hume-derived body-fat mass
+# ---------------------------------------------------------
+
 def _derived_body_fat_mass():
     """
-    Derive fat mass from same-day Hume weight and body-fat
-    percentage:
+    Derive Hume fat mass from same-day daily averages:
 
-        fat mass = weight * body-fat percentage
-
-    Weight is stored in kilograms, so derived fat mass is
-    initially kilograms.
-
-    The response clearly identifies the value as derived.
+        weight × body-fat percentage
     """
 
     with get_conn() as conn:
@@ -1073,7 +1223,8 @@ def _derived_body_fat_mass():
 
                     FROM apple_health_body_samples
 
-                    WHERE metric_name = 'body_weight'
+                    WHERE metric_name =
+                        'body_weight'
                       AND source_bundle_id = %s
 
                     GROUP BY
@@ -1180,9 +1331,9 @@ def _derived_body_fat_mass():
         ).days <= 365
     ]
 
-    def average_between(
-        start_days_ago,
-        end_days_ago,
+    def average_for_age_range(
+        minimum_age,
+        maximum_age,
     ):
         values = []
 
@@ -1196,10 +1347,8 @@ def _derived_body_fat_mass():
             ).days
 
             if (
-                age_days
-                >= end_days_ago
-                and age_days
-                < start_days_ago
+                age_days >= minimum_age
+                and age_days <= maximum_age
             ):
                 values.append(
                     float(
@@ -1221,10 +1370,10 @@ def _derived_body_fat_mass():
             len(values),
         )
 
-    current_7d_average, current_count = (
-        average_between(
-            7,
-            -1,
+    current_7d_average, current_days = (
+        average_for_age_range(
+            0,
+            CURRENT_SMOOTHING_DAYS - 1,
         )
     )
 
@@ -1234,17 +1383,22 @@ def _derived_body_fat_mass():
         BODY_COMPOSITION_HORIZONS
     ):
 
-        reference_average, reference_count = (
-            average_between(
-                horizon,
-                horizon - 7,
+        reference_average, reference_days = (
+            average_for_age_range(
+                horizon
+                - CURRENT_SMOOTHING_DAYS,
+                horizon - 1,
             )
         )
 
-        if (
-            current_7d_average is None
-            or reference_average is None
-        ):
+        sufficient_data = (
+            current_7d_average is not None
+            and reference_average is not None
+            and current_days >= 2
+            and reference_days >= 2
+        )
+
+        if not sufficient_data:
             change = None
             pct_change = None
             rate_per_week = None
@@ -1263,10 +1417,9 @@ def _derived_body_fat_mass():
             )
 
             rate_per_week = (
-                change
-                / (
-                    horizon
-                    / 7.0
+                _weekly_rate(
+                    change,
+                    horizon,
                 )
             )
 
@@ -1284,16 +1437,22 @@ def _derived_body_fat_mass():
                     current_7d_average
                 ),
 
+            "current_measurement_days":
+                current_days,
+
             "current_observations":
-                current_count,
+                current_days,
 
             "reference_average":
                 _round(
                     reference_average
                 ),
 
+            "reference_measurement_days":
+                reference_days,
+
             "reference_observations":
-                reference_count,
+                reference_days,
 
             "change":
                 _round(
@@ -1312,16 +1471,17 @@ def _derived_body_fat_mass():
                 ),
 
             "trend":
-                _trend_label(
-                    "body_fat_mass",
-                    change,
+                (
+                    _trend_label(
+                        "body_fat_mass",
+                        change,
+                    )
+                    if sufficient_data
+                    else "insufficient_data"
                 ),
 
             "sufficient_data":
-                (
-                    current_count >= 2
-                    and reference_count >= 2
-                ),
+                sufficient_data,
         }
 
     return {
@@ -1333,8 +1493,8 @@ def _derived_body_fat_mass():
 
         "derivation":
             (
-                "Hume body weight × "
-                "Hume body-fat percentage"
+                "Daily-average Hume body weight × "
+                "daily-average Hume body-fat percentage"
             ),
 
         "current_value":
@@ -1382,8 +1542,11 @@ def _derived_body_fat_mass():
                 else None
             ),
 
+        "current_7d_measurement_days":
+            current_days,
+
         "current_7d_observations":
-            current_count,
+            current_days,
 
         "trend_horizons":
             trend_horizons,
@@ -1428,19 +1591,966 @@ def _derived_body_fat_mass():
     }
 
 
+# ---------------------------------------------------------
+# Fitdays -> Hume source-transition calibration
+# ---------------------------------------------------------
+
+def _paired_source_days(
+    metric_name,
+):
+    """
+    Find local calendar dates containing BOTH Fitdays and
+    Hume measurements for the requested metric.
+
+    Each source is first averaged within that calendar day.
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                WITH daily AS (
+                    SELECT
+                        (
+                            observed_at
+                            AT TIME ZONE
+                            'America/New_York'
+                        )::date
+                            AS measurement_date,
+
+                        source_bundle_id,
+
+                        AVG(value)
+                            AS daily_value,
+
+                        COUNT(*)
+                            AS observations,
+
+                        MIN(observed_at)
+                            AS first_observed_at,
+
+                        MAX(observed_at)
+                            AS last_observed_at
+
+                    FROM apple_health_body_samples
+
+                    WHERE metric_name = %s
+                      AND source_bundle_id IN (
+                          %s,
+                          %s
+                      )
+
+                    GROUP BY
+                        measurement_date,
+                        source_bundle_id
+                ),
+
+                fitdays AS (
+                    SELECT
+                        measurement_date,
+                        daily_value,
+                        observations,
+                        first_observed_at,
+                        last_observed_at
+
+                    FROM daily
+
+                    WHERE source_bundle_id = %s
+                ),
+
+                hume AS (
+                    SELECT
+                        measurement_date,
+                        daily_value,
+                        observations,
+                        first_observed_at,
+                        last_observed_at
+
+                    FROM daily
+
+                    WHERE source_bundle_id = %s
+                )
+
+                SELECT
+                    f.measurement_date,
+
+                    f.daily_value
+                        AS fitdays_value,
+
+                    h.daily_value
+                        AS hume_value,
+
+                    f.observations
+                        AS fitdays_observations,
+
+                    h.observations
+                        AS hume_observations,
+
+                    f.first_observed_at
+                        AS fitdays_first_observed_at,
+
+                    f.last_observed_at
+                        AS fitdays_last_observed_at,
+
+                    h.first_observed_at
+                        AS hume_first_observed_at,
+
+                    h.last_observed_at
+                        AS hume_last_observed_at
+
+                FROM fitdays f
+
+                INNER JOIN hume h
+                    ON h.measurement_date =
+                        f.measurement_date
+
+                ORDER BY
+                    f.measurement_date ASC
+                """,
+                (
+                    metric_name,
+                    FITDAYS_BUNDLE_ID,
+                    HUME_BUNDLE_ID,
+                    FITDAYS_BUNDLE_ID,
+                    HUME_BUNDLE_ID,
+                ),
+            )
+
+            return (
+                cur.fetchall()
+            )
+
+
+def _source_transition_metric(
+    metric_name,
+):
+    rows = (
+        _paired_source_days(
+            metric_name
+        )
+    )
+
+    if not rows:
+        return {
+            "available":
+                False,
+
+            "paired_days":
+                0,
+
+            "reason":
+                (
+                    "No same-day Fitdays and Hume "
+                    "measurements are available."
+                ),
+        }
+
+    paired = []
+
+    signed_differences = []
+    absolute_differences = []
+
+    for row in rows:
+
+        fitdays_value = float(
+            row[
+                "fitdays_value"
+            ]
+        )
+
+        hume_value = float(
+            row[
+                "hume_value"
+            ]
+        )
+
+        # Signed difference is always:
+        #
+        #     Hume - Fitdays
+        #
+        # Negative therefore means Hume reads lower.
+        difference = (
+            hume_value
+            - fitdays_value
+        )
+
+        signed_differences.append(
+            difference
+        )
+
+        absolute_differences.append(
+            abs(
+                difference
+            )
+        )
+
+        pair = {
+            "date":
+                row[
+                    "measurement_date"
+                ].isoformat(),
+
+            "fitdays_value":
+                _round(
+                    fitdays_value
+                ),
+
+            "hume_value":
+                _round(
+                    hume_value
+                ),
+
+            "hume_minus_fitdays":
+                _round(
+                    difference
+                ),
+
+            "fitdays_observations":
+                int(
+                    row[
+                        "fitdays_observations"
+                    ]
+                    or 0
+                ),
+
+            "hume_observations":
+                int(
+                    row[
+                        "hume_observations"
+                    ]
+                    or 0
+                ),
+
+            "fitdays_first_observed_at":
+                _iso(
+                    row[
+                        "fitdays_first_observed_at"
+                    ]
+                ),
+
+            "fitdays_last_observed_at":
+                _iso(
+                    row[
+                        "fitdays_last_observed_at"
+                    ]
+                ),
+
+            "hume_first_observed_at":
+                _iso(
+                    row[
+                        "hume_first_observed_at"
+                    ]
+                ),
+
+            "hume_last_observed_at":
+                _iso(
+                    row[
+                        "hume_last_observed_at"
+                    ]
+                ),
+        }
+
+        if metric_name == (
+            "body_weight"
+        ):
+            pair[
+                "fitdays_value_lb"
+            ] = _round(
+                fitdays_value
+                * KG_TO_LB,
+                1,
+            )
+
+            pair[
+                "hume_value_lb"
+            ] = _round(
+                hume_value
+                * KG_TO_LB,
+                1,
+            )
+
+            pair[
+                "hume_minus_fitdays_lb"
+            ] = _round(
+                difference
+                * KG_TO_LB,
+                1,
+            )
+
+        paired.append(
+            pair
+        )
+
+    mean_difference = (
+        sum(
+            signed_differences
+        )
+        / len(
+            signed_differences
+        )
+    )
+
+    mean_absolute_difference = (
+        sum(
+            absolute_differences
+        )
+        / len(
+            absolute_differences
+        )
+    )
+
+    min_difference = min(
+        signed_differences
+    )
+
+    max_difference = max(
+        signed_differences
+    )
+
+    result = {
+        "available":
+            True,
+
+        "paired_days":
+            len(
+                rows
+            ),
+
+        "overlap_start":
+            rows[
+                0
+            ][
+                "measurement_date"
+            ].isoformat(),
+
+        "overlap_end":
+            rows[
+                -1
+            ][
+                "measurement_date"
+            ].isoformat(),
+
+        "average_hume_minus_fitdays":
+            _round(
+                mean_difference
+            ),
+
+        "average_absolute_difference":
+            _round(
+                mean_absolute_difference
+            ),
+
+        "minimum_hume_minus_fitdays":
+            _round(
+                min_difference
+            ),
+
+        "maximum_hume_minus_fitdays":
+            _round(
+                max_difference
+            ),
+
+        "pairs":
+            paired,
+    }
+
+    if metric_name == (
+        "body_weight"
+    ):
+
+        result[
+            "unit"
+        ] = "kg"
+
+        result[
+            "average_hume_minus_fitdays_lb"
+        ] = _round(
+            mean_difference
+            * KG_TO_LB,
+            1,
+        )
+
+        result[
+            "average_absolute_difference_lb"
+        ] = _round(
+            mean_absolute_difference
+            * KG_TO_LB,
+            1,
+        )
+
+    elif metric_name == (
+        "body_fat_percentage"
+    ):
+
+        result[
+            "unit"
+        ] = (
+            "percentage_points"
+        )
+
+    return result
+
+
+def _source_transition_derived_composition():
+    """
+    Compare derived fat and lean mass on dates where BOTH
+    sources contain weight and body-fat percentage.
+
+    This is diagnostic only.
+
+    It does not replace measured lean body mass and it does
+    not alter coaching calculations.
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                WITH daily AS (
+                    SELECT
+                        (
+                            observed_at
+                            AT TIME ZONE
+                            'America/New_York'
+                        )::date
+                            AS measurement_date,
+
+                        source_bundle_id,
+
+                        metric_name,
+
+                        AVG(value)
+                            AS daily_value
+
+                    FROM apple_health_body_samples
+
+                    WHERE source_bundle_id IN (
+                        %s,
+                        %s
+                    )
+                      AND metric_name IN (
+                          'body_weight',
+                          'body_fat_percentage'
+                      )
+
+                    GROUP BY
+                        measurement_date,
+                        source_bundle_id,
+                        metric_name
+                ),
+
+                composed AS (
+                    SELECT
+                        measurement_date,
+                        source_bundle_id,
+
+                        MAX(
+                            CASE
+                                WHEN metric_name =
+                                    'body_weight'
+                                THEN daily_value
+                            END
+                        )
+                            AS weight_kg,
+
+                        MAX(
+                            CASE
+                                WHEN metric_name =
+                                    'body_fat_percentage'
+                                THEN daily_value
+                            END
+                        )
+                            AS body_fat_percentage
+
+                    FROM daily
+
+                    GROUP BY
+                        measurement_date,
+                        source_bundle_id
+                ),
+
+                fitdays AS (
+                    SELECT *
+                    FROM composed
+                    WHERE source_bundle_id = %s
+                      AND weight_kg IS NOT NULL
+                      AND body_fat_percentage IS NOT NULL
+                ),
+
+                hume AS (
+                    SELECT *
+                    FROM composed
+                    WHERE source_bundle_id = %s
+                      AND weight_kg IS NOT NULL
+                      AND body_fat_percentage IS NOT NULL
+                )
+
+                SELECT
+                    f.measurement_date,
+
+                    f.weight_kg
+                        AS fitdays_weight_kg,
+
+                    f.body_fat_percentage
+                        AS fitdays_body_fat_percentage,
+
+                    h.weight_kg
+                        AS hume_weight_kg,
+
+                    h.body_fat_percentage
+                        AS hume_body_fat_percentage
+
+                FROM fitdays f
+
+                INNER JOIN hume h
+                    ON h.measurement_date =
+                        f.measurement_date
+
+                ORDER BY
+                    f.measurement_date ASC
+                """,
+                (
+                    FITDAYS_BUNDLE_ID,
+                    HUME_BUNDLE_ID,
+                    FITDAYS_BUNDLE_ID,
+                    HUME_BUNDLE_ID,
+                ),
+            )
+
+            rows = (
+                cur.fetchall()
+            )
+
+    if not rows:
+        return {
+            "available":
+                False,
+
+            "paired_days":
+                0,
+
+            "reason":
+                (
+                    "No dates contain both weight and "
+                    "body-fat measurements from both "
+                    "Fitdays and Hume."
+                ),
+        }
+
+    fat_differences = []
+    lean_differences = []
+
+    pairs = []
+
+    for row in rows:
+
+        fitdays_weight = float(
+            row[
+                "fitdays_weight_kg"
+            ]
+        )
+
+        fitdays_bf = float(
+            row[
+                "fitdays_body_fat_percentage"
+            ]
+        )
+
+        hume_weight = float(
+            row[
+                "hume_weight_kg"
+            ]
+        )
+
+        hume_bf = float(
+            row[
+                "hume_body_fat_percentage"
+            ]
+        )
+
+        fitdays_fat = (
+            fitdays_weight
+            * fitdays_bf
+            / 100.0
+        )
+
+        hume_fat = (
+            hume_weight
+            * hume_bf
+            / 100.0
+        )
+
+        fitdays_lean = (
+            fitdays_weight
+            - fitdays_fat
+        )
+
+        hume_lean = (
+            hume_weight
+            - hume_fat
+        )
+
+        fat_difference = (
+            hume_fat
+            - fitdays_fat
+        )
+
+        lean_difference = (
+            hume_lean
+            - fitdays_lean
+        )
+
+        fat_differences.append(
+            fat_difference
+        )
+
+        lean_differences.append(
+            lean_difference
+        )
+
+        pairs.append(
+            {
+                "date":
+                    row[
+                        "measurement_date"
+                    ].isoformat(),
+
+                "fitdays_fat_mass_lb":
+                    _round(
+                        fitdays_fat
+                        * KG_TO_LB,
+                        1,
+                    ),
+
+                "hume_fat_mass_lb":
+                    _round(
+                        hume_fat
+                        * KG_TO_LB,
+                        1,
+                    ),
+
+                "fat_mass_hume_minus_fitdays_lb":
+                    _round(
+                        fat_difference
+                        * KG_TO_LB,
+                        1,
+                    ),
+
+                "fitdays_derived_lean_mass_lb":
+                    _round(
+                        fitdays_lean
+                        * KG_TO_LB,
+                        1,
+                    ),
+
+                "hume_derived_lean_mass_lb":
+                    _round(
+                        hume_lean
+                        * KG_TO_LB,
+                        1,
+                    ),
+
+                "lean_mass_hume_minus_fitdays_lb":
+                    _round(
+                        lean_difference
+                        * KG_TO_LB,
+                        1,
+                    ),
+            }
+        )
+
+    average_fat_difference = (
+        sum(
+            fat_differences
+        )
+        / len(
+            fat_differences
+        )
+    )
+
+    average_lean_difference = (
+        sum(
+            lean_differences
+        )
+        / len(
+            lean_differences
+        )
+    )
+
+    return {
+        "available":
+            True,
+
+        "derived":
+            True,
+
+        "paired_days":
+            len(
+                rows
+            ),
+
+        "overlap_start":
+            rows[
+                0
+            ][
+                "measurement_date"
+            ].isoformat(),
+
+        "overlap_end":
+            rows[
+                -1
+            ][
+                "measurement_date"
+            ].isoformat(),
+
+        "average_fat_mass_hume_minus_fitdays_lb":
+            _round(
+                average_fat_difference
+                * KG_TO_LB,
+                1,
+            ),
+
+        "average_lean_mass_hume_minus_fitdays_lb":
+            _round(
+                average_lean_difference
+                * KG_TO_LB,
+                1,
+            ),
+
+        "pairs":
+            pairs,
+    }
+
+
+def _transition_assessment(
+    weight,
+    body_fat,
+):
+    """
+    Conservative diagnostic assessment.
+
+    Three overlapping days are useful for understanding the
+    scale transition, but they are not enough to justify
+    automatic normalization of historical Fitdays data.
+    """
+
+    weight_days = (
+        weight.get(
+            "paired_days",
+            0,
+        )
+        if weight
+        else 0
+    )
+
+    body_fat_days = (
+        body_fat.get(
+            "paired_days",
+            0,
+        )
+        if body_fat
+        else 0
+    )
+
+    paired_days = min(
+        weight_days,
+        body_fat_days,
+    )
+
+    if paired_days == 0:
+        return {
+            "classification":
+                "no_overlap",
+
+            "historical_fitdays_usable_for_context":
+                True,
+
+            "historical_fitdays_usable_for_direct_hume_trend":
+                False,
+
+            "automatic_normalization_recommended":
+                False,
+
+            "reason":
+                (
+                    "No same-day overlap is available, so "
+                    "Fitdays can provide historical context "
+                    "but should not be mathematically merged "
+                    "with Hume trends."
+                ),
+        }
+
+    if paired_days < 7:
+        return {
+            "classification":
+                "limited_overlap",
+
+            "historical_fitdays_usable_for_context":
+                True,
+
+            "historical_fitdays_usable_for_direct_hume_trend":
+                False,
+
+            "automatic_normalization_recommended":
+                False,
+
+            "reason":
+                (
+                    f"{paired_days} paired day(s) are available. "
+                    "This is useful for diagnosing the scale "
+                    "transition but is too little overlap for "
+                    "automatic historical normalization."
+                ),
+        }
+
+    return {
+        "classification":
+            "calibration_candidate",
+
+        "historical_fitdays_usable_for_context":
+            True,
+
+        "historical_fitdays_usable_for_direct_hume_trend":
+            False,
+
+        "automatic_normalization_recommended":
+            False,
+
+        "reason":
+            (
+                "There is enough overlap to investigate "
+                "cross-scale calibration, but normalization "
+                "should only be enabled after reviewing bias "
+                "and stability across the paired measurements."
+            ),
+    }
+
+
+def _source_transition_analysis():
+    weight = (
+        _source_transition_metric(
+            "body_weight"
+        )
+    )
+
+    body_fat = (
+        _source_transition_metric(
+            "body_fat_percentage"
+        )
+    )
+
+    derived = (
+        _source_transition_derived_composition()
+    )
+
+    overlap_dates = []
+
+    for result in (
+        weight,
+        body_fat,
+    ):
+        for pair in (
+            result.get(
+                "pairs",
+                []
+            )
+        ):
+            overlap_dates.append(
+                pair[
+                    "date"
+                ]
+            )
+
+    return {
+        "previous_source": {
+            "name":
+                "Fitdays",
+
+            "bundle_id":
+                FITDAYS_BUNDLE_ID,
+        },
+
+        "current_source": {
+            "name":
+                "Hume",
+
+            "bundle_id":
+                HUME_BUNDLE_ID,
+        },
+
+        "overlap_start":
+            (
+                min(
+                    overlap_dates
+                )
+                if overlap_dates
+                else None
+            ),
+
+        "overlap_end":
+            (
+                max(
+                    overlap_dates
+                )
+                if overlap_dates
+                else None
+            ),
+
+        "difference_definition":
+            (
+                "All signed differences are Hume minus Fitdays."
+            ),
+
+        "weight":
+            weight,
+
+        "body_fat_percentage":
+            body_fat,
+
+        "derived_composition":
+            derived,
+
+        "assessment":
+            _transition_assessment(
+                weight,
+                body_fat,
+            ),
+
+        "coaching_policy":
+            {
+                "current_coaching_source":
+                    "Hume only",
+
+                "fitdays_changes_current_coaching":
+                    False,
+
+                "fitdays_changes_hume_trend_horizons":
+                    False,
+
+                "purpose":
+                    (
+                        "Fitdays is currently retained only "
+                        "for historical context and source-"
+                        "transition analysis."
+                    ),
+            },
+    }
+
+
+# ---------------------------------------------------------
+# Public response
+# ---------------------------------------------------------
+
 def apple_health_trends():
     """
-    Unified Apple Health / Hume trend response.
+    Unified body/activity analytics.
 
-    Activity:
-        existing 7/14/30/90 logic
+    Current coaching remains Hume-only.
 
-    Body composition:
-        legacy windows preserved
-        + 7-day smoothed current values
-        + 28/90/180/365-day trend horizons
-        + daily history for charting
-        + derived body-fat mass
+    Fitdays is exposed separately as historical source-
+    transition context and does not affect Hume calculations.
     """
 
     activity = (
@@ -1469,6 +2579,10 @@ def apple_health_trends():
         _derived_body_fat_mass()
     )
 
+    source_transition = (
+        _source_transition_analysis()
+    )
+
     return {
         "status":
             "ok",
@@ -1483,27 +2597,46 @@ def apple_health_trends():
 
             "weight":
                 (
+                    "Current trend calculations use "
                     "Hume-only measurements."
                 ),
 
             "body_fat":
                 (
-                    "Hume-only measurements to "
-                    "prevent cross-device bias."
+                    "Current trend calculations use "
+                    "Hume-only measurements to prevent "
+                    "cross-device bias."
                 ),
 
             "lean_mass":
                 (
-                    "Hume-only. If unavailable, "
-                    "excluded from direct measured "
-                    "lean-mass analytics."
+                    "Hume-only measured lean mass. "
+                    "If Hume does not publish this "
+                    "HealthKit metric, direct measured "
+                    "lean-mass analytics remain unavailable."
                 ),
 
             "body_fat_mass":
                 (
-                    "Derived from same-day Hume "
-                    "body weight and Hume body-fat "
+                    "Derived from same-day daily-average "
+                    "Hume body weight and Hume body-fat "
                     "percentage."
+                ),
+
+            "daily_aggregation":
+                (
+                    "Multiple measurements from the same "
+                    "source on the same local calendar day "
+                    "are averaged before smoothed trend "
+                    "calculations."
+                ),
+
+            "source_transition":
+                (
+                    "Fitdays history is analyzed separately "
+                    "against overlapping Hume measurements. "
+                    "It does not alter current Hume coaching "
+                    "or Hume trend calculations."
                 ),
 
             "legacy_baseline_windows":
@@ -1521,10 +2654,17 @@ def apple_health_trends():
 
             "trend_method":
                 (
-                    "Recent 7-day average compared "
-                    "with a 7-day reference window "
-                    "near the beginning of each "
-                    "selected horizon."
+                    "Recent 7-day daily-average mean "
+                    "compared with a 7-day reference "
+                    "daily-average mean near the beginning "
+                    "of each selected horizon."
+                ),
+
+            "rate_method":
+                (
+                    "Rate per week uses the approximate "
+                    "separation between the centers of the "
+                    "reference and current smoothing windows."
                 ),
         },
 
@@ -1544,4 +2684,7 @@ def apple_health_trends():
             "lean_body_mass":
                 lean_mass,
         },
+
+        "source_transition":
+            source_transition,
     }
