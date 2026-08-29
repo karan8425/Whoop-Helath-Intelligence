@@ -735,6 +735,7 @@ async def goals_progress(
         goal_progress()
     )
 
+
 # ============================================================
 # WEEKLY HEALTH ANALYTICS
 #
@@ -771,6 +772,7 @@ async def weekly_health_analytics(
                 f"{exc}"
             ),
         ) from exc
+
 
 # ============================================================
 # BODY COMPOSITION TREND ANALYTICS
@@ -812,6 +814,11 @@ async def body_composition_analytics(
                 trends.get(
                     "body_composition"
                 ),
+
+            "source_transition":
+                trends.get(
+                    "source_transition"
+                ),
         }
 
     except Exception as exc:
@@ -823,6 +830,7 @@ async def body_composition_analytics(
                 f"{exc}"
             ),
         ) from exc
+
 
 # ============================================================
 # DAILY HEALTH INTELLIGENCE
