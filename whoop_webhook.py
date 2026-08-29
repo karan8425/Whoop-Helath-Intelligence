@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -22,12 +23,18 @@ from whoop_webhook_store import (
     store_webhook_event,
     mark_pipeline_started,
     mark_pipeline_completed,
+    mark_pipeline_skipped,
     mark_pipeline_failed,
+    pipeline_lock,
 )
 
 
 router = APIRouter()
 
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 WHOOP_CLIENT_SECRET = os.getenv(
     "WHOOP_CLIENT_SECRET",
@@ -36,12 +43,23 @@ WHOOP_CLIENT_SECRET = os.getenv(
 
 MAX_TIMESTAMP_AGE_SECONDS = 300
 
+SLEEP_EVENT_DELAY_SECONDS = 45
+
+SLEEP_EVENT_MAX_ATTEMPTS = 4
+
+SLEEP_EVENT_RETRY_SECONDS = 45
+
+
+# ============================================================
+# TIMESTAMP VALIDATION
+# ============================================================
 
 def _validate_timestamp(
     timestamp: str,
 ) -> None:
 
     try:
+
         timestamp_milliseconds = int(
             timestamp
         )
@@ -53,7 +71,9 @@ def _validate_timestamp(
 
         raise HTTPException(
             status_code=401,
-            detail="Invalid WHOOP webhook timestamp.",
+            detail=(
+                "Invalid WHOOP webhook timestamp."
+            ),
         ) from exc
 
     timestamp_seconds = (
@@ -61,22 +81,27 @@ def _validate_timestamp(
         / 1000.0
     )
 
-    current_time_seconds = (
-        time.time()
-    )
-
     age_seconds = abs(
-        current_time_seconds
+        time.time()
         - timestamp_seconds
     )
 
-    if age_seconds > MAX_TIMESTAMP_AGE_SECONDS:
+    if (
+        age_seconds
+        > MAX_TIMESTAMP_AGE_SECONDS
+    ):
 
         raise HTTPException(
             status_code=401,
-            detail="Expired WHOOP webhook timestamp.",
+            detail=(
+                "Expired WHOOP webhook timestamp."
+            ),
         )
 
+
+# ============================================================
+# SIGNATURE VALIDATION
+# ============================================================
 
 def _validate_signature(
     timestamp: str,
@@ -95,12 +120,16 @@ def _validate_signature(
         )
 
     signed_payload = (
-        timestamp.encode("utf-8")
+        timestamp.encode(
+            "utf-8"
+        )
         + body
     )
 
     digest = hmac.new(
-        WHOOP_CLIENT_SECRET.encode("utf-8"),
+        WHOOP_CLIENT_SECRET.encode(
+            "utf-8"
+        ),
         signed_payload,
         hashlib.sha256,
     ).digest()
@@ -108,7 +137,9 @@ def _validate_signature(
     expected_signature = (
         base64.b64encode(
             digest
-        ).decode("utf-8")
+        ).decode(
+            "utf-8"
+        )
     )
 
     if not hmac.compare_digest(
@@ -118,38 +149,92 @@ def _validate_signature(
 
         raise HTTPException(
             status_code=401,
-            detail="Invalid WHOOP webhook signature.",
+            detail=(
+                "Invalid WHOOP webhook signature."
+            ),
         )
 
 
-def _run_recovery_pipeline(
+# ============================================================
+# PIPELINE EXECUTION
+# ============================================================
+
+def _execute_pipeline_once(
+    event_id: int,
     trace_id: str,
-) -> None:
+    event_type: str,
+):
 
-    print(
-        "[whoop-webhook] "
-        f"starting daily pipeline "
-        f"trace_id={trace_id}",
-        flush=True,
-    )
+    with pipeline_lock() as acquired:
 
-    try:
+        if not acquired:
+
+            print(
+                "[whoop-webhook] "
+                "pipeline already running; "
+                "skipping overlapping event "
+                f"event_id={event_id} "
+                f"type={event_type} "
+                f"trace_id={trace_id}",
+                flush=True,
+            )
+
+            mark_pipeline_skipped(
+                event_id,
+                "skipped_pipeline_busy",
+            )
+
+            return {
+                "status":
+                    "skipped_pipeline_busy"
+            }
+
         mark_pipeline_started(
-            trace_id
-        )
-
-        result = run_daily_pipeline()
-
-        mark_pipeline_completed(
-            trace_id
+            event_id
         )
 
         print(
             "[whoop-webhook] "
-            f"daily pipeline completed "
+            "starting daily pipeline "
+            f"event_id={event_id} "
+            f"type={event_type} "
+            f"trace_id={trace_id}",
+            flush=True,
+        )
+
+        result = (
+            run_daily_pipeline()
+        )
+
+        mark_pipeline_completed(
+            event_id
+        )
+
+        print(
+            "[whoop-webhook] "
+            "daily pipeline finished "
+            f"event_id={event_id} "
+            f"type={event_type} "
             f"trace_id={trace_id} "
             f"status={result.get('status')}",
             flush=True,
+        )
+
+        return result
+
+
+def _run_immediate_pipeline(
+    event_id: int,
+    trace_id: str,
+    event_type: str,
+) -> None:
+
+    try:
+
+        _execute_pipeline_once(
+            event_id,
+            trace_id,
+            event_type,
         )
 
     except Exception as exc:
@@ -160,18 +245,134 @@ def _run_recovery_pipeline(
         )
 
         mark_pipeline_failed(
-            trace_id,
+            event_id,
             error_text,
         )
 
         print(
             "[whoop-webhook] "
-            f"daily pipeline failed "
+            "pipeline failed "
+            f"event_id={event_id} "
+            f"type={event_type} "
             f"trace_id={trace_id} "
             f"error={type(exc).__name__}: {exc}",
             flush=True,
         )
 
+
+async def _run_sleep_pipeline(
+    event_id: int,
+    trace_id: str,
+    event_type: str,
+) -> None:
+
+    print(
+        "[whoop-webhook] "
+        "sleep event received; "
+        f"waiting {SLEEP_EVENT_DELAY_SECONDS}s "
+        "for WHOOP Recovery processing "
+        f"event_id={event_id} "
+        f"trace_id={trace_id}",
+        flush=True,
+    )
+
+    await asyncio.sleep(
+        SLEEP_EVENT_DELAY_SECONDS
+    )
+
+    try:
+
+        for attempt in range(
+            1,
+            SLEEP_EVENT_MAX_ATTEMPTS + 1,
+        ):
+
+            result = await asyncio.to_thread(
+                _execute_pipeline_once,
+                event_id,
+                trace_id,
+                event_type,
+            )
+
+            status = (
+                result.get(
+                    "status"
+                )
+                if result
+                else None
+            )
+
+            if status == "completed":
+
+                return
+
+            if status == "skipped_pipeline_busy":
+
+                return
+
+            if status not in {
+                "pending_freshness",
+                "stale_data",
+            }:
+
+                return
+
+            if (
+                attempt
+                >= SLEEP_EVENT_MAX_ATTEMPTS
+            ):
+
+                print(
+                    "[whoop-webhook] "
+                    "Recovery still not ready after "
+                    f"{attempt} attempts "
+                    f"event_id={event_id} "
+                    f"trace_id={trace_id}",
+                    flush=True,
+                )
+
+                return
+
+            print(
+                "[whoop-webhook] "
+                "Recovery not ready; "
+                f"retrying in "
+                f"{SLEEP_EVENT_RETRY_SECONDS}s "
+                f"attempt={attempt} "
+                f"event_id={event_id} "
+                f"trace_id={trace_id}",
+                flush=True,
+            )
+
+            await asyncio.sleep(
+                SLEEP_EVENT_RETRY_SECONDS
+            )
+
+    except Exception as exc:
+
+        error_text = (
+            f"{type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+
+        mark_pipeline_failed(
+            event_id,
+            error_text,
+        )
+
+        print(
+            "[whoop-webhook] "
+            "sleep-triggered pipeline failed "
+            f"event_id={event_id} "
+            f"trace_id={trace_id} "
+            f"error={type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
+# ============================================================
+# WEBHOOK ENDPOINT
+# ============================================================
 
 @router.post(
     "/webhooks/whoop"
@@ -189,7 +390,10 @@ async def receive_whoop_webhook(
         "X-WHOOP-Signature"
     )
 
-    if not timestamp or not signature:
+    if (
+        not timestamp
+        or not signature
+    ):
 
         raise HTTPException(
             status_code=401,
@@ -212,6 +416,7 @@ async def receive_whoop_webhook(
     )
 
     try:
+
         payload = json.loads(
             body
         )
@@ -239,6 +444,26 @@ async def receive_whoop_webhook(
         "user_id"
     )
 
+    if not trace_id:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "WHOOP webhook payload "
+                "is missing trace_id."
+            ),
+        )
+
+    if not event_type:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "WHOOP webhook payload "
+                "is missing type."
+            ),
+        )
+
     print(
         "[whoop-webhook] "
         f"type={event_type} "
@@ -250,46 +475,162 @@ async def receive_whoop_webhook(
 
     init_whoop_webhook_tables()
 
-    is_new_event = store_webhook_event(
-        trace_id=trace_id,
-        event_type=event_type,
-        resource_id=resource_id,
-        user_id=user_id,
-        payload=payload,
+    event_id = (
+        store_webhook_event(
+            trace_id=trace_id,
+            event_type=event_type,
+            resource_id=resource_id,
+            user_id=user_id,
+            payload=payload,
+        )
     )
 
-    if not is_new_event:
+    # --------------------------------------------------------
+    # Exact duplicate:
+    #
+    # same trace_id + same event_type
+    #
+    # A related event with the same trace_id but a DIFFERENT
+    # event_type is NOT a duplicate.
+    # --------------------------------------------------------
+
+    if event_id is None:
 
         print(
             "[whoop-webhook] "
-            f"duplicate ignored "
+            "exact duplicate ignored "
+            f"type={event_type} "
             f"trace_id={trace_id}",
             flush=True,
         )
 
         return {
-            "status": "duplicate_ignored",
-            "event_type": event_type,
-            "trace_id": trace_id,
+            "status":
+                "duplicate_ignored",
+
+            "event_type":
+                event_type,
+
+            "trace_id":
+                trace_id,
         }
 
-    if event_type != "recovery.updated":
+    # --------------------------------------------------------
+    # RECOVERY
+    # --------------------------------------------------------
+
+    if event_type == "recovery.updated":
+
+        background_tasks.add_task(
+            _run_immediate_pipeline,
+            event_id,
+            trace_id,
+            event_type,
+        )
 
         return {
-            "status": "accepted",
-            "event_type": event_type,
-            "trace_id": trace_id,
-            "pipeline_triggered": False,
+            "status":
+                "accepted",
+
+            "event_id":
+                event_id,
+
+            "event_type":
+                event_type,
+
+            "trace_id":
+                trace_id,
+
+            "pipeline_triggered":
+                True,
+
+            "trigger_mode":
+                "immediate",
         }
 
-    background_tasks.add_task(
-        _run_recovery_pipeline,
-        trace_id,
-    )
+    # --------------------------------------------------------
+    # WORKOUT
+    # --------------------------------------------------------
+
+    if event_type == "workout.updated":
+
+        background_tasks.add_task(
+            _run_immediate_pipeline,
+            event_id,
+            trace_id,
+            event_type,
+        )
+
+        return {
+            "status":
+                "accepted",
+
+            "event_id":
+                event_id,
+
+            "event_type":
+                event_type,
+
+            "trace_id":
+                trace_id,
+
+            "pipeline_triggered":
+                True,
+
+            "trigger_mode":
+                "immediate",
+        }
+
+    # --------------------------------------------------------
+    # SLEEP FALLBACK
+    # --------------------------------------------------------
+
+    if event_type == "sleep.updated":
+
+        background_tasks.add_task(
+            _run_sleep_pipeline,
+            event_id,
+            trace_id,
+            event_type,
+        )
+
+        return {
+            "status":
+                "accepted",
+
+            "event_id":
+                event_id,
+
+            "event_type":
+                event_type,
+
+            "trace_id":
+                trace_id,
+
+            "pipeline_triggered":
+                True,
+
+            "trigger_mode":
+                "wait_for_recovery",
+        }
+
+    # --------------------------------------------------------
+    # OTHER EVENTS
+    # --------------------------------------------------------
 
     return {
-        "status": "accepted",
-        "event_type": event_type,
-        "trace_id": trace_id,
-        "pipeline_triggered": True,
+        "status":
+            "accepted",
+
+        "event_id":
+            event_id,
+
+        "event_type":
+            event_type,
+
+        "trace_id":
+            trace_id,
+
+        "pipeline_triggered":
+            False,
     }
