@@ -815,6 +815,51 @@ async def body_composition_analytics(
                     "body_composition"
                 ),
 
+            "body_composition_progress":
+                trends.get(
+                    "body_composition_progress"
+                ),
+
+            "source_transition":
+                trends.get(
+                    "source_transition"
+                ),
+        }
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Body Composition Analytics failed: "
+                f"{exc}"
+            ),
+        ) from exc
+    
+    require_admin(
+        request
+    )
+
+    try:
+
+        trends = (
+            apple_health_trends()
+        )
+
+        return {
+            "status":
+                "ok",
+
+            "methodology":
+                trends.get(
+                    "methodology"
+                ),
+
+            "body_composition":
+                trends.get(
+                    "body_composition"
+                ),
+
             "source_transition":
                 trends.get(
                     "source_transition"
