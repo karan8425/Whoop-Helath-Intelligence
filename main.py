@@ -38,6 +38,10 @@ from baselines import (
     init_baselines,
 )
 
+from weekly_analytics import (
+    weekly_health_summary,
+)
+
 from freshness import (
     freshness_status,
 )
@@ -730,6 +734,43 @@ async def goals_progress(
     return (
         goal_progress()
     )
+
+# ============================================================
+# WEEKLY HEALTH ANALYTICS
+#
+# Deterministic diagnostic endpoint used to validate weekly
+# calculations before building the weekly AI intelligence
+# layer or exposing a mobile API.
+#
+# This endpoint does NOT call OpenAI.
+# ============================================================
+
+@app.get(
+    "/health-intelligence/weekly/analytics"
+)
+async def weekly_health_analytics(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    try:
+
+        return (
+            weekly_health_summary()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Weekly Health Analytics failed: "
+                f"{exc}"
+            ),
+        ) from exc
 
 
 # ============================================================
