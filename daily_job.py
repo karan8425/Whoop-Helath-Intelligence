@@ -10,13 +10,23 @@ from analytics import init_analytics, rebuild_daily_metrics
 from baselines import init_baselines, rebuild_baselines
 from sync import incremental_sync
 from recommendations import daily_recommendation
-from ai_intelligence import generate_daily_ai_brief
 from freshness import freshness_status
 
+from daily_health_intelligence_store import (
+    get_daily_health_intelligence,
+)
+
+
+# ============================================================
+# DATABASE SETUP
+# ============================================================
 
 def init_automation_tables():
+
     with get_conn() as conn:
+
         with conn.cursor() as cur:
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS whoop_daily_intelligence (
                     metric_date DATE PRIMARY KEY,
@@ -26,6 +36,7 @@ def init_automation_tables():
                     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS whoop_daily_automation_runs (
                     id BIGSERIAL PRIMARY KEY,
@@ -42,70 +53,142 @@ def init_automation_tables():
                     error TEXT
                 )
             """)
+
             cur.execute("""
                 ALTER TABLE whoop_daily_automation_runs
                 ADD COLUMN IF NOT EXISTS freshness_result JSONB
             """)
 
 
+# ============================================================
+# AUTOMATION RUN AUDIT
+# ============================================================
+
 def start_run():
+
     with get_conn() as conn:
+
         with conn.cursor() as cur:
+
             cur.execute("""
-                INSERT INTO whoop_daily_automation_runs DEFAULT VALUES
+                INSERT INTO whoop_daily_automation_runs
+                DEFAULT VALUES
                 RETURNING id
             """)
+
             return cur.fetchone()["id"]
 
 
-def finish_run(run_id, status, metric_date, sync_result, analytics_result,
-               baselines_result, deterministic, ai_result, freshness):
+def finish_run(
+    run_id,
+    status,
+    metric_date,
+    sync_result,
+    analytics_result,
+    baselines_result,
+    deterministic,
+    intelligence_result,
+    freshness,
+):
+
     with get_conn() as conn:
+
         with conn.cursor() as cur:
+
             cur.execute("""
                 UPDATE whoop_daily_automation_runs
-                SET completed_at=NOW(),
-                    status=%s,
-                    metric_date=%s,
-                    sync_result=%s,
-                    analytics_result=%s,
-                    baselines_result=%s,
-                    deterministic_recommendation=%s,
-                    ai_result=%s,
-                    freshness_result=%s
-                WHERE id=%s
+                SET completed_at = NOW(),
+                    status = %s,
+                    metric_date = %s,
+                    sync_result = %s,
+                    analytics_result = %s,
+                    baselines_result = %s,
+                    deterministic_recommendation = %s,
+                    ai_result = %s,
+                    freshness_result = %s
+                WHERE id = %s
             """, (
                 status,
                 metric_date,
                 Jsonb(sync_result),
                 Jsonb(analytics_result),
                 Jsonb(baselines_result),
-                Jsonb(deterministic) if deterministic is not None else None,
-                Jsonb(ai_result) if ai_result is not None else None,
+                (
+                    Jsonb(deterministic)
+                    if deterministic is not None
+                    else None
+                ),
+                (
+                    Jsonb(intelligence_result)
+                    if intelligence_result is not None
+                    else None
+                ),
                 Jsonb(freshness),
                 run_id,
             ))
 
 
-def fail_run(run_id, error_text):
+def fail_run(
+    run_id,
+    error_text,
+):
+
     with get_conn() as conn:
+
         with conn.cursor() as cur:
+
             cur.execute("""
                 UPDATE whoop_daily_automation_runs
-                SET completed_at=NOW(),
-                    status='failed',
-                    error=%s
-                WHERE id=%s
-            """, (error_text[:10000], run_id))
+                SET completed_at = NOW(),
+                    status = 'failed',
+                    error = %s
+                WHERE id = %s
+            """, (
+                error_text[:10000],
+                run_id,
+            ))
 
 
-def store_intelligence(deterministic, ai_result):
-    metric_date = deterministic.get("metric_date")
+# ============================================================
+# LEGACY DAILY INTELLIGENCE COMPATIBILITY
+#
+# Keep the historical table populated while the authoritative
+# mobile cache remains public.daily_health_intelligence.
+# ============================================================
+
+def store_intelligence(
+    deterministic,
+    intelligence_result,
+):
+
+    metric_date = deterministic.get(
+        "metric_date"
+    )
+
     if not metric_date:
-        raise RuntimeError("Deterministic recommendation did not contain metric_date.")
+
+        raise RuntimeError(
+            "Deterministic recommendation "
+            "did not contain metric_date."
+        )
+
+    brief = (
+        intelligence_result.get(
+            "brief"
+        )
+        or {}
+    )
+
+    model = (
+        intelligence_result.get(
+            "model"
+        )
+    )
 
     with get_conn() as conn:
+
         with conn.cursor() as cur:
+
             cur.execute("""
                 INSERT INTO whoop_daily_intelligence (
                     metric_date,
@@ -114,52 +197,136 @@ def store_intelligence(deterministic, ai_result):
                     model,
                     generated_at
                 )
-                VALUES (%s,%s,%s,%s,NOW())
-                ON CONFLICT(metric_date) DO UPDATE SET
-                    deterministic_recommendation=EXCLUDED.deterministic_recommendation,
-                    ai_brief=EXCLUDED.ai_brief,
-                    model=EXCLUDED.model,
-                    generated_at=NOW()
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    NOW()
+                )
+                ON CONFLICT(metric_date)
+                DO UPDATE SET
+                    deterministic_recommendation =
+                        EXCLUDED.deterministic_recommendation,
+
+                    ai_brief =
+                        EXCLUDED.ai_brief,
+
+                    model =
+                        EXCLUDED.model,
+
+                    generated_at =
+                        NOW()
             """, (
                 metric_date,
                 Jsonb(deterministic),
-                Jsonb(ai_result.get("brief")),
-                ai_result.get("model"),
+                Jsonb(brief),
+                model,
             ))
 
     return metric_date
 
 
+# ============================================================
+# AUTHORITATIVE DAILY PIPELINE
+# ============================================================
+
 def run_daily_pipeline():
+
     init_db()
     init_analytics()
     init_baselines()
     init_automation_tables()
 
     run_id = start_run()
-    print(f"[daily-job] started run_id={run_id}", flush=True)
+
+    print(
+        f"[daily-job] started run_id={run_id}",
+        flush=True,
+    )
 
     try:
-        print("[daily-job] 1/6 syncing latest WHOOP records", flush=True)
-        sync_result = asyncio.run(incremental_sync())
 
-        print("[daily-job] 2/6 rebuilding daily metrics", flush=True)
-        analytics_result = rebuild_daily_metrics()
+        # ----------------------------------------------------
+        # 1. Synchronize WHOOP
+        # ----------------------------------------------------
 
-        print("[daily-job] 3/6 rebuilding personal baselines", flush=True)
-        baselines_result = rebuild_baselines()
+        print(
+            "[daily-job] 1/6 syncing latest WHOOP records",
+            flush=True,
+        )
 
-        print("[daily-job] 4/6 checking WHOOP freshness", flush=True)
-        freshness = freshness_status()
-        print(json.dumps({"freshness": freshness}), flush=True)
+        sync_result = asyncio.run(
+            incremental_sync()
+        )
 
-        if not freshness["can_generate_current_recommendation"]:
-            status = "pending_freshness" if freshness["status"] == "pending_today" else "stale_data"
+        # ----------------------------------------------------
+        # 2. Rebuild daily metrics
+        # ----------------------------------------------------
+
+        print(
+            "[daily-job] 2/6 rebuilding daily metrics",
+            flush=True,
+        )
+
+        analytics_result = (
+            rebuild_daily_metrics()
+        )
+
+        # ----------------------------------------------------
+        # 3. Rebuild baselines
+        # ----------------------------------------------------
+
+        print(
+            "[daily-job] 3/6 rebuilding personal baselines",
+            flush=True,
+        )
+
+        baselines_result = (
+            rebuild_baselines()
+        )
+
+        # ----------------------------------------------------
+        # 4. Confirm WHOOP physiology is current
+        # ----------------------------------------------------
+
+        print(
+            "[daily-job] 4/6 checking WHOOP freshness",
+            flush=True,
+        )
+
+        freshness = (
+            freshness_status()
+        )
+
+        print(
+            json.dumps(
+                {
+                    "freshness":
+                        freshness
+                },
+                default=str,
+            ),
+            flush=True,
+        )
+
+        if not freshness[
+            "can_generate_current_recommendation"
+        ]:
+
+            status = (
+                "pending_freshness"
+                if freshness["status"]
+                == "pending_today"
+                else "stale_data"
+            )
 
             finish_run(
                 run_id,
                 status,
-                freshness.get("latest_physiology_date"),
+                freshness.get(
+                    "latest_physiology_date"
+                ),
                 sync_result,
                 analytics_result,
                 baselines_result,
@@ -169,26 +336,97 @@ def run_daily_pipeline():
             )
 
             result = {
-                "status": status,
-                "run_id": run_id,
-                "freshness": freshness,
-                "sync_new_rows": sync_result.get("new_rows"),
+                "status":
+                    status,
+
+                "run_id":
+                    run_id,
+
+                "freshness":
+                    freshness,
+
+                "sync_new_rows":
+                    sync_result.get(
+                        "new_rows"
+                    ),
+
                 "message": (
-                    "No new daily recommendation was generated. "
-                    "The previously stored recommendation remains historical context only."
+                    "No current recommendation generated "
+                    "because WHOOP physiology is not ready."
                 ),
             }
-            print(json.dumps(result, default=str), flush=True)
+
+            print(
+                json.dumps(
+                    result,
+                    default=str,
+                ),
+                flush=True,
+            )
+
             return result
 
-        print("[daily-job] 5/6 calculating deterministic recommendation", flush=True)
-        deterministic = daily_recommendation()
+        # ----------------------------------------------------
+        # 5. Deterministic recommendation
+        # ----------------------------------------------------
 
-        print("[daily-job] 6/6 generating OpenAI daily briefing", flush=True)
-        ai_result = generate_daily_ai_brief()
-        ai_result["brief"]["training_recommendation"] = deterministic["training_recommendation"]
+        print(
+            "[daily-job] 5/6 calculating deterministic recommendation",
+            flush=True,
+        )
 
-        metric_date = store_intelligence(deterministic, ai_result)
+        deterministic = (
+            daily_recommendation()
+        )
+
+        # ----------------------------------------------------
+        # 6. AUTHORITATIVE Daily Health Intelligence
+        #
+        # This is the cache used by:
+        #
+        # /api/v1/health-intelligence/today
+        #
+        # force_refresh=True guarantees that an event-driven
+        # recalculation produces fresh intelligence.
+        # ----------------------------------------------------
+
+        print(
+            "[daily-job] 6/6 refreshing current Daily Health Intelligence",
+            flush=True,
+        )
+
+        intelligence_result = (
+            get_daily_health_intelligence(
+                force_refresh=True
+            )
+        )
+
+        if (
+            intelligence_result.get(
+                "status"
+            )
+            != "ok"
+        ):
+
+            raise RuntimeError(
+                "Daily Health Intelligence "
+                "did not return status=ok."
+            )
+
+        # ----------------------------------------------------
+        # Maintain historical compatibility table
+        # ----------------------------------------------------
+
+        metric_date = (
+            store_intelligence(
+                deterministic,
+                intelligence_result,
+            )
+        )
+
+        # ----------------------------------------------------
+        # Complete automation audit
+        # ----------------------------------------------------
 
         finish_run(
             run_id,
@@ -198,31 +436,100 @@ def run_daily_pipeline():
             analytics_result,
             baselines_result,
             deterministic,
-            ai_result,
+            intelligence_result,
             freshness,
         )
 
+        brief = (
+            intelligence_result.get(
+                "brief"
+            )
+            or {}
+        )
+
         result = {
-            "status": "completed",
-            "run_id": run_id,
-            "metric_date": metric_date,
-            "freshness": freshness,
-            "sync_new_rows": sync_result.get("new_rows"),
-            "training_recommendation": deterministic.get("training_recommendation"),
-            "overall_status": deterministic.get("overall_status"),
-            "ai_headline": ai_result.get("brief", {}).get("headline"),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "status":
+                "completed",
+
+            "run_id":
+                run_id,
+
+            "metric_date":
+                metric_date,
+
+            "freshness":
+                freshness,
+
+            "sync_new_rows":
+                sync_result.get(
+                    "new_rows"
+                ),
+
+            "training_recommendation":
+                deterministic.get(
+                    "training_recommendation"
+                ),
+
+            "overall_status":
+                deterministic.get(
+                    "overall_status"
+                ),
+
+            "ai_headline":
+                brief.get(
+                    "headline"
+                ),
+
+            "intelligence_cache":
+                intelligence_result.get(
+                    "cache"
+                ),
+
+            "completed_at":
+                datetime.now(
+                    timezone.utc
+                ).isoformat(),
         }
-        print(json.dumps(result, default=str), flush=True)
+
+        print(
+            json.dumps(
+                result,
+                default=str,
+            ),
+            flush=True,
+        )
+
         return result
 
     except Exception as exc:
-        error_text = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        fail_run(run_id, error_text)
-        print("[daily-job] FAILED", flush=True)
-        print(error_text, flush=True)
+
+        error_text = (
+            f"{type(exc).__name__}: {exc}\n"
+            f"{traceback.format_exc()}"
+        )
+
+        fail_run(
+            run_id,
+            error_text,
+        )
+
+        print(
+            "[daily-job] FAILED",
+            flush=True,
+        )
+
+        print(
+            error_text,
+            flush=True,
+        )
+
         raise
 
 
+# ============================================================
+# TERMINAL ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
+
     run_daily_pipeline()
