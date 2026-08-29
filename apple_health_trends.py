@@ -3,6 +3,10 @@ from zoneinfo import ZoneInfo
 
 from db import get_conn
 
+from goals import (
+    get_active_goal,
+)
+
 
 EASTERN = ZoneInfo(
     "America/New_York"
@@ -102,9 +106,6 @@ def _weekly_rate(
 
     Their approximate centers are separated by
     horizon_days - CURRENT_SMOOTHING_DAYS.
-
-    Therefore rate/week should use that effective
-    separation rather than the full horizon.
     """
 
     if change is None:
@@ -126,6 +127,225 @@ def _weekly_rate(
     return (
         change
         / effective_weeks
+    )
+
+
+def _goal_progress_percentage(
+    start,
+    current,
+    target,
+):
+    """
+    Generic progress formula that works whether the target
+    is above or below the phase-start value.
+
+    raw_progress_percentage may be:
+        < 0   = worse than phase start
+        0-100 = progressing between start and target
+        > 100 = target surpassed
+
+    progress_percentage is clamped to 0-100 for UI bars.
+    """
+
+    if (
+        start is None
+        or current is None
+        or target is None
+    ):
+        return {
+            "available": False,
+            "raw_progress_percentage": None,
+            "progress_percentage": None,
+            "state": "insufficient_data",
+        }
+
+    start = float(
+        start
+    )
+
+    current = float(
+        current
+    )
+
+    target = float(
+        target
+    )
+
+    denominator = (
+        target - start
+    )
+
+    if abs(
+        denominator
+    ) < 0.000001:
+
+        return {
+            "available": False,
+            "raw_progress_percentage": None,
+            "progress_percentage": None,
+            "state": "invalid_goal_range",
+        }
+
+    raw_progress = (
+        (
+            current - start
+        )
+        / denominator
+        * 100.0
+    )
+
+    clamped_progress = max(
+        0.0,
+        min(
+            100.0,
+            raw_progress,
+        ),
+    )
+
+    if raw_progress >= 100:
+        state = (
+            "target_reached"
+        )
+
+    elif raw_progress < 0:
+        state = (
+            "regressed_beyond_phase_start"
+        )
+
+    else:
+        state = (
+            "in_progress"
+        )
+
+    return {
+        "available":
+            True,
+
+        "raw_progress_percentage":
+            _round(
+                raw_progress,
+                1,
+            ),
+
+        "progress_percentage":
+            _round(
+                clamped_progress,
+                1,
+            ),
+
+        "state":
+            state,
+    }
+
+
+def _goal_direction(
+    start,
+    target,
+):
+    if (
+        start is None
+        or target is None
+    ):
+        return None
+
+    start = float(
+        start
+    )
+
+    target = float(
+        target
+    )
+
+    if target > start:
+        return (
+            "increase"
+        )
+
+    if target < start:
+        return (
+            "decrease"
+        )
+
+    return (
+        "maintain"
+    )
+
+
+def _goal_status_for_direction(
+    measured_direction,
+    goal_direction,
+):
+    """
+    Measurement direction comes entirely from observed data.
+
+    Goal direction is used only to interpret whether that
+    observed movement is favorable.
+    """
+
+    if measured_direction in (
+        None,
+        "insufficient_data",
+    ):
+        return (
+            "insufficient_data"
+        )
+
+    if measured_direction == (
+        "stable"
+    ):
+        return (
+            "stable"
+        )
+
+    if goal_direction == (
+        "maintain"
+    ):
+        return (
+            "regressing"
+        )
+
+    if goal_direction == (
+        "decrease"
+    ):
+        if measured_direction == (
+            "decreasing"
+        ):
+            return (
+                "progressing"
+            )
+
+        return (
+            "regressing"
+        )
+
+    if goal_direction == (
+        "increase"
+    ):
+        if measured_direction == (
+            "increasing"
+        ):
+            return (
+                "progressing"
+            )
+
+        return (
+            "regressing"
+        )
+
+    return (
+        "insufficient_data"
+    )
+
+
+def _direction_from_change(
+    metric_name,
+    change,
+):
+    return (
+        _trend_label(
+            metric_name,
+            change,
+        )
     )
 
 
@@ -370,8 +590,7 @@ def _legacy_hume_windows(
     latest,
 ):
     """
-    Preserve the existing output consumed by
-    goal_progress.py.
+    Preserve output currently consumed by goal_progress.py.
     """
 
     latest_time = (
@@ -495,9 +714,6 @@ def _source_daily_history(
     Return one value per local calendar day for one source.
 
     Multiple measurements on the same local date are averaged.
-
-    This prevents days containing multiple scale measurements
-    from receiving more statistical weight than other days.
     """
 
     conditions = [
@@ -581,27 +797,21 @@ def _source_daily_history(
             )
 
 
-def _hume_daily_history(
-    metric_name,
-    latest_time,
-    history_days=365,
+def _history_payload(
+    rows,
+    convert_to_lb=False,
 ):
-    rows = (
-        _source_daily_history(
-            metric_name,
-            HUME_BUNDLE_ID,
-            start_time=(
-                latest_time
-                - timedelta(
-                    days=history_days
-                )
-            ),
-            end_time=latest_time,
-        )
-    )
+    result = []
 
-    return [
-        {
+    for row in rows:
+
+        value = float(
+            row[
+                "value"
+            ]
+        )
+
+        item = {
             "date":
                 row[
                     "measurement_date"
@@ -609,9 +819,7 @@ def _hume_daily_history(
 
             "value":
                 _round(
-                    row[
-                        "value"
-                    ]
+                    value
                 ),
 
             "observations":
@@ -636,8 +844,54 @@ def _hume_daily_history(
                     ]
                 ),
         }
-        for row in rows
-    ]
+
+        if convert_to_lb:
+            item[
+                "value_lb"
+            ] = _round(
+                value
+                * KG_TO_LB,
+                1,
+            )
+
+        result.append(
+            item
+        )
+
+    return result
+
+
+def _hume_daily_history(
+    metric_name,
+    latest_time,
+    history_days=365,
+):
+    rows = (
+        _source_daily_history(
+            metric_name,
+            HUME_BUNDLE_ID,
+            start_time=(
+                latest_time
+                - timedelta(
+                    days=history_days
+                )
+            ),
+            end_time=latest_time,
+        )
+    )
+
+    return (
+        _history_payload(
+            rows,
+            convert_to_lb=(
+                metric_name
+                in (
+                    "body_weight",
+                    "lean_body_mass",
+                )
+            ),
+        )
+    )
 
 
 def _daily_average_in_window(
@@ -647,11 +901,8 @@ def _daily_average_in_window(
     end_time,
 ):
     """
-    Calculate an average of DAILY averages rather than
-    averaging every raw measurement.
-
-    This means a day containing two scale readings counts
-    once, exactly like a day containing one reading.
+    Calculate an average of daily averages rather than every
+    raw measurement.
     """
 
     with get_conn() as conn:
@@ -734,9 +985,9 @@ def _trend_label(
     change,
 ):
     """
-    Measurement direction only.
+    Raw measurement direction only.
 
-    Goal interpretation belongs in goal_progress.py.
+    Goal interpretation happens later.
     """
 
     if change is None:
@@ -752,12 +1003,18 @@ def _trend_label(
     )
 
     if change > tolerance:
-        return "increasing"
+        return (
+            "increasing"
+        )
 
     if change < -tolerance:
-        return "decreasing"
+        return (
+            "decreasing"
+        )
 
-    return "stable"
+    return (
+        "stable"
+    )
 
 
 def _trend_horizon(
@@ -926,8 +1183,6 @@ def _trend_horizon(
         "current_measurement_days":
             current_days,
 
-        # Retained for easier compatibility with any
-        # consumers already reading this field.
         "current_observations":
             current_raw,
 
@@ -1191,14 +1446,18 @@ def _hume_metric_trend(
 
 
 # ---------------------------------------------------------
-# Hume-derived body-fat mass
+# Daily derived composition series
 # ---------------------------------------------------------
 
-def _derived_body_fat_mass():
+def _derived_composition_rows(
+    source_bundle_id,
+):
     """
-    Derive Hume fat mass from same-day daily averages:
+    Derive fat and lean mass from same-day daily source
+    averages.
 
-        weight × body-fat percentage
+        fat  = weight × BF%
+        lean = weight - fat
     """
 
     with get_conn() as conn:
@@ -1259,12 +1518,27 @@ def _derived_body_fat_mass():
                 SELECT
                     w.measurement_date,
 
+                    w.weight_kg,
+
+                    b.body_fat_percentage,
+
                     (
                         w.weight_kg
                         * b.body_fat_percentage
                         / 100.0
                     )
                         AS body_fat_mass_kg,
+
+                    (
+                        w.weight_kg
+                        -
+                        (
+                            w.weight_kg
+                            * b.body_fat_percentage
+                            / 100.0
+                        )
+                    )
+                        AS lean_body_mass_kg,
 
                     GREATEST(
                         w.observed_at,
@@ -1282,14 +1556,31 @@ def _derived_body_fat_mass():
                     w.measurement_date ASC
                 """,
                 (
-                    HUME_BUNDLE_ID,
-                    HUME_BUNDLE_ID,
+                    source_bundle_id,
+                    source_bundle_id,
                 ),
             )
 
-            rows = (
+            return (
                 cur.fetchall()
             )
+
+
+def _derived_metric_analytics(
+    derived_metric_name,
+):
+    """
+    Build Hume analytics for either:
+
+        body_fat_mass
+        lean_body_mass
+    """
+
+    rows = (
+        _derived_composition_rows(
+            HUME_BUNDLE_ID
+        )
+    )
 
     if not rows:
         return {
@@ -1304,8 +1595,47 @@ def _derived_body_fat_mass():
                 ),
         }
 
+    if derived_metric_name == (
+        "body_fat_mass"
+    ):
+        value_field = (
+            "body_fat_mass_kg"
+        )
+
+        tolerance_metric = (
+            "body_fat_mass"
+        )
+
+        derivation = (
+            "Daily-average Hume body weight × "
+            "daily-average Hume body-fat percentage"
+        )
+
+    elif derived_metric_name == (
+        "lean_body_mass"
+    ):
+        value_field = (
+            "lean_body_mass_kg"
+        )
+
+        tolerance_metric = (
+            "lean_body_mass"
+        )
+
+        derivation = (
+            "Daily-average Hume body weight − "
+            "derived Hume body-fat mass"
+        )
+
+    else:
+        raise ValueError(
+            "Unsupported derived metric."
+        )
+
     latest = (
-        rows[-1]
+        rows[
+            -1
+        ]
     )
 
     latest_date = (
@@ -1316,20 +1646,9 @@ def _derived_body_fat_mass():
 
     latest_value = float(
         latest[
-            "body_fat_mass_kg"
+            value_field
         ]
     )
-
-    history_rows = [
-        row
-        for row in rows
-        if (
-            latest_date
-            - row[
-                "measurement_date"
-            ]
-        ).days <= 365
-    ]
 
     def average_for_age_range(
         minimum_age,
@@ -1353,7 +1672,7 @@ def _derived_body_fat_mass():
                 values.append(
                     float(
                         row[
-                            "body_fat_mass_kg"
+                            value_field
                         ]
                     )
                 )
@@ -1365,9 +1684,15 @@ def _derived_body_fat_mass():
             )
 
         return (
-            sum(values)
-            / len(values),
-            len(values),
+            sum(
+                values
+            )
+            / len(
+                values
+            ),
+            len(
+                values
+            ),
         )
 
     current_7d_average, current_days = (
@@ -1437,6 +1762,18 @@ def _derived_body_fat_mass():
                     current_7d_average
                 ),
 
+            "current_average_lb":
+                (
+                    _round(
+                        current_7d_average
+                        * KG_TO_LB,
+                        1,
+                    )
+                    if current_7d_average
+                    is not None
+                    else None
+                ),
+
             "current_measurement_days":
                 current_days,
 
@@ -1446,6 +1783,18 @@ def _derived_body_fat_mass():
             "reference_average":
                 _round(
                     reference_average
+                ),
+
+            "reference_average_lb":
+                (
+                    _round(
+                        reference_average
+                        * KG_TO_LB,
+                        1,
+                    )
+                    if reference_average
+                    is not None
+                    else None
                 ),
 
             "reference_measurement_days":
@@ -1459,6 +1808,18 @@ def _derived_body_fat_mass():
                     change
                 ),
 
+            "change_lb":
+                (
+                    _round(
+                        change
+                        * KG_TO_LB,
+                        1,
+                    )
+                    if change
+                    is not None
+                    else None
+                ),
+
             "pct_change":
                 _round(
                     pct_change,
@@ -1470,10 +1831,22 @@ def _derived_body_fat_mass():
                     rate_per_week
                 ),
 
+            "rate_per_week_lb":
+                (
+                    _round(
+                        rate_per_week
+                        * KG_TO_LB,
+                        2,
+                    )
+                    if rate_per_week
+                    is not None
+                    else None
+                ),
+
             "trend":
                 (
                     _trend_label(
-                        "body_fat_mass",
+                        tolerance_metric,
                         change,
                     )
                     if sufficient_data
@@ -1484,6 +1857,17 @@ def _derived_body_fat_mass():
                 sufficient_data,
         }
 
+    history_rows = [
+        row
+        for row in rows
+        if (
+            latest_date
+            - row[
+                "measurement_date"
+            ]
+        ).days <= 365
+    ]
+
     return {
         "available":
             True,
@@ -1492,10 +1876,7 @@ def _derived_body_fat_mass():
             True,
 
         "derivation":
-            (
-                "Daily-average Hume body weight × "
-                "daily-average Hume body-fat percentage"
-            ),
+            derivation,
 
         "current_value":
             _round(
@@ -1561,7 +1942,7 @@ def _derived_body_fat_mass():
                 "value":
                     _round(
                         row[
-                            "body_fat_mass_kg"
+                            value_field
                         ]
                     ),
 
@@ -1569,7 +1950,7 @@ def _derived_body_fat_mass():
                     _round(
                         float(
                             row[
-                                "body_fat_mass_kg"
+                                value_field
                             ]
                         )
                         * KG_TO_LB,
@@ -1591,6 +1972,22 @@ def _derived_body_fat_mass():
     }
 
 
+def _derived_body_fat_mass():
+    return (
+        _derived_metric_analytics(
+            "body_fat_mass"
+        )
+    )
+
+
+def _derived_lean_body_mass():
+    return (
+        _derived_metric_analytics(
+            "lean_body_mass"
+        )
+    )
+
+
 # ---------------------------------------------------------
 # Fitdays -> Hume source-transition calibration
 # ---------------------------------------------------------
@@ -1598,13 +1995,6 @@ def _derived_body_fat_mass():
 def _paired_source_days(
     metric_name,
 ):
-    """
-    Find local calendar dates containing BOTH Fitdays and
-    Hume measurements for the requested metric.
-
-    Each source is first averaged within that calendar day.
-    """
-
     with get_conn() as conn:
         with conn.cursor() as cur:
 
@@ -1765,11 +2155,6 @@ def _source_transition_metric(
             ]
         )
 
-        # Signed difference is always:
-        #
-        #     Hume - Fitdays
-        #
-        # Negative therefore means Hume reads lower.
         difference = (
             hume_value
             - fitdays_value
@@ -1900,14 +2285,6 @@ def _source_transition_metric(
         )
     )
 
-    min_difference = min(
-        signed_differences
-    )
-
-    max_difference = max(
-        signed_differences
-    )
-
     result = {
         "available":
             True,
@@ -1943,12 +2320,16 @@ def _source_transition_metric(
 
         "minimum_hume_minus_fitdays":
             _round(
-                min_difference
+                min(
+                    signed_differences
+                )
             ),
 
         "maximum_hume_minus_fitdays":
             _round(
-                max_difference
+                max(
+                    signed_differences
+                )
             ),
 
         "pairs":
@@ -1993,16 +2374,6 @@ def _source_transition_metric(
 
 
 def _source_transition_derived_composition():
-    """
-    Compare derived fat and lean mass on dates where BOTH
-    sources contain weight and body-fat percentage.
-
-    This is diagnostic only.
-
-    It does not replace measured lean body mass and it does
-    not alter coaching calculations.
-    """
-
     with get_conn() as conn:
         with conn.cursor() as cur:
 
@@ -2328,14 +2699,6 @@ def _transition_assessment(
     weight,
     body_fat,
 ):
-    """
-    Conservative diagnostic assessment.
-
-    Three overlapping days are useful for understanding the
-    scale transition, but they are not enough to justify
-    automatic normalization of historical Fitdays data.
-    """
-
     weight_days = (
         weight.get(
             "paired_days",
@@ -2531,11 +2894,1216 @@ def _source_transition_analysis():
 
                 "purpose":
                     (
-                        "Fitdays is currently retained only "
-                        "for historical context and source-"
-                        "transition analysis."
+                        "Fitdays is retained for historical "
+                        "context and source-transition analysis."
                     ),
             },
+    }
+
+
+# ---------------------------------------------------------
+# Source-aware long-term history
+# ---------------------------------------------------------
+
+def _source_history_context(
+    metric_name,
+):
+    fitdays_rows = (
+        _source_daily_history(
+            metric_name,
+            FITDAYS_BUNDLE_ID,
+        )
+    )
+
+    hume_rows = (
+        _source_daily_history(
+            metric_name,
+            HUME_BUNDLE_ID,
+        )
+    )
+
+    convert_to_lb = (
+        metric_name
+        == "body_weight"
+    )
+
+    return {
+        "fitdays": {
+            "source_name":
+                "Fitdays",
+
+            "source_bundle_id":
+                FITDAYS_BUNDLE_ID,
+
+            "history":
+                _history_payload(
+                    fitdays_rows,
+                    convert_to_lb=
+                        convert_to_lb,
+                ),
+        },
+
+        "hume": {
+            "source_name":
+                "Hume",
+
+            "source_bundle_id":
+                HUME_BUNDLE_ID,
+
+            "history":
+                _history_payload(
+                    hume_rows,
+                    convert_to_lb=
+                        convert_to_lb,
+                ),
+        },
+    }
+
+
+def _derived_source_history(
+    source_bundle_id,
+):
+    rows = (
+        _derived_composition_rows(
+            source_bundle_id
+        )
+    )
+
+    return {
+        "fat_mass": [
+            {
+                "date":
+                    row[
+                        "measurement_date"
+                    ].isoformat(),
+
+                "value_lb":
+                    _round(
+                        float(
+                            row[
+                                "body_fat_mass_kg"
+                            ]
+                        )
+                        * KG_TO_LB,
+                        1,
+                    ),
+            }
+            for row in rows
+        ],
+
+        "lean_mass": [
+            {
+                "date":
+                    row[
+                        "measurement_date"
+                    ].isoformat(),
+
+                "value_lb":
+                    _round(
+                        float(
+                            row[
+                                "lean_body_mass_kg"
+                            ]
+                        )
+                        * KG_TO_LB,
+                        1,
+                    ),
+            }
+            for row in rows
+        ],
+    }
+
+
+def _history_views(
+    active_goal,
+):
+    today = (
+        datetime.now(
+            timezone.utc
+        )
+        .astimezone(
+            EASTERN
+        )
+        .date()
+    )
+
+    views = {
+        "4W": {
+            "days":
+                28,
+
+            "start_date":
+                (
+                    today
+                    - timedelta(
+                        days=27
+                    )
+                ).isoformat(),
+
+            "end_date":
+                today.isoformat(),
+        },
+
+        "3M": {
+            "days":
+                90,
+
+            "start_date":
+                (
+                    today
+                    - timedelta(
+                        days=89
+                    )
+                ).isoformat(),
+
+            "end_date":
+                today.isoformat(),
+        },
+
+        "6M": {
+            "days":
+                180,
+
+            "start_date":
+                (
+                    today
+                    - timedelta(
+                        days=179
+                    )
+                ).isoformat(),
+
+            "end_date":
+                today.isoformat(),
+        },
+
+        "1Y": {
+            "days":
+                365,
+
+            "start_date":
+                (
+                    today
+                    - timedelta(
+                        days=364
+                    )
+                ).isoformat(),
+
+            "end_date":
+                today.isoformat(),
+        },
+    }
+
+    if active_goal:
+        views[
+            "Goal"
+        ] = {
+            "days":
+                None,
+
+            "start_date":
+                active_goal.get(
+                    "phase_start_date"
+                ),
+
+            "end_date":
+                today.isoformat(),
+        }
+
+    return views
+
+
+def _source_aware_history(
+    active_goal,
+):
+    fitdays_derived = (
+        _derived_source_history(
+            FITDAYS_BUNDLE_ID
+        )
+    )
+
+    hume_derived = (
+        _derived_source_history(
+            HUME_BUNDLE_ID
+        )
+    )
+
+    return {
+        "policy": {
+            "trend_scoring_source":
+                "Hume only",
+
+            "fitdays_role":
+                (
+                    "Historical context only. "
+                    "Fitdays and Hume are not normalized "
+                    "into one body-composition series."
+                ),
+
+            "tonal_weight_included":
+                False,
+        },
+
+        "views":
+            _history_views(
+                active_goal
+            ),
+
+        "source_boundary": {
+            "previous_source":
+                "Fitdays",
+
+            "current_source":
+                "Hume",
+
+            "transition_date":
+                "2026-08-15",
+        },
+
+        "weight":
+            _source_history_context(
+                "body_weight"
+            ),
+
+        "body_fat_percentage":
+            _source_history_context(
+                "body_fat_percentage"
+            ),
+
+        "derived_fat_mass": {
+            "fitdays": {
+                "source_name":
+                    "Derived from Fitdays",
+
+                "source_bundle_id":
+                    FITDAYS_BUNDLE_ID,
+
+                "history":
+                    fitdays_derived[
+                        "fat_mass"
+                    ],
+            },
+
+            "hume": {
+                "source_name":
+                    "Derived from Hume",
+
+                "source_bundle_id":
+                    HUME_BUNDLE_ID,
+
+                "history":
+                    hume_derived[
+                        "fat_mass"
+                    ],
+            },
+        },
+
+        "derived_lean_mass": {
+            "fitdays": {
+                "source_name":
+                    "Derived from Fitdays",
+
+                "source_bundle_id":
+                    FITDAYS_BUNDLE_ID,
+
+                "history":
+                    fitdays_derived[
+                        "lean_mass"
+                    ],
+            },
+
+            "hume": {
+                "source_name":
+                    "Derived from Hume",
+
+                "source_bundle_id":
+                    HUME_BUNDLE_ID,
+
+                "history":
+                    hume_derived[
+                        "lean_mass"
+                    ],
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------
+# Goal-aware trend interpretation
+# ---------------------------------------------------------
+
+def _goal_aware_horizons(
+    metric_name,
+    trend_horizons,
+    goal_direction,
+    convert_kg_to_lb=False,
+):
+    result = {}
+
+    for horizon in (
+        BODY_COMPOSITION_HORIZONS
+    ):
+
+        key = str(
+            horizon
+        )
+
+        raw = (
+            trend_horizons.get(
+                key,
+                {}
+            )
+        )
+
+        change = raw.get(
+            "change"
+        )
+
+        rate = raw.get(
+            "rate_per_week"
+        )
+
+        measured_direction = (
+            raw.get(
+                "trend",
+                "insufficient_data",
+            )
+        )
+
+        item = {
+            "horizon_days":
+                horizon,
+
+            "sufficient_data":
+                bool(
+                    raw.get(
+                        "sufficient_data"
+                    )
+                ),
+
+            "measured_direction":
+                measured_direction,
+
+            "goal_status":
+                _goal_status_for_direction(
+                    measured_direction,
+                    goal_direction,
+                ),
+
+            "change":
+                change,
+
+            "rate_per_week":
+                rate,
+
+            "current_measurement_days":
+                raw.get(
+                    "current_measurement_days"
+                ),
+
+            "reference_measurement_days":
+                raw.get(
+                    "reference_measurement_days"
+                ),
+        }
+
+        if convert_kg_to_lb:
+
+            item[
+                "change_lb"
+            ] = (
+                _round(
+                    float(
+                        change
+                    )
+                    * KG_TO_LB,
+                    1,
+                )
+                if change
+                is not None
+                else None
+            )
+
+            item[
+                "rate_per_week_lb"
+            ] = (
+                _round(
+                    float(
+                        rate
+                    )
+                    * KG_TO_LB,
+                    2,
+                )
+                if rate
+                is not None
+                else None
+            )
+
+        result[
+            key
+        ] = item
+
+    return result
+
+
+def _goal_metric_payload(
+    metric_name,
+    display_name,
+    unit,
+    start,
+    current,
+    target,
+    trend_horizons,
+    trend_values_are_kg=False,
+):
+    progress = (
+        _goal_progress_percentage(
+            start,
+            current,
+            target,
+        )
+    )
+
+    goal_direction = (
+        _goal_direction(
+            start,
+            target,
+        )
+    )
+
+    change_since_start = None
+    direction_since_start = (
+        "insufficient_data"
+    )
+
+    if (
+        start is not None
+        and current is not None
+    ):
+        change_since_start = (
+            float(
+                current
+            )
+            - float(
+                start
+            )
+        )
+
+        if unit == (
+            "percent"
+        ):
+            tolerance = (
+                TREND_TOLERANCES[
+                    "body_fat_percentage"
+                ]
+            )
+
+        else:
+            tolerance = (
+                TREND_TOLERANCES.get(
+                    metric_name,
+                    0.25,
+                )
+                * (
+                    KG_TO_LB
+                    if metric_name
+                    in (
+                        "body_weight",
+                        "body_fat_mass",
+                        "lean_body_mass",
+                    )
+                    else 1.0
+                )
+            )
+
+        if change_since_start > tolerance:
+            direction_since_start = (
+                "increasing"
+            )
+
+        elif change_since_start < -tolerance:
+            direction_since_start = (
+                "decreasing"
+            )
+
+        else:
+            direction_since_start = (
+                "stable"
+            )
+
+    goal_horizon_status = (
+        _goal_status_for_direction(
+            direction_since_start,
+            goal_direction,
+        )
+    )
+
+    return {
+        "metric":
+            metric_name,
+
+        "display_name":
+            display_name,
+
+        "unit":
+            unit,
+
+        "phase_start_value":
+            _round(
+                start,
+                1,
+            ),
+
+        "current_7d_average":
+            _round(
+                current,
+                1,
+            ),
+
+        "target_value":
+            _round(
+                target,
+                1,
+            ),
+
+        "goal_direction":
+            goal_direction,
+
+        "distance_to_target":
+            (
+                _round(
+                    abs(
+                        float(
+                            current
+                        )
+                        - float(
+                            target
+                        )
+                    ),
+                    1,
+                )
+                if (
+                    current
+                    is not None
+                    and target
+                    is not None
+                )
+                else None
+            ),
+
+        "progress":
+            progress,
+
+        "goal_horizon": {
+            "change_since_phase_start":
+                _round(
+                    change_since_start,
+                    1,
+                ),
+
+            "measured_direction":
+                direction_since_start,
+
+            "goal_status":
+                goal_horizon_status,
+        },
+
+        "trend_horizons":
+            _goal_aware_horizons(
+                metric_name,
+                trend_horizons,
+                goal_direction,
+                convert_kg_to_lb=
+                    trend_values_are_kg,
+            ),
+    }
+
+
+# ---------------------------------------------------------
+# Body-composition progress
+# ---------------------------------------------------------
+
+def _body_composition_progress(
+    weight,
+    body_fat,
+    body_fat_mass,
+    derived_lean_mass,
+):
+    active_goal = (
+        get_active_goal()
+    )
+
+    if not active_goal:
+        return {
+            "available":
+                False,
+
+            "reason":
+                "No active goal profile exists.",
+        }
+
+    start_weight_lb = (
+        active_goal.get(
+            "phase_start_weight_lb"
+        )
+    )
+
+    start_body_fat = (
+        active_goal.get(
+            "phase_start_body_fat_percentage"
+        )
+    )
+
+    target_weight_lb = (
+        active_goal.get(
+            "target_weight_lb"
+        )
+    )
+
+    target_body_fat = (
+        active_goal.get(
+            "target_body_fat_percentage"
+        )
+    )
+
+    current_weight_lb = (
+        weight.get(
+            "current_7d_average_lb"
+        )
+        if weight.get(
+            "available"
+        )
+        else None
+    )
+
+    current_body_fat = (
+        body_fat.get(
+            "current_7d_average"
+        )
+        if body_fat.get(
+            "available"
+        )
+        else None
+    )
+
+    current_fat_mass_lb = (
+        body_fat_mass.get(
+            "current_7d_average_lb"
+        )
+        if body_fat_mass.get(
+            "available"
+        )
+        else None
+    )
+
+    current_lean_mass_lb = (
+        derived_lean_mass.get(
+            "current_7d_average_lb"
+        )
+        if derived_lean_mass.get(
+            "available"
+        )
+        else None
+    )
+
+    start_fat_mass_lb = None
+    start_lean_mass_lb = None
+
+    if (
+        start_weight_lb is not None
+        and start_body_fat is not None
+    ):
+        start_fat_mass_lb = (
+            float(
+                start_weight_lb
+            )
+            * float(
+                start_body_fat
+            )
+            / 100.0
+        )
+
+        start_lean_mass_lb = (
+            float(
+                start_weight_lb
+            )
+            - start_fat_mass_lb
+        )
+
+    target_fat_mass_lb = None
+    target_lean_mass_lb = None
+
+    if (
+        target_weight_lb is not None
+        and target_body_fat is not None
+    ):
+        target_fat_mass_lb = (
+            float(
+                target_weight_lb
+            )
+            * float(
+                target_body_fat
+            )
+            / 100.0
+        )
+
+        target_lean_mass_lb = (
+            float(
+                target_weight_lb
+            )
+            - target_fat_mass_lb
+        )
+
+    weight_metric = (
+        _goal_metric_payload(
+            metric_name=
+                "body_weight",
+
+            display_name=
+                "Weight",
+
+            unit=
+                "lb",
+
+            start=
+                start_weight_lb,
+
+            current=
+                current_weight_lb,
+
+            target=
+                target_weight_lb,
+
+            trend_horizons=
+                weight.get(
+                    "trend_horizons",
+                    {},
+                ),
+
+            trend_values_are_kg=
+                True,
+        )
+    )
+
+    body_fat_metric = (
+        _goal_metric_payload(
+            metric_name=
+                "body_fat_percentage",
+
+            display_name=
+                "Body Fat",
+
+            unit=
+                "percent",
+
+            start=
+                start_body_fat,
+
+            current=
+                current_body_fat,
+
+            target=
+                target_body_fat,
+
+            trend_horizons=
+                body_fat.get(
+                    "trend_horizons",
+                    {},
+                ),
+
+            trend_values_are_kg=
+                False,
+        )
+    )
+
+    fat_mass_metric = (
+        _goal_metric_payload(
+            metric_name=
+                "body_fat_mass",
+
+            display_name=
+                "Fat Mass",
+
+            unit=
+                "lb",
+
+            start=
+                start_fat_mass_lb,
+
+            current=
+                current_fat_mass_lb,
+
+            target=
+                target_fat_mass_lb,
+
+            trend_horizons=
+                body_fat_mass.get(
+                    "trend_horizons",
+                    {},
+                ),
+
+            trend_values_are_kg=
+                True,
+        )
+    )
+
+    lean_mass_metric = (
+        _goal_metric_payload(
+            metric_name=
+                "lean_body_mass",
+
+            display_name=
+                "Lean Mass",
+
+            unit=
+                "lb",
+
+            start=
+                start_lean_mass_lb,
+
+            current=
+                current_lean_mass_lb,
+
+            target=
+                target_lean_mass_lb,
+
+            trend_horizons=
+                derived_lean_mass.get(
+                    "trend_horizons",
+                    {},
+                ),
+
+            trend_values_are_kg=
+                True,
+        )
+    )
+
+    primary_metrics = (
+        body_fat_metric,
+        fat_mass_metric,
+        lean_mass_metric,
+        weight_metric,
+    )
+
+    goal_statuses = [
+        metric[
+            "goal_horizon"
+        ][
+            "goal_status"
+        ]
+        for metric in primary_metrics
+        if metric[
+            "goal_horizon"
+        ][
+            "goal_status"
+        ]
+        != "insufficient_data"
+    ]
+
+    if not goal_statuses:
+        overall_goal_status = (
+            "insufficient_data"
+        )
+
+    elif (
+        "progressing"
+        in goal_statuses
+        and "regressing"
+        in goal_statuses
+    ):
+        overall_goal_status = (
+            "mixed"
+        )
+
+    elif (
+        "regressing"
+        in goal_statuses
+    ):
+        overall_goal_status = (
+            "regressing"
+        )
+
+    elif (
+        "progressing"
+        in goal_statuses
+    ):
+        overall_goal_status = (
+            "progressing"
+        )
+
+    else:
+        overall_goal_status = (
+            "stable"
+        )
+
+    horizon_overall = {}
+
+    for horizon in (
+        BODY_COMPOSITION_HORIZONS
+    ):
+
+        key = str(
+            horizon
+        )
+
+        statuses = [
+            metric[
+                "trend_horizons"
+            ][
+                key
+            ][
+                "goal_status"
+            ]
+            for metric in primary_metrics
+            if (
+                key
+                in metric[
+                    "trend_horizons"
+                ]
+                and metric[
+                    "trend_horizons"
+                ][
+                    key
+                ][
+                    "goal_status"
+                ]
+                != "insufficient_data"
+            )
+        ]
+
+        if not statuses:
+            status = (
+                "insufficient_data"
+            )
+
+        elif (
+            "progressing"
+            in statuses
+            and "regressing"
+            in statuses
+        ):
+            status = (
+                "mixed"
+            )
+
+        elif (
+            "regressing"
+            in statuses
+        ):
+            status = (
+                "regressing"
+            )
+
+        elif (
+            "progressing"
+            in statuses
+        ):
+            status = (
+                "progressing"
+            )
+
+        else:
+            status = (
+                "stable"
+            )
+
+        horizon_overall[
+            key
+        ] = {
+            "status":
+                status,
+
+            "metric_statuses":
+                statuses,
+        }
+
+    return {
+        "available":
+            True,
+
+        "phase": {
+            "goal_id":
+                active_goal.get(
+                    "id"
+                ),
+
+            "phase":
+                active_goal.get(
+                    "phase"
+                ),
+
+            "phase_start_date":
+                active_goal.get(
+                    "phase_start_date"
+                ),
+
+            "phase_start_recorded_at":
+                active_goal.get(
+                    "phase_start_recorded_at"
+                ),
+
+            "phase_end_date":
+                active_goal.get(
+                    "phase_end_date"
+                ),
+        },
+
+        "methodology": {
+            "current_value":
+                (
+                    "Current goal calculations use the "
+                    "recent 7-day Hume daily-average mean "
+                    "rather than a single scale reading."
+                ),
+
+            "trend":
+                (
+                    "Trend direction is calculated from "
+                    "actual Hume measurements. The goal is "
+                    "used only to interpret whether the "
+                    "measured direction is progressing, "
+                    "stable, or regressing."
+                ),
+
+            "progress":
+                (
+                    "Goal completion compares the phase-start "
+                    "measurement with the current smoothed "
+                    "measurement and target."
+                ),
+
+            "negative_progress":
+                (
+                    "Raw progress may fall below zero when "
+                    "the current value has moved farther "
+                    "from the target than the phase-start "
+                    "value."
+                ),
+
+            "lean_mass":
+                (
+                    "Current Hume lean mass is derived as "
+                    "body weight minus derived fat mass "
+                    "because Hume is not publishing a direct "
+                    "lean-body-mass HealthKit measurement."
+                ),
+
+            "target_composition":
+                (
+                    "Target fat mass and target lean mass "
+                    "are mathematically derived from target "
+                    "weight and target body-fat percentage."
+                ),
+
+            "source_policy":
+                (
+                    "Current trend scoring is Hume-only. "
+                    "Fitdays remains historical context and "
+                    "is not normalized into Hume."
+                ),
+        },
+
+        "overall_goal_status":
+            overall_goal_status,
+
+        "horizon_status":
+            horizon_overall,
+
+        "metrics": {
+            "weight":
+                weight_metric,
+
+            "body_fat_percentage":
+                body_fat_metric,
+
+            "fat_mass":
+                fat_mass_metric,
+
+            "lean_mass":
+                lean_mass_metric,
+        },
+
+        "target_composition": {
+            "target_weight_lb":
+                _round(
+                    target_weight_lb,
+                    1,
+                ),
+
+            "target_body_fat_percentage":
+                _round(
+                    target_body_fat,
+                    1,
+                ),
+
+            "target_fat_mass_lb":
+                _round(
+                    target_fat_mass_lb,
+                    1,
+                ),
+
+            "target_lean_mass_lb":
+                _round(
+                    target_lean_mass_lb,
+                    1,
+                ),
+        },
+
+        "current_composition": {
+            "weight_7d_average_lb":
+                _round(
+                    current_weight_lb,
+                    1,
+                ),
+
+            "body_fat_7d_average_percentage":
+                _round(
+                    current_body_fat,
+                    1,
+                ),
+
+            "fat_mass_7d_average_lb":
+                _round(
+                    current_fat_mass_lb,
+                    1,
+                ),
+
+            "lean_mass_7d_average_lb":
+                _round(
+                    current_lean_mass_lb,
+                    1,
+                ),
+        },
+
+        "phase_start_composition": {
+            "weight_lb":
+                _round(
+                    start_weight_lb,
+                    1,
+                ),
+
+            "body_fat_percentage":
+                _round(
+                    start_body_fat,
+                    1,
+                ),
+
+            "derived_fat_mass_lb":
+                _round(
+                    start_fat_mass_lb,
+                    1,
+                ),
+
+            "derived_lean_mass_lb":
+                _round(
+                    start_lean_mass_lb,
+                    1,
+                ),
+        },
+
+        "historical_context":
+            _source_aware_history(
+                active_goal
+            ),
     }
 
 
@@ -2549,8 +4117,9 @@ def apple_health_trends():
 
     Current coaching remains Hume-only.
 
-    Fitdays is exposed separately as historical source-
-    transition context and does not affect Hume calculations.
+    Fitdays remains historical context and source-transition
+    evidence. It is not mathematically merged into Hume
+    trend calculations.
     """
 
     activity = (
@@ -2569,7 +4138,7 @@ def apple_health_trends():
         )
     )
 
-    lean_mass = (
+    measured_lean_mass = (
         _hume_metric_trend(
             "lean_body_mass"
         )
@@ -2579,8 +4148,21 @@ def apple_health_trends():
         _derived_body_fat_mass()
     )
 
+    derived_lean_mass = (
+        _derived_lean_body_mass()
+    )
+
     source_transition = (
         _source_transition_analysis()
+    )
+
+    body_composition_progress = (
+        _body_composition_progress(
+            weight,
+            body_fat,
+            body_fat_mass,
+            derived_lean_mass,
+        )
     )
 
     return {
@@ -2610,10 +4192,10 @@ def apple_health_trends():
 
             "lean_mass":
                 (
-                    "Hume-only measured lean mass. "
-                    "If Hume does not publish this "
-                    "HealthKit metric, direct measured "
-                    "lean-mass analytics remain unavailable."
+                    "Direct Hume measured lean mass remains "
+                    "separate. A derived Hume lean-mass "
+                    "series is also calculated from weight "
+                    "minus fat mass."
                 ),
 
             "body_fat_mass":
@@ -2639,6 +4221,15 @@ def apple_health_trends():
                     "or Hume trend calculations."
                 ),
 
+            "goal_progress":
+                (
+                    "Goal completion and recent trend are "
+                    "separate. Recent trend is calculated "
+                    "from actual measurements; the active "
+                    "goal determines whether that movement "
+                    "is favorable or unfavorable."
+                ),
+
             "legacy_baseline_windows":
                 list(
                     LEGACY_WINDOWS
@@ -2648,6 +4239,15 @@ def apple_health_trends():
                 list(
                     BODY_COMPOSITION_HORIZONS
                 ),
+
+            "body_composition_view_labels":
+                [
+                    "4W",
+                    "3M",
+                    "6M",
+                    "1Y",
+                    "Goal",
+                ],
 
             "current_smoothing_days":
                 CURRENT_SMOOTHING_DAYS,
@@ -2681,9 +4281,18 @@ def apple_health_trends():
             "body_fat_mass":
                 body_fat_mass,
 
+            # Existing measured field retained for backward
+            # compatibility. Hume currently does not publish it.
             "lean_body_mass":
-                lean_mass,
+                measured_lean_mass,
+
+            # New authoritative derived Hume lean-mass series.
+            "derived_lean_body_mass":
+                derived_lean_mass,
         },
+
+        "body_composition_progress":
+            body_composition_progress,
 
         "source_transition":
             source_transition,
