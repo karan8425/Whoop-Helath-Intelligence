@@ -818,6 +818,43 @@ async def weekly_health_intelligence(
         ) from exc
 
 # ============================================================
+# MOBILE WEEKLY HEALTH INTELLIGENCE
+#
+# Returns cached Weekly Health Intelligence to the iPhone.
+# Repeated requests with unchanged deterministic analytics
+# do not call OpenAI.
+# ============================================================
+
+@app.get(
+    "/api/v1/health-intelligence/weekly"
+)
+async def mobile_weekly_health_intelligence(
+    request: Request,
+):
+
+    require_ingest_key(
+        request
+    )
+
+    try:
+
+        return (
+            get_weekly_health_intelligence(
+                force_refresh=False
+            )
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Weekly Health Intelligence failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+# ============================================================
 # BODY COMPOSITION TREND ANALYTICS
 #
 # Admin-only diagnostic endpoint used to validate Hume
