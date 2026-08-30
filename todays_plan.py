@@ -1,7 +1,6 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from time import perf_counter
-import logging
 
 from goals import get_active_goal
 from goal_progress import goal_progress
@@ -18,8 +17,6 @@ from integrations.tonal.workout_prescription import (
 
 EASTERN = ZoneInfo("America/New_York")
 
-logger = logging.getLogger(__name__)
-
 
 # ============================================================
 # HELPERS
@@ -27,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 def _today():
     return datetime.now(EASTERN).date().isoformat()
+
+
+def _print_timing(message):
+    print(
+        f"TODAYS_PLAN_TIMING {message}",
+        flush=True,
+    )
 
 
 def _safe_engine(engine, engine_name):
@@ -37,10 +41,9 @@ def _safe_engine(engine, engine_name):
 
         elapsed = perf_counter() - started
 
-        logger.info(
-            "TODAYS_PLAN_TIMING engine=%s seconds=%.3f",
-            engine_name,
-            elapsed,
+        _print_timing(
+            f"engine={engine_name} "
+            f"seconds={elapsed:.3f}"
         )
 
         if not isinstance(result, dict):
@@ -55,10 +58,11 @@ def _safe_engine(engine, engine_name):
     except Exception as exc:
         elapsed = perf_counter() - started
 
-        logger.exception(
-            "TODAYS_PLAN_TIMING engine=%s seconds=%.3f status=error",
-            engine_name,
-            elapsed,
+        _print_timing(
+            f"engine={engine_name} "
+            f"seconds={elapsed:.3f} "
+            f"status=error "
+            f"error_type={type(exc).__name__}"
         )
 
         return {
@@ -75,88 +79,199 @@ def _safe_engine(engine, engine_name):
 def _training_card(workout):
     if workout.get("status") != "ok":
         return {
-            "status": workout.get("status", "not_ready"),
+            "status": workout.get(
+                "status",
+                "not_ready",
+            ),
             "available": False,
             "reason": workout.get("reason"),
         }
 
-    readiness = workout.get("readiness") or {}
-    session = workout.get("session") or {}
+    readiness = (
+        workout.get("readiness")
+        or {}
+    )
 
-    exercises = session.get("exercises") or []
+    session = (
+        workout.get("session")
+        or {}
+    )
+
+    exercises = (
+        session.get("exercises")
+        or []
+    )
+
     exercise_details = []
 
     for exercise in exercises:
-        smart_weight = exercise.get("smart_weight") or {}
-        hardware_context = exercise.get("hardware_context") or {}
-        historical_context = exercise.get("historical_context") or {}
+        smart_weight = (
+            exercise.get("smart_weight")
+            or {}
+        )
+
+        hardware_context = (
+            exercise.get(
+                "hardware_context"
+            )
+            or {}
+        )
+
+        historical_context = (
+            exercise.get(
+                "historical_context"
+            )
+            or {}
+        )
 
         exercise_details.append(
             {
-                "movement_id": exercise.get("movement_id"),
-                "name": exercise.get("name"),
-                "exercise_family": exercise.get("exercise_family"),
-                "muscle_groups": exercise.get("muscle_groups") or [],
-                "accessory": exercise.get("accessory"),
+                "movement_id":
+                    exercise.get(
+                        "movement_id"
+                    ),
 
-                "sets": exercise.get("sets"),
-                "reps_per_set": exercise.get("reps_per_set"),
-                "target_weight_lb": exercise.get("target_weight_lb"),
-                "target_rir": exercise.get("target_rir"),
+                "name":
+                    exercise.get("name"),
 
-                "estimated_volume": exercise.get("estimated_volume"),
+                "exercise_family":
+                    exercise.get(
+                        "exercise_family"
+                    ),
 
-                "progression_earned": exercise.get("progression_earned"),
-                "progression_applied": exercise.get("progression_applied"),
-                "overload_method": exercise.get("overload_method"),
-                "progression_reason": exercise.get("progression_reason"),
-                "next_progression_option": exercise.get(
-                    "next_progression_option"
-                ),
+                "muscle_groups":
+                    exercise.get(
+                        "muscle_groups"
+                    )
+                    or [],
+
+                "accessory":
+                    exercise.get(
+                        "accessory"
+                    ),
+
+                "sets":
+                    exercise.get("sets"),
+
+                "reps_per_set":
+                    exercise.get(
+                        "reps_per_set"
+                    ),
+
+                "target_weight_lb":
+                    exercise.get(
+                        "target_weight_lb"
+                    ),
+
+                "target_rir":
+                    exercise.get(
+                        "target_rir"
+                    ),
+
+                "estimated_volume":
+                    exercise.get(
+                        "estimated_volume"
+                    ),
+
+                "progression_earned":
+                    exercise.get(
+                        "progression_earned"
+                    ),
+
+                "progression_applied":
+                    exercise.get(
+                        "progression_applied"
+                    ),
+
+                "overload_method":
+                    exercise.get(
+                        "overload_method"
+                    ),
+
+                "progression_reason":
+                    exercise.get(
+                        "progression_reason"
+                    ),
+
+                "next_progression_option":
+                    exercise.get(
+                        "next_progression_option"
+                    ),
 
                 "smart_weight": {
-                    "mode": smart_weight.get("mode"),
-                    "spotter": smart_weight.get("spotter"),
-                    "reason": smart_weight.get("reason"),
+                    "mode":
+                        smart_weight.get(
+                            "mode"
+                        ),
+
+                    "spotter":
+                        smart_weight.get(
+                            "spotter"
+                        ),
+
+                    "reason":
+                        smart_weight.get(
+                            "reason"
+                        ),
                 },
 
                 "hardware_context": {
-                    "tonal_max_per_arm_lb": hardware_context.get(
-                        "tonal_max_per_arm_lb"
-                    ),
-                    "tonal_max_combined_lb": hardware_context.get(
-                        "tonal_max_combined_lb"
-                    ),
-                    "near_hardware_ceiling": hardware_context.get(
-                        "near_hardware_ceiling"
-                    ),
-                    "ceiling_usage_pct": hardware_context.get(
-                        "ceiling_usage_pct"
-                    ),
+                    "tonal_max_per_arm_lb":
+                        hardware_context.get(
+                            "tonal_max_per_arm_lb"
+                        ),
+
+                    "tonal_max_combined_lb":
+                        hardware_context.get(
+                            "tonal_max_combined_lb"
+                        ),
+
+                    "near_hardware_ceiling":
+                        hardware_context.get(
+                            "near_hardware_ceiling"
+                        ),
+
+                    "ceiling_usage_pct":
+                        hardware_context.get(
+                            "ceiling_usage_pct"
+                        ),
                 },
 
                 "historical_context": {
-                    "recent_working_weight": historical_context.get(
-                        "recent_working_weight"
-                    ),
-                    "recent_sets_per_session": historical_context.get(
-                        "recent_sets_per_session"
-                    ),
-                    "recent_reps_per_session": historical_context.get(
-                        "recent_reps_per_session"
-                    ),
-                    "recent_estimated_1rm": historical_context.get(
-                        "recent_estimated_1rm"
-                    ),
-                    "estimated_1rm_change_pct": historical_context.get(
-                        "estimated_1rm_change_pct"
-                    ),
-                    "recent_struggling_score": historical_context.get(
-                        "recent_struggling_score"
-                    ),
-                    "recent_inconsistency_score": historical_context.get(
-                        "recent_inconsistency_score"
-                    ),
+                    "recent_working_weight":
+                        historical_context.get(
+                            "recent_working_weight"
+                        ),
+
+                    "recent_sets_per_session":
+                        historical_context.get(
+                            "recent_sets_per_session"
+                        ),
+
+                    "recent_reps_per_session":
+                        historical_context.get(
+                            "recent_reps_per_session"
+                        ),
+
+                    "recent_estimated_1rm":
+                        historical_context.get(
+                            "recent_estimated_1rm"
+                        ),
+
+                    "estimated_1rm_change_pct":
+                        historical_context.get(
+                            "estimated_1rm_change_pct"
+                        ),
+
+                    "recent_struggling_score":
+                        historical_context.get(
+                            "recent_struggling_score"
+                        ),
+
+                    "recent_inconsistency_score":
+                        historical_context.get(
+                            "recent_inconsistency_score"
+                        ),
                 },
             }
         )
@@ -165,27 +280,72 @@ def _training_card(workout):
         "status": "ok",
         "available": True,
 
-        "category": readiness.get("training_category"),
-        "recovery_score": readiness.get("recovery_score"),
+        "category":
+            readiness.get(
+                "training_category"
+            ),
 
-        "session_type": session.get("session_type"),
-        "primary_focus": session.get("primary_focus") or [],
-        "secondary_focus": session.get("secondary_focus") or [],
+        "recovery_score":
+            readiness.get(
+                "recovery_score"
+            ),
 
-        "total_sets": session.get("total_sets"),
-        "exercise_count": session.get("exercise_count"),
-        "estimated_total_volume": session.get("estimated_total_volume"),
+        "session_type":
+            session.get(
+                "session_type"
+            ),
 
-        "progressive_overload_exercises": session.get(
-            "progressive_overload_exercises"
-        ),
-        "direct_core_exercises": session.get("direct_core_exercises"),
+        "primary_focus":
+            session.get(
+                "primary_focus"
+            )
+            or [],
 
-        "target_set_range": session.get("target_set_range") or {},
+        "secondary_focus":
+            session.get(
+                "secondary_focus"
+            )
+            or [],
 
-        "exercises": exercise_details,
+        "total_sets":
+            session.get(
+                "total_sets"
+            ),
 
-        "progression_policy": workout.get("progression_policy") or {},
+        "exercise_count":
+            session.get(
+                "exercise_count"
+            ),
+
+        "estimated_total_volume":
+            session.get(
+                "estimated_total_volume"
+            ),
+
+        "progressive_overload_exercises":
+            session.get(
+                "progressive_overload_exercises"
+            ),
+
+        "direct_core_exercises":
+            session.get(
+                "direct_core_exercises"
+            ),
+
+        "target_set_range":
+            session.get(
+                "target_set_range"
+            )
+            or {},
+
+        "exercises":
+            exercise_details,
+
+        "progression_policy":
+            workout.get(
+                "progression_policy"
+            )
+            or {},
 
         "action": {
             "label": "View Workout",
@@ -201,34 +361,92 @@ def _training_card(workout):
 def _nutrition_card(nutrition):
     if nutrition.get("status") != "ok":
         return {
-            "status": nutrition.get("status", "not_ready"),
-            "available": False,
-            "reason": nutrition.get("reason"),
+            "status":
+                nutrition.get(
+                    "status",
+                    "not_ready",
+                ),
+
+            "available":
+                False,
+
+            "reason":
+                nutrition.get(
+                    "reason"
+                ),
         }
 
-    macros = nutrition.get("macros") or {}
-    activity = nutrition.get("activity") or {}
-    goal_progress_data = nutrition.get("goal_progress") or {}
+    macros = (
+        nutrition.get("macros")
+        or {}
+    )
+
+    activity = (
+        nutrition.get("activity")
+        or {}
+    )
+
+    goal_progress_data = (
+        nutrition.get(
+            "goal_progress"
+        )
+        or {}
+    )
 
     return {
         "status": "ok",
         "available": True,
 
-        "phase": nutrition.get("phase"),
-        "calories": nutrition.get("calorie_target"),
+        "phase":
+            nutrition.get(
+                "phase"
+            ),
 
-        "protein_g": macros.get("protein_g"),
-        "carbs_g": macros.get("carbs_g"),
-        "fat_g": macros.get("fat_g"),
+        "calories":
+            nutrition.get(
+                "calorie_target"
+            ),
 
-        "macro_calorie_check": nutrition.get("macro_calorie_check"),
-        "current_weight_lb": nutrition.get("current_weight_lb"),
+        "protein_g":
+            macros.get(
+                "protein_g"
+            ),
 
-        "activity": activity,
-        "goal_progress": goal_progress_data,
+        "carbs_g":
+            macros.get(
+                "carbs_g"
+            ),
 
-        "priority": nutrition.get("nutrition_priority"),
-        "rationale": nutrition.get("rationale"),
+        "fat_g":
+            macros.get(
+                "fat_g"
+            ),
+
+        "macro_calorie_check":
+            nutrition.get(
+                "macro_calorie_check"
+            ),
+
+        "current_weight_lb":
+            nutrition.get(
+                "current_weight_lb"
+            ),
+
+        "activity":
+            activity,
+
+        "goal_progress":
+            goal_progress_data,
+
+        "priority":
+            nutrition.get(
+                "nutrition_priority"
+            ),
+
+        "rationale":
+            nutrition.get(
+                "rationale"
+            ),
 
         "action": {
             "label": "View Nutrition",
@@ -244,28 +462,54 @@ def _nutrition_card(nutrition):
 def _hydration_card(hydration):
     if hydration.get("status") != "ok":
         return {
-            "status": hydration.get("status", "not_ready"),
-            "available": False,
-            "reason": hydration.get("reason"),
+            "status":
+                hydration.get(
+                    "status",
+                    "not_ready",
+                ),
+
+            "available":
+                False,
+
+            "reason":
+                hydration.get(
+                    "reason"
+                ),
         }
 
     return {
         "status": "ok",
         "available": True,
 
-        "daily_target_fl_oz": hydration.get("daily_target_fl_oz"),
-        "daily_target_display": hydration.get("daily_target_display"),
+        "daily_target_fl_oz":
+            hydration.get(
+                "daily_target_fl_oz"
+            ),
 
-        "baseline_target_fl_oz": hydration.get(
-            "baseline_target_fl_oz"
-        ),
+        "daily_target_display":
+            hydration.get(
+                "daily_target_display"
+            ),
 
-        "training_adjustment_fl_oz": hydration.get(
-            "training_adjustment_fl_oz"
-        ),
+        "baseline_target_fl_oz":
+            hydration.get(
+                "baseline_target_fl_oz"
+            ),
 
-        "priority": hydration.get("priority"),
-        "rationale": hydration.get("rationale"),
+        "training_adjustment_fl_oz":
+            hydration.get(
+                "training_adjustment_fl_oz"
+            ),
+
+        "priority":
+            hydration.get(
+                "priority"
+            ),
+
+        "rationale":
+            hydration.get(
+                "rationale"
+            ),
 
         "action": {
             "label": "View Hydration",
@@ -281,72 +525,172 @@ def _hydration_card(hydration):
 def _sleep_card(sleep):
     if sleep.get("status") != "ok":
         return {
-            "status": sleep.get("status", "not_ready"),
-            "available": False,
-            "reason": sleep.get("reason"),
+            "status":
+                sleep.get(
+                    "status",
+                    "not_ready",
+                ),
+
+            "available":
+                False,
+
+            "reason":
+                sleep.get(
+                    "reason"
+                ),
         }
 
-    schedule = sleep.get("recommended_schedule") or {}
-    latest = sleep.get("latest_sleep") or {}
-    baselines = sleep.get("baselines") or {}
-    trend = sleep.get("trend") or {}
-    planning_efficiency = sleep.get("planning_efficiency") or {}
+    schedule = (
+        sleep.get(
+            "recommended_schedule"
+        )
+        or {}
+    )
+
+    latest = (
+        sleep.get(
+            "latest_sleep"
+        )
+        or {}
+    )
+
+    baselines = (
+        sleep.get(
+            "baselines"
+        )
+        or {}
+    )
+
+    trend = (
+        sleep.get(
+            "trend"
+        )
+        or {}
+    )
+
+    planning_efficiency = (
+        sleep.get(
+            "planning_efficiency"
+        )
+        or {}
+    )
 
     return {
         "status": "ok",
         "available": True,
 
-        "sleep_target_hours": sleep.get("sleep_target_hours"),
-        "sleep_target_display": sleep.get("sleep_target_display"),
+        "sleep_target_hours":
+            sleep.get(
+                "sleep_target_hours"
+            ),
 
-        "time_in_bed_target_hours": sleep.get(
-            "time_in_bed_target_hours"
-        ),
+        "sleep_target_display":
+            sleep.get(
+                "sleep_target_display"
+            ),
 
-        "time_in_bed_target_display": sleep.get(
-            "time_in_bed_target_display"
-        ),
+        "time_in_bed_target_hours":
+            sleep.get(
+                "time_in_bed_target_hours"
+            ),
 
-        "schedule_available": schedule.get("available"),
-        "wake_time": schedule.get("wake_time_local"),
-        "recommended_bedtime": schedule.get(
-            "recommended_bedtime_local"
-        ),
-        "schedule_reason": schedule.get("reason"),
+        "time_in_bed_target_display":
+            sleep.get(
+                "time_in_bed_target_display"
+            ),
 
-        "latest_sleep_hours": latest.get("duration_hours"),
-        "recovery_score": latest.get("recovery_score"),
+        "schedule_available":
+            schedule.get(
+                "available"
+            ),
 
-        "sleep_performance_percentage": latest.get(
-            "sleep_performance_percentage"
-        ),
+        "wake_time":
+            schedule.get(
+                "wake_time_local"
+            ),
 
-        "sleep_consistency_percentage": latest.get(
-            "sleep_consistency_percentage"
-        ),
+        "recommended_bedtime":
+            schedule.get(
+                "recommended_bedtime_local"
+            ),
 
-        "sleep_efficiency_percentage": latest.get(
-            "sleep_efficiency_percentage"
-        ),
+        "schedule_reason":
+            schedule.get(
+                "reason"
+            ),
 
-        "sleep_trend": trend.get("status"),
-        "trend_direction": trend.get("direction"),
-        "trend_summary": trend.get("summary"),
-        "gap_to_target_hours": trend.get("gap_to_target_hours"),
-        "versus_30d_hours": trend.get("versus_30d_hours"),
+        "latest_sleep_hours":
+            latest.get(
+                "duration_hours"
+            ),
 
-        "average_sleep_7d_hours": baselines.get(
-            "average_sleep_7d_hours"
-        ),
+        "recovery_score":
+            latest.get(
+                "recovery_score"
+            ),
 
-        "average_sleep_30d_hours": baselines.get(
-            "average_sleep_30d_hours"
-        ),
+        "sleep_performance_percentage":
+            latest.get(
+                "sleep_performance_percentage"
+            ),
 
-        "planning_efficiency": planning_efficiency,
+        "sleep_consistency_percentage":
+            latest.get(
+                "sleep_consistency_percentage"
+            ),
 
-        "priority": sleep.get("priority"),
-        "rationale": sleep.get("rationale"),
+        "sleep_efficiency_percentage":
+            latest.get(
+                "sleep_efficiency_percentage"
+            ),
+
+        "sleep_trend":
+            trend.get(
+                "status"
+            ),
+
+        "trend_direction":
+            trend.get(
+                "direction"
+            ),
+
+        "trend_summary":
+            trend.get(
+                "summary"
+            ),
+
+        "gap_to_target_hours":
+            trend.get(
+                "gap_to_target_hours"
+            ),
+
+        "versus_30d_hours":
+            trend.get(
+                "versus_30d_hours"
+            ),
+
+        "average_sleep_7d_hours":
+            baselines.get(
+                "average_sleep_7d_hours"
+            ),
+
+        "average_sleep_30d_hours":
+            baselines.get(
+                "average_sleep_30d_hours"
+            ),
+
+        "planning_efficiency":
+            planning_efficiency,
+
+        "priority":
+            sleep.get(
+                "priority"
+            ),
+
+        "rationale":
+            sleep.get(
+                "rationale"
+            ),
 
         "action": {
             "label": "View Sleep Plan",
@@ -362,8 +706,8 @@ def _sleep_card(sleep):
 def build_todays_plan():
     total_started = perf_counter()
 
-    logger.info(
-        "TODAYS_PLAN_TIMING status=start"
+    _print_timing(
+        "status=start"
     )
 
     # --------------------------------------------------------
@@ -441,26 +785,54 @@ def build_todays_plan():
 
     cards_started = perf_counter()
 
-    training_card = _training_card(workout)
-    nutrition_card = _nutrition_card(nutrition)
-    hydration_card = _hydration_card(hydration)
-    sleep_card = _sleep_card(sleep)
+    training_card = (
+        _training_card(
+            workout
+        )
+    )
 
-    logger.info(
-        "TODAYS_PLAN_TIMING engine=card_building seconds=%.3f",
-        perf_counter() - cards_started,
+    nutrition_card = (
+        _nutrition_card(
+            nutrition
+        )
+    )
+
+    hydration_card = (
+        _hydration_card(
+            hydration
+        )
+    )
+
+    sleep_card = (
+        _sleep_card(
+            sleep
+        )
+    )
+
+    _print_timing(
+        "engine=card_building "
+        f"seconds="
+        f"{perf_counter() - cards_started:.3f}"
     )
 
     cards = {
-        "training": training_card,
-        "nutrition": nutrition_card,
-        "hydration": hydration_card,
-        "sleep": sleep_card,
+        "training":
+            training_card,
+
+        "nutrition":
+            nutrition_card,
+
+        "hydration":
+            hydration_card,
+
+        "sleep":
+            sleep_card,
     }
 
     available_cards = [
         name
-        for name, card in cards.items()
+        for name, card
+        in cards.items()
         if card.get("available")
     ]
 
@@ -469,21 +841,32 @@ def build_todays_plan():
         - total_started
     )
 
-    logger.info(
-        "TODAYS_PLAN_TIMING status=complete total_seconds=%.3f",
-        total_elapsed,
+    _print_timing(
+        "status=complete "
+        f"total_seconds={total_elapsed:.3f}"
     )
 
     return {
         "status": "ok",
         "version": "1.2",
         "plan_date": _today(),
-        "available_sections": available_cards,
-        "training": training_card,
-        "nutrition": nutrition_card,
-        "hydration": hydration_card,
-        "sleep": sleep_card,
+
+        "available_sections":
+            available_cards,
+
+        "training":
+            training_card,
+
+        "nutrition":
+            nutrition_card,
+
+        "hydration":
+            hydration_card,
+
+        "sleep":
+            sleep_card,
     }
+
 
 # ============================================================
 # LOCAL VALIDATION
@@ -493,96 +876,209 @@ def main():
     plan = build_todays_plan()
 
     print()
-    print("TODAY'S HEALTH PLAN V1.2")
+    print(
+        "TODAY'S HEALTH PLAN V1.2"
+    )
     print("=" * 78)
 
-    print("Status:", plan.get("status"))
-    print("Date:", plan.get("plan_date"))
+    print(
+        "Status:",
+        plan.get("status"),
+    )
+
+    print(
+        "Date:",
+        plan.get("plan_date"),
+    )
+
     print()
 
-    training = plan.get("training") or {}
+    training = (
+        plan.get("training")
+        or {}
+    )
 
     print("TRAINING")
-    print("Category:", training.get("category"))
-    print("Session:", training.get("session_type"))
-    print("Exercises:", training.get("exercise_count"))
-    print("Sets:", training.get("total_sets"))
+
+    print(
+        "Category:",
+        training.get(
+            "category"
+        ),
+    )
+
+    print(
+        "Session:",
+        training.get(
+            "session_type"
+        ),
+    )
+
+    print(
+        "Exercises:",
+        training.get(
+            "exercise_count"
+        ),
+    )
+
+    print(
+        "Sets:",
+        training.get(
+            "total_sets"
+        ),
+    )
+
     print()
 
     for index, exercise in enumerate(
-        training.get("exercises") or [],
+        training.get(
+            "exercises"
+        )
+        or [],
         start=1,
     ):
         print(
-            f"{index}. {exercise.get('name')} | "
+            f"{index}. "
+            f"{exercise.get('name')} | "
             f"{exercise.get('sets')} x "
             f"{exercise.get('reps_per_set')} | "
             f"{exercise.get('target_weight_lb')} lb | "
             f"RIR {exercise.get('target_rir')}"
         )
 
-        smart_weight = exercise.get("smart_weight") or {}
+        smart_weight = (
+            exercise.get(
+                "smart_weight"
+            )
+            or {}
+        )
 
         print(
             "   Smart Weight:",
-            smart_weight.get("mode"),
+            smart_weight.get(
+                "mode"
+            ),
             "| Spotter:",
-            smart_weight.get("spotter"),
+            smart_weight.get(
+                "spotter"
+            ),
         )
 
         print(
             "   Progression:",
-            exercise.get("overload_method"),
+            exercise.get(
+                "overload_method"
+            ),
         )
 
     print()
 
-    nutrition = plan.get("nutrition") or {}
+    nutrition = (
+        plan.get("nutrition")
+        or {}
+    )
 
     print("NUTRITION")
-    print("Calories:", nutrition.get("calories"))
-    print("Protein:", nutrition.get("protein_g"), "g")
-    print("Carbs:", nutrition.get("carbs_g"), "g")
-    print("Fat:", nutrition.get("fat_g"), "g")
+
+    print(
+        "Calories:",
+        nutrition.get(
+            "calories"
+        ),
+    )
+
+    print(
+        "Protein:",
+        nutrition.get(
+            "protein_g"
+        ),
+        "g",
+    )
+
+    print(
+        "Carbs:",
+        nutrition.get(
+            "carbs_g"
+        ),
+        "g",
+    )
+
+    print(
+        "Fat:",
+        nutrition.get(
+            "fat_g"
+        ),
+        "g",
+    )
+
     print()
 
-    hydration = plan.get("hydration") or {}
+    hydration = (
+        plan.get("hydration")
+        or {}
+    )
 
     print("HYDRATION")
+
     print(
         "Target:",
-        hydration.get("daily_target_display"),
+        hydration.get(
+            "daily_target_display"
+        ),
     )
+
     print(
         "Training adjustment:",
-        hydration.get("training_adjustment_fl_oz"),
+        hydration.get(
+            "training_adjustment_fl_oz"
+        ),
         "fl oz",
     )
+
     print()
 
-    sleep = plan.get("sleep") or {}
+    sleep = (
+        plan.get("sleep")
+        or {}
+    )
 
     print("SLEEP TONIGHT")
+
     print(
         "Sleep target:",
-        sleep.get("sleep_target_display"),
+        sleep.get(
+            "sleep_target_display"
+        ),
     )
+
     print(
         "Time in bed:",
-        sleep.get("time_in_bed_target_display"),
+        sleep.get(
+            "time_in_bed_target_display"
+        ),
     )
+
     print(
         "Bedtime:",
-        sleep.get("recommended_bedtime"),
+        sleep.get(
+            "recommended_bedtime"
+        ),
     )
+
     print(
         "Trend:",
-        sleep.get("sleep_trend"),
+        sleep.get(
+            "sleep_trend"
+        ),
     )
+
     print(
         "Trend summary:",
-        sleep.get("trend_summary"),
+        sleep.get(
+            "trend_summary"
+        ),
     )
+
     print()
 
     print(
