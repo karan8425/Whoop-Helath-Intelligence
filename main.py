@@ -42,6 +42,10 @@ from weekly_analytics import (
     weekly_health_summary,
 )
 
+from weekly_health_intelligence import (
+    generate_weekly_health_intelligence,
+)
+
 from freshness import (
     freshness_status,
 )
@@ -773,6 +777,41 @@ async def weekly_health_analytics(
             ),
         ) from exc
 
+# ============================================================
+# WEEKLY HEALTH INTELLIGENCE AI TEST
+#
+# Admin-only diagnostic endpoint.
+#
+# This intentionally calls OpenAI once so we can validate the
+# weekly intelligence output before adding persistence/cache.
+# ============================================================
+
+@app.get(
+    "/health-intelligence/weekly/ai-test"
+)
+async def weekly_health_intelligence_ai_test(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    try:
+
+        return (
+            generate_weekly_health_intelligence()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Weekly Health Intelligence AI test failed: "
+                f"{exc}"
+            ),
+        ) from exc
 
 # ============================================================
 # BODY COMPOSITION TREND ANALYTICS
