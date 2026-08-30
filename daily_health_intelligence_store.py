@@ -429,6 +429,11 @@ def get_or_create_intelligence(
                     cached.get(
                         "intelligence_payload"
                     ),
+
+                "daily_coaching_summary":
+                    deterministic_payload.get(
+                        "daily_coaching_summary"
+                    ),
             }
 
     if generator is None:
@@ -499,6 +504,11 @@ def get_or_create_intelligence(
         "brief":
             generated.get(
                 "brief"
+            ),
+
+        "daily_coaching_summary":
+            deterministic_payload.get(
+                "daily_coaching_summary"
             ),
     }
 

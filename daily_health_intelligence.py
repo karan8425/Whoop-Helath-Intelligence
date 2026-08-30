@@ -7,6 +7,7 @@ from openai import OpenAI
 from todays_plan import (
     build_todays_plan,
 )
+from daily_coaching_summary import build_daily_coaching_summary
 
 
 SYSTEM_PROMPT = """
@@ -142,6 +143,9 @@ def build_daily_health_ai_payload():
                 "available_sections",
                 [],
             ),
+
+        "daily_coaching_summary":
+            build_daily_coaching_summary(plan),
     }
 
 
@@ -468,6 +472,9 @@ DATA:
 
         "brief":
             parsed,
+
+        "daily_coaching_summary":
+            payload.get("daily_coaching_summary"),
     }
 
 
@@ -645,6 +652,9 @@ def _mock_daily_health_intelligence():
                     "is not a medical diagnosis."
                 ),
         },
+
+        "daily_coaching_summary":
+            payload.get("daily_coaching_summary"),
     }
 
 
