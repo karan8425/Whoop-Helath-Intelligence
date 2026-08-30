@@ -99,6 +99,7 @@ from daily_health_intelligence_store import (
 from todays_plan import (
     build_todays_plan,
 )
+from today_experience import build_today_experience
 
 from whoop_webhook import (
     router as whoop_webhook_router,
@@ -1147,6 +1148,36 @@ async def mobile_todays_plan(
             status_code=500,
             detail=(
                 "Today's deterministic plan failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# MOBILE TODAY EXPERIENCE
+#
+# Compact deterministic card contract. No OpenAI call.
+# ============================================================
+
+@app.get(
+    "/api/v1/today"
+)
+async def mobile_today_experience(
+    request: Request,
+):
+
+    require_ingest_key(
+        request
+    )
+
+    try:
+        return build_today_experience()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Today experience failed: "
                 f"{exc}"
             ),
         ) from exc
