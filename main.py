@@ -42,8 +42,8 @@ from weekly_analytics import (
     weekly_health_summary,
 )
 
-from weekly_health_intelligence import (
-    generate_weekly_health_intelligence,
+from weekly_health_intelligence_store import (
+    get_weekly_health_intelligence,
 )
 
 from freshness import (
@@ -776,7 +776,7 @@ async def weekly_health_analytics(
                 f"{exc}"
             ),
         ) from exc
-
+    
 # ============================================================
 # WEEKLY HEALTH INTELLIGENCE AI TEST
 #
@@ -787,10 +787,11 @@ async def weekly_health_analytics(
 # ============================================================
 
 @app.get(
-    "/health-intelligence/weekly/ai-test"
+    "/health-intelligence/weekly"
 )
-async def weekly_health_intelligence_ai_test(
+async def weekly_health_intelligence(
     request: Request,
+    force_refresh: bool = False,
 ):
 
     require_admin(
@@ -800,7 +801,10 @@ async def weekly_health_intelligence_ai_test(
     try:
 
         return (
-            generate_weekly_health_intelligence()
+            get_weekly_health_intelligence(
+                force_refresh=
+                    force_refresh
+            )
         )
 
     except Exception as exc:
@@ -808,7 +812,7 @@ async def weekly_health_intelligence_ai_test(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Weekly Health Intelligence AI test failed: "
+                "Weekly Health Intelligence failed: "
                 f"{exc}"
             ),
         ) from exc
