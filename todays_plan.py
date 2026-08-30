@@ -1,5 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from time import perf_counter
+import logging
 
 from goals import get_active_goal
 from goal_progress import goal_progress
@@ -16,6 +18,8 @@ from integrations.tonal.workout_prescription import (
 
 EASTERN = ZoneInfo("America/New_York")
 
+logger = logging.getLogger(__name__)
+
 
 # ============================================================
 # HELPERS
@@ -26,8 +30,18 @@ def _today():
 
 
 def _safe_engine(engine, engine_name):
+    started = perf_counter()
+
     try:
         result = engine()
+
+        elapsed = perf_counter() - started
+
+        logger.info(
+            "TODAYS_PLAN_TIMING engine=%s seconds=%.3f",
+            engine_name,
+            elapsed,
+        )
 
         if not isinstance(result, dict):
             return {
@@ -39,6 +53,14 @@ def _safe_engine(engine, engine_name):
         return result
 
     except Exception as exc:
+        elapsed = perf_counter() - started
+
+        logger.exception(
+            "TODAYS_PLAN_TIMING engine=%s seconds=%.3f status=error",
+            engine_name,
+            elapsed,
+        )
+
         return {
             "status": "error",
             "engine": engine_name,
@@ -338,9 +360,14 @@ def _sleep_card(sleep):
 # ============================================================
 
 def build_todays_plan():
+    total_started = perf_counter()
+
+    logger.info(
+        "TODAYS_PLAN_TIMING status=start"
+    )
+
     # --------------------------------------------------------
     # SHARED CONTEXT
-    # Expensive data is calculated once and reused.
     # --------------------------------------------------------
 
     goal = _safe_engine(
@@ -412,10 +439,17 @@ def build_todays_plan():
     # API CARDS
     # --------------------------------------------------------
 
+    cards_started = perf_counter()
+
     training_card = _training_card(workout)
     nutrition_card = _nutrition_card(nutrition)
     hydration_card = _hydration_card(hydration)
     sleep_card = _sleep_card(sleep)
+
+    logger.info(
+        "TODAYS_PLAN_TIMING engine=card_building seconds=%.3f",
+        perf_counter() - cards_started,
+    )
 
     cards = {
         "training": training_card,
@@ -430,6 +464,16 @@ def build_todays_plan():
         if card.get("available")
     ]
 
+    total_elapsed = (
+        perf_counter()
+        - total_started
+    )
+
+    logger.info(
+        "TODAYS_PLAN_TIMING status=complete total_seconds=%.3f",
+        total_elapsed,
+    )
+
     return {
         "status": "ok",
         "version": "1.2",
@@ -440,7 +484,6 @@ def build_todays_plan():
         "hydration": hydration_card,
         "sleep": sleep_card,
     }
-
 
 # ============================================================
 # LOCAL VALIDATION
