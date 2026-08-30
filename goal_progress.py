@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from goals import get_active_goal
 from apple_health_trends import apple_health_trends
+from body_composition_progress import body_composition_progress
 
 
 KG_TO_LB = 2.2046226218
@@ -92,6 +93,34 @@ def _progress_percentage(
             1,
         ),
     )
+
+
+def _derived_composition_goal_metric(
+    body_progress,
+    metric_name,
+):
+    metric = (
+        body_progress.get("metrics", {}).get(metric_name, {})
+        if body_progress
+        else {}
+    )
+    progress = metric.get("progress", {})
+    goal = metric.get("horizons", {}).get("Goal", {})
+
+    return {
+        "start_lb": metric.get("phase_start_value"),
+        "current_lb": metric.get("goal_current_value"),
+        "target_lb": metric.get("target_value"),
+        "progress_percentage": progress.get(
+            "progress_percentage"
+        ),
+        "raw_progress_percentage": progress.get(
+            "raw_progress_percentage"
+        ),
+        "direction": metric.get("goal_direction"),
+        "state": progress.get("state", "insufficient_data"),
+        "status": goal.get("status", "insufficient_data"),
+    }
 
 
 def _body_fat_direction(
@@ -436,7 +465,11 @@ def _summary(
     )
 
 
-def goal_progress(goal=None, trends=None):
+def goal_progress(
+    goal=None,
+    trends=None,
+    body_progress=None,
+):
 
     if goal is None:
         goal = get_active_goal()
@@ -457,6 +490,9 @@ def goal_progress(goal=None, trends=None):
         trends = (
             apple_health_trends()
         )
+
+    if body_progress is None:
+        body_progress = body_composition_progress()
 
     body_composition = trends.get(
         "body_composition",
@@ -653,6 +689,18 @@ def goal_progress(goal=None, trends=None):
             "raw_progress_percentage":
                 raw_weight_progress,
         },
+
+        "fat_mass":
+            _derived_composition_goal_metric(
+                body_progress,
+                "fat_mass",
+            ),
+
+        "lean_mass":
+            _derived_composition_goal_metric(
+                body_progress,
+                "lean_mass",
+            ),
 
         "activity":
             activity_result,
