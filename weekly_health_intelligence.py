@@ -38,10 +38,13 @@ Rules:
 13. Do not treat configured goals as completed behavior.
 14. Do not invent nutrition intake, exercise completion, hydration intake,
     symptoms, diagnoses, medications or medical history.
-15. If evidence is insufficient, preserve the uncertainty.
-16. Do not diagnose medical conditions.
-17. Keep the response concise, practical and decision-oriented.
-18. Return JSON only with exactly the requested keys.
+15. 15. If evidence is insufficient, preserve the uncertainty.
+16. Do not invent a sleep-duration, bedtime, or sleep-opportunity target.
+    If no explicit target is supplied, describe sleep only relative to the
+    supplied personal history and deterministic classification.
+17. Do not diagnose medical conditions.
+18. Keep the response concise, practical and decision-oriented.
+19. Return JSON only with exactly the requested keys.
 """
 
 
@@ -382,6 +385,8 @@ Important:
   relationship is observational and that reduced training stress is a plausible
   contributor, not proven causation.
 - Prioritize one main adjustment rather than producing a long checklist.
+- Do not prescribe a numeric sleep target or sleep-opportunity target unless
+  that target is explicitly present in the supplied weekly data.
 - Keep the output concise and practical.
 
 DATA:
