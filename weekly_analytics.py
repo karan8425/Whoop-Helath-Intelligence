@@ -18,7 +18,7 @@ from apple_health_trends import (
 # Statistical design:
 #
 # Current period:
-#     Rolling 7 calendar days ending on the latest metric_date.
+#     Rolling 7 calendar days ending on the latest WHOOP metric_date.
 #
 # Previous period:
 #     The 7 calendar days immediately before the current period.
@@ -29,23 +29,27 @@ from apple_health_trends import (
 # 90-day baseline:
 #     The 90 calendar days immediately before the current period.
 #
-# This deliberately prevents the current week from contaminating its
-# own comparison baseline.
+# The current period is deliberately excluded from historical
+# comparison baselines.
 #
-# Missing physiological measurements are excluded from averages.
-# Genuine workout-free days remain zero because workout_count is stored
-# as zero in whoop_daily_metrics.
+# Weekly interpretation separates:
 #
-# Weekly overall status evaluates separate dimensions:
+#     1. Physiology / recovery trajectory       -> WHOOP
+#     2. Training-load context                  -> WHOOP
+#     3. Strength-training adherence            -> Tonal
+#     4. General activity adherence             -> Apple Health
+#     5. Body-composition progress              -> Hume / Apple Health
 #
-#     1. Physiology / recovery trajectory
-#     2. Training-load context
-#     3. Body-composition goal context
+# These dimensions are intentionally not collapsed prematurely.
 #
-# A reduction in training load is not automatically classified as bad.
-# It is context used to prevent improved recovery from being mistaken
-# for improved overall fitness progress when the athlete simply trained
-# materially less.
+# A lower WHOOP training-load week is contextual rather than
+# automatically favorable or unfavorable.
+#
+# Tonal strength adherence and Apple Health step adherence are compared
+# against the user's explicitly configured goals.
+#
+# Body-composition progress affects the top-level weekly conclusion only
+# after the active goal phase reaches its minimum maturity period.
 # ---------------------------------------------------------------------
 
 
@@ -97,6 +101,8 @@ PHYSIOLOGY_METRICS = {
 TRAINING_CHANGE_THRESHOLD_PCT = 20.0
 
 MIN_SLEEP_DURATION_HOURS_FOR_CONSTRAINT = 7.0
+
+ACTIVITY_NEAR_TARGET_THRESHOLD = 0.90
 
 
 # ---------------------------------------------------------------------
@@ -199,16 +205,6 @@ def _weekly_equivalent(
     total_value,
     calendar_days,
 ):
-    """
-    Convert a multi-day aggregate into a seven-day equivalent.
-
-    Example:
-        30-day workout count = 12
-
-        weekly equivalent =
-            12 / 30 * 7
-    """
-
     if (
         total_value is None
         or not calendar_days
@@ -223,7 +219,7 @@ def _weekly_equivalent(
 
 
 # ---------------------------------------------------------------------
-# Period aggregation
+# WHOOP period aggregation
 # ---------------------------------------------------------------------
 
 
@@ -232,10 +228,10 @@ def _aggregate_period(
     end_date,
 ):
     """
-    Aggregate one calendar-date period.
+    Aggregate one WHOOP calendar-date period.
 
     Physiological NULLs are excluded by PostgreSQL AVG().
-    workout_count includes real zero-workout days.
+    Genuine workout-free days remain zero.
     """
 
     with get_conn() as conn:
@@ -642,15 +638,6 @@ def _classify_metric(
     current,
     baseline,
 ):
-    """
-    Return:
-
-        improving
-        stable
-        deteriorating
-        insufficient_data
-    """
-
     if (
         current is None
         or baseline is None
@@ -689,9 +676,7 @@ def _classify_metric(
             ]
         )
 
-        if direction == (
-            "higher"
-        ):
+        if direction == "higher":
 
             if change >= threshold:
                 return (
@@ -737,9 +722,7 @@ def _classify_metric(
         ]
     )
 
-    if direction == (
-        "higher"
-    ):
+    if direction == "higher":
 
         if pct_change >= threshold:
             return (
@@ -773,16 +756,6 @@ def _severity(
     current,
     baseline,
 ):
-    """
-    Produce a normalized signed signal.
-
-    Positive = favorable.
-    Negative = unfavorable.
-
-    Used only to select the strongest signal
-    and biggest physiological constraint.
-    """
-
     if (
         current is None
         or baseline is None
@@ -849,9 +822,7 @@ def _severity(
             / threshold
         )
 
-    if direction == (
-        "lower"
-    ):
+    if direction == "lower":
         raw *= -1
 
     return raw
@@ -1101,7 +1072,7 @@ def _physiology_trajectory(
 
 
 # ---------------------------------------------------------------------
-# Training context
+# WHOOP training-load context
 # ---------------------------------------------------------------------
 
 
@@ -1340,6 +1311,9 @@ def _training_context(
         )
 
     return {
+        "source":
+            "WHOOP",
+
         "load_status":
             load_status,
 
@@ -1374,11 +1348,618 @@ def _training_context(
 
         "interpretation":
             (
-                "Training load is contextual rather than "
+                "WHOOP training load is contextual rather than "
                 "automatically favorable or unfavorable. "
-                "A materially lower week can improve "
-                "recovery metrics while representing less "
-                "training stimulus."
+                "A materially lower week can improve recovery "
+                "metrics while representing less training stimulus."
+            ),
+    }
+
+
+# ---------------------------------------------------------------------
+# Tonal strength-session adherence
+# ---------------------------------------------------------------------
+
+
+def _tonal_period(
+    start_date,
+    end_date,
+):
+    """
+    Count Tonal training sessions that are eligible for the existing
+    strength-analysis system.
+
+    Rules reused from the Tonal subsystem:
+        - Explicitly excluded workout overrides are omitted.
+        - Workout must contain at least one Tonal set.
+        - Each activity_id counts once.
+        - Workout dates are aligned to America/New_York.
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(
+                        DISTINCT w.activity_id
+                    )::int
+                        AS sessions,
+
+                    COUNT(
+                        DISTINCT (
+                            w.begin_time
+                            AT TIME ZONE
+                            'America/New_York'
+                        )::date
+                    )::int
+                        AS training_days,
+
+                    COALESCE(
+                        SUM(
+                            DISTINCT
+                            w.duration_seconds
+                        ),
+                        0
+                    )
+                        AS duration_seconds
+
+                FROM tonal_workouts w
+
+                LEFT JOIN tonal_workout_overrides o
+                    ON o.activity_id =
+                        w.activity_id
+
+                WHERE (
+                    w.begin_time
+                    AT TIME ZONE
+                    'America/New_York'
+                )::date
+                    BETWEEN %s AND %s
+
+                  AND COALESCE(
+                        o.include_in_training_analysis,
+                        TRUE
+                      ) = TRUE
+
+                  AND EXISTS (
+                    SELECT 1
+                    FROM tonal_sets s
+                    WHERE s.activity_id =
+                        w.activity_id
+                  )
+                """,
+                (
+                    start_date,
+                    end_date,
+                ),
+            )
+
+            row = (
+                cur.fetchone()
+            )
+
+    sessions = int(
+        row[
+            "sessions"
+        ]
+        or 0
+    )
+
+    training_days = int(
+        row[
+            "training_days"
+        ]
+        or 0
+    )
+
+    duration_seconds = float(
+        row[
+            "duration_seconds"
+        ]
+        or 0
+    )
+
+    return {
+        "sessions":
+            sessions,
+
+        "training_days":
+            training_days,
+
+        "duration_hours":
+            _round(
+                duration_seconds
+                / 3600.0,
+                2,
+            ),
+    }
+
+
+def _strength_adherence(
+    current_start,
+    current_end,
+    previous_start,
+    previous_end,
+    active_goal,
+):
+    current = (
+        _tonal_period(
+            current_start,
+            current_end,
+        )
+    )
+
+    previous = (
+        _tonal_period(
+            previous_start,
+            previous_end,
+        )
+    )
+
+    target = None
+
+    if active_goal:
+
+        target = (
+            active_goal.get(
+                "strength_sessions_per_week"
+            )
+        )
+
+    if target is None:
+
+        return {
+            "available":
+                True,
+
+            "source":
+                "Tonal",
+
+            "status":
+                "no_goal",
+
+            "current_sessions":
+                current[
+                    "sessions"
+                ],
+
+            "current_training_days":
+                current[
+                    "training_days"
+                ],
+
+            "current_duration_hours":
+                current[
+                    "duration_hours"
+                ],
+
+            "previous_7_sessions":
+                previous[
+                    "sessions"
+                ],
+
+            "target_sessions_per_week":
+                None,
+
+            "interpretation":
+                (
+                    "Tonal training data is available, but no "
+                    "weekly strength-session target is configured."
+                ),
+        }
+
+    target = int(
+        target
+    )
+
+    sessions = (
+        current[
+            "sessions"
+        ]
+    )
+
+    if target <= 0:
+
+        status = (
+            "no_goal"
+        )
+
+        adherence_pct = None
+
+        sessions_remaining = None
+
+    else:
+
+        adherence_pct = (
+            sessions
+            / target
+            * 100.0
+        )
+
+        sessions_remaining = max(
+            target - sessions,
+            0,
+        )
+
+        if sessions >= target:
+
+            status = (
+                "met"
+            )
+
+        elif sessions == target - 1:
+
+            status = (
+                "near_target"
+            )
+
+        else:
+
+            status = (
+                "below_target"
+            )
+
+    return {
+        "available":
+            True,
+
+        "source":
+            "Tonal",
+
+        "status":
+            status,
+
+        "current_sessions":
+            sessions,
+
+        "current_training_days":
+            current[
+                "training_days"
+            ],
+
+        "current_duration_hours":
+            current[
+                "duration_hours"
+            ],
+
+        "previous_7_sessions":
+            previous[
+                "sessions"
+            ],
+
+        "change_vs_previous_7_sessions":
+            sessions
+            - previous[
+                "sessions"
+            ],
+
+        "target_sessions_per_week":
+            target,
+
+        "adherence_percentage":
+            (
+                _round(
+                    adherence_pct,
+                    1,
+                )
+                if adherence_pct
+                is not None
+                else None
+            ),
+
+        "sessions_remaining":
+            sessions_remaining,
+
+        "interpretation":
+            (
+                "Strength adherence is based on distinct "
+                "analysis-eligible Tonal workouts, not WHOOP "
+                "workout count or strain."
+            ),
+    }
+
+
+# ---------------------------------------------------------------------
+# Apple Health step adherence
+# ---------------------------------------------------------------------
+
+
+def _activity_period(
+    start_date,
+    end_date,
+    step_target,
+):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE steps IS NOT NULL
+                    )::int
+                        AS step_days,
+
+                    AVG(steps) FILTER (
+                        WHERE steps IS NOT NULL
+                    )
+                        AS average_steps,
+
+                    SUM(steps) FILTER (
+                        WHERE steps IS NOT NULL
+                    )
+                        AS total_steps,
+
+                    COUNT(*) FILTER (
+                        WHERE
+                            steps IS NOT NULL
+                            AND %s IS NOT NULL
+                            AND steps >= %s
+                    )::int
+                        AS days_target_met
+
+                FROM apple_health_daily_activity
+
+                WHERE activity_date
+                    BETWEEN %s AND %s
+                """,
+                (
+                    step_target,
+                    step_target,
+                    start_date,
+                    end_date,
+                ),
+            )
+
+            row = (
+                cur.fetchone()
+            )
+
+    return {
+        "step_days":
+            int(
+                row[
+                    "step_days"
+                ]
+                or 0
+            ),
+
+        "average_steps":
+            _round(
+                row[
+                    "average_steps"
+                ],
+                0,
+            ),
+
+        "total_steps":
+            _round(
+                row[
+                    "total_steps"
+                ],
+                0,
+            ),
+
+        "days_target_met":
+            int(
+                row[
+                    "days_target_met"
+                ]
+                or 0
+            ),
+    }
+
+
+def _activity_adherence(
+    current_start,
+    current_end,
+    previous_start,
+    previous_end,
+    active_goal,
+):
+    target = None
+
+    if active_goal:
+
+        target = (
+            active_goal.get(
+                "daily_step_target"
+            )
+        )
+
+    current = (
+        _activity_period(
+            current_start,
+            current_end,
+            target,
+        )
+    )
+
+    previous = (
+        _activity_period(
+            previous_start,
+            previous_end,
+            target,
+        )
+    )
+
+    step_days = (
+        current[
+            "step_days"
+        ]
+    )
+
+    average_steps = (
+        current[
+            "average_steps"
+        ]
+    )
+
+    coverage_percentage = (
+        step_days
+        / 7
+        * 100.0
+    )
+
+    if step_days < 5:
+
+        status = (
+            "insufficient_data"
+        )
+
+        adherence_pct = None
+
+    elif (
+        target is None
+        or float(
+            target
+        ) <= 0
+    ):
+
+        status = (
+            "no_goal"
+        )
+
+        adherence_pct = None
+
+    elif average_steps is None:
+
+        status = (
+            "insufficient_data"
+        )
+
+        adherence_pct = None
+
+    else:
+
+        adherence_pct = (
+            float(
+                average_steps
+            )
+            / float(
+                target
+            )
+            * 100.0
+        )
+
+        if average_steps >= float(
+            target
+        ):
+
+            status = (
+                "met"
+            )
+
+        elif average_steps >= (
+            float(
+                target
+            )
+            * ACTIVITY_NEAR_TARGET_THRESHOLD
+        ):
+
+            status = (
+                "near_target"
+            )
+
+        else:
+
+            status = (
+                "below_target"
+            )
+
+    return {
+        "available":
+            step_days > 0,
+
+        "source":
+            "Apple Health",
+
+        "status":
+            status,
+
+        "step_days":
+            step_days,
+
+        "coverage_percentage":
+            _round(
+                coverage_percentage,
+                1,
+            ),
+
+        "average_steps":
+            (
+                int(
+                    round(
+                        average_steps
+                    )
+                )
+                if average_steps
+                is not None
+                else None
+            ),
+
+        "previous_7_average_steps":
+            (
+                int(
+                    round(
+                        previous[
+                            "average_steps"
+                        ]
+                    )
+                )
+                if previous[
+                    "average_steps"
+                ]
+                is not None
+                else None
+            ),
+
+        "pct_vs_previous_7":
+            _round(
+                _pct_change(
+                    average_steps,
+                    previous[
+                        "average_steps"
+                    ],
+                ),
+                1,
+            ),
+
+        "daily_step_target":
+            target,
+
+        "adherence_percentage":
+            (
+                _round(
+                    adherence_pct,
+                    1,
+                )
+                if adherence_pct
+                is not None
+                else None
+            ),
+
+        "days_target_met":
+            current[
+                "days_target_met"
+            ],
+
+        "days_target_missed":
+            (
+                step_days
+                - current[
+                    "days_target_met"
+                ]
+            ),
+
+        "interpretation":
+            (
+                "Step adherence compares the average of days "
+                "with Apple Health step observations against "
+                "the configured daily goal. Missing days are "
+                "not treated as zero."
             ),
     }
 
@@ -1535,7 +2116,7 @@ def _body_composition_context():
 
 
 # ---------------------------------------------------------------------
-# Key signals / constraints
+# Key physiology signals / constraints
 # ---------------------------------------------------------------------
 
 
@@ -1738,6 +2319,91 @@ def _select_key_signals(
 
 
 # ---------------------------------------------------------------------
+# Goal-adherence summary
+# ---------------------------------------------------------------------
+
+
+def _goal_adherence_summary(
+    strength_adherence,
+    activity_adherence,
+):
+    statuses = []
+
+    strength_status = (
+        strength_adherence.get(
+            "status"
+        )
+    )
+
+    activity_status = (
+        activity_adherence.get(
+            "status"
+        )
+    )
+
+    if strength_status not in (
+        None,
+        "insufficient_data",
+        "no_goal",
+    ):
+        statuses.append(
+            strength_status
+        )
+
+    if activity_status not in (
+        None,
+        "insufficient_data",
+        "no_goal",
+    ):
+        statuses.append(
+            activity_status
+        )
+
+    if not statuses:
+
+        overall = (
+            "insufficient_data"
+        )
+
+    elif "below_target" in statuses:
+
+        overall = (
+            "below_target"
+        )
+
+    elif "near_target" in statuses:
+
+        overall = (
+            "near_target"
+        )
+
+    elif all(
+        status == "met"
+        for status in statuses
+    ):
+
+        overall = (
+            "met"
+        )
+
+    else:
+        overall = (
+            "mixed"
+        )
+
+    return {
+        "status":
+            overall,
+
+        "strength":
+            strength_status,
+
+        "activity":
+            activity_status,
+    }
+
+
+# ---------------------------------------------------------------------
 # Overall weekly interpretation
 # ---------------------------------------------------------------------
 
@@ -1745,6 +2411,8 @@ def _select_key_signals(
 def _overall_weekly_trajectory(
     physiology,
     training,
+    strength_adherence,
+    activity_adherence,
     body_composition,
     coverage,
 ):
@@ -1764,6 +2432,16 @@ def _overall_weekly_trajectory(
                 training[
                     "load_status"
                 ],
+
+            "strength_adherence":
+                strength_adherence.get(
+                    "status"
+                ),
+
+            "activity_adherence":
+                activity_adherence.get(
+                    "status"
+                ),
 
             "body_composition":
                 body_composition.get(
@@ -1789,6 +2467,18 @@ def _overall_weekly_trajectory(
         ]
     )
 
+    strength_status = (
+        strength_adherence.get(
+            "status"
+        )
+    )
+
+    activity_status = (
+        activity_adherence.get(
+            "status"
+        )
+    )
+
     body_status = (
         body_composition.get(
             "status",
@@ -1801,6 +2491,46 @@ def _overall_weekly_trajectory(
             "status_mature",
             False,
         )
+    )
+
+    materially_lower_training = (
+        training_status
+        == "materially_lower"
+    )
+
+    materially_higher_training = (
+        training_status
+        == "materially_higher"
+    )
+
+    strength_below_target = (
+        strength_status
+        == "below_target"
+    )
+
+    strength_near_target = (
+        strength_status
+        == "near_target"
+    )
+
+    strength_met = (
+        strength_status
+        == "met"
+    )
+
+    activity_below_target = (
+        activity_status
+        == "below_target"
+    )
+
+    activity_near_target = (
+        activity_status
+        == "near_target"
+    )
+
+    activity_met = (
+        activity_status
+        == "met"
     )
 
     body_conflict = (
@@ -1818,21 +2548,22 @@ def _overall_weekly_trajectory(
         == "progressing"
     )
 
-    materially_lower_training = (
-        training_status
-        == "materially_lower"
+    adherence_conflict = (
+        strength_below_target
+        or activity_below_target
     )
 
-    materially_higher_training = (
-        training_status
-        == "materially_higher"
+    adherence_positive = (
+        strength_met
+        and activity_met
     )
 
-    if physiology_status == (
-        "deteriorating"
-    ):
+    if physiology_status == "deteriorating":
 
-        if body_positive:
+        if (
+            body_positive
+            or adherence_positive
+        ):
             overall = (
                 "mixed"
             )
@@ -1842,24 +2573,36 @@ def _overall_weekly_trajectory(
                 "deteriorating"
             )
 
-    elif physiology_status == (
-        "mixed"
-    ):
+    elif physiology_status == "mixed":
+
         overall = (
             "mixed"
         )
 
-    elif physiology_status == (
-        "improving"
-    ):
+    elif physiology_status == "improving":
 
         if (
-            materially_lower_training
-            or body_conflict
+            body_conflict
+            or adherence_conflict
         ):
             overall = (
                 "mixed"
             )
+
+        elif materially_lower_training:
+
+            if (
+                strength_met
+                and not activity_below_target
+            ):
+                overall = (
+                    "improving"
+                )
+
+            else:
+                overall = (
+                    "mixed"
+                )
 
         else:
             overall = (
@@ -1868,18 +2611,28 @@ def _overall_weekly_trajectory(
 
     else:
 
-        if body_conflict:
+        if (
+            body_conflict
+            or adherence_conflict
+        ):
             overall = (
                 "mixed"
             )
 
         elif (
             body_positive
-            and not materially_lower_training
+            or adherence_positive
         ):
-            overall = (
-                "improving"
-            )
+
+            if not materially_lower_training:
+                overall = (
+                    "improving"
+                )
+
+            else:
+                overall = (
+                    "mixed"
+                )
 
         elif materially_lower_training:
             overall = (
@@ -1893,61 +2646,94 @@ def _overall_weekly_trajectory(
 
     reasons = []
 
-    if physiology_status == (
-        "improving"
-    ):
+    if physiology_status == "improving":
+
         reasons.append(
             "physiology_improving"
         )
 
-    elif physiology_status == (
-        "deteriorating"
-    ):
+    elif physiology_status == "deteriorating":
+
         reasons.append(
             "physiology_deteriorating"
         )
 
-    elif physiology_status == (
-        "mixed"
-    ):
+    elif physiology_status == "mixed":
+
         reasons.append(
             "physiology_mixed"
         )
 
     if materially_lower_training:
+
         reasons.append(
             "training_load_materially_lower"
         )
 
     elif materially_higher_training:
+
         reasons.append(
             "training_load_materially_higher"
         )
 
+    if strength_met:
+
+        reasons.append(
+            "strength_goal_met"
+        )
+
+    elif strength_near_target:
+
+        reasons.append(
+            "strength_goal_near_target"
+        )
+
+    elif strength_below_target:
+
+        reasons.append(
+            "strength_goal_below_target"
+        )
+
+    if activity_met:
+
+        reasons.append(
+            "activity_goal_met"
+        )
+
+    elif activity_near_target:
+
+        reasons.append(
+            "activity_goal_near_target"
+        )
+
+    elif activity_below_target:
+
+        reasons.append(
+            "activity_goal_below_target"
+        )
+
     if body_mature:
 
-        if body_status == (
-            "progressing"
-        ):
+        if body_status == "progressing":
+
             reasons.append(
                 "body_composition_progressing"
             )
 
-        elif body_status == (
-            "regressing"
-        ):
+        elif body_status == "regressing":
+
             reasons.append(
                 "body_composition_regressing"
             )
 
-        elif body_status == (
-            "mixed"
-        ):
+        elif body_status == "mixed":
+
             reasons.append(
                 "body_composition_mixed"
             )
 
     else:
+
         reasons.append(
             "body_composition_goal_phase_immature"
         )
@@ -1961,6 +2747,12 @@ def _overall_weekly_trajectory(
 
         "training_load":
             training_status,
+
+        "strength_adherence":
+            strength_status,
+
+        "activity_adherence":
+            activity_status,
 
         "body_composition":
             body_status,
@@ -2008,13 +2800,12 @@ def weekly_health_summary(
     end_date=None,
 ):
     """
-    Build deterministic rolling weekly analytics.
+    Build deterministic rolling weekly health analytics.
 
     end_date:
         Optional datetime.date or ISO date string.
 
-        If omitted, the latest metric_date in
-        whoop_daily_metrics is used.
+        If omitted, latest WHOOP metric_date is used.
     """
 
     with get_conn() as conn:
@@ -2095,7 +2886,7 @@ def weekly_health_summary(
     )
 
     # -------------------------------------------------------------
-    # Baselines exclude the current seven days.
+    # Baselines excluding current seven days
     # -------------------------------------------------------------
 
     baseline_30_start, baseline_30_end = (
@@ -2170,6 +2961,30 @@ def weekly_health_summary(
         )
     )
 
+    active_goal = (
+        get_active_goal()
+    )
+
+    strength_adherence = (
+        _strength_adherence(
+            current_start,
+            current_end,
+            previous_start,
+            previous_end,
+            active_goal,
+        )
+    )
+
+    activity_adherence = (
+        _activity_adherence(
+            current_start,
+            current_end,
+            previous_start,
+            previous_end,
+            active_goal,
+        )
+    )
+
     body_composition_context = (
         _body_composition_context()
     )
@@ -2177,6 +2992,13 @@ def weekly_health_summary(
     key_signals = (
         _select_key_signals(
             comparisons
+        )
+    )
+
+    goal_adherence = (
+        _goal_adherence_summary(
+            strength_adherence,
+            activity_adherence,
         )
     )
 
@@ -2228,6 +3050,16 @@ def weekly_health_summary(
                 1,
             ),
 
+        "activity_days":
+            activity_adherence.get(
+                "step_days"
+            ),
+
+        "activity_percentage":
+            activity_adherence.get(
+                "coverage_percentage"
+            ),
+
         "sufficient_for_weekly_review":
             (
                 recovery_days >= 5
@@ -2239,13 +3071,11 @@ def weekly_health_summary(
         _overall_weekly_trajectory(
             physiology_trajectory,
             training_context,
+            strength_adherence,
+            activity_adherence,
             body_composition_context,
             coverage,
         )
-    )
-
-    active_goal = (
-        get_active_goal()
     )
 
     return {
@@ -2298,25 +3128,42 @@ def weekly_health_summary(
 
             "training_baseline_normalized_to_7_days":
                 True,
+
+            "strength_source":
+                "Tonal",
+
+            "activity_source":
+                "Apple Health",
         },
 
         "coverage":
             coverage,
 
-        # New authoritative top-level weekly conclusion.
+        # Authoritative cross-domain weekly conclusion.
         "overall_trajectory":
             overall_trajectory,
 
-        # Existing physiology-only result retained explicitly.
+        # Physiology-only trajectory.
         "physiology_trajectory":
             physiology_trajectory,
 
-        # Backward-compatible field.
+        # Backward compatibility.
         "trajectory":
             physiology_trajectory,
 
+        # WHOOP training-load context.
         "training_context":
             training_context,
+
+        # Goal adherence from source-of-truth systems.
+        "strength_adherence":
+            strength_adherence,
+
+        "activity_adherence":
+            activity_adherence,
+
+        "goal_adherence":
+            goal_adherence,
 
         "body_composition_context":
             body_composition_context,
