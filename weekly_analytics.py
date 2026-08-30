@@ -1398,12 +1398,11 @@ def _tonal_period(
 
                     COALESCE(
                         SUM(
-                            DISTINCT
                             w.duration_seconds
                         ),
                         0
                     )
-                        AS duration_seconds
+    AS duration_seconds
 
                 FROM tonal_workouts w
 
