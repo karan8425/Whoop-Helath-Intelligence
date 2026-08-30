@@ -492,10 +492,6 @@ def build_nutrition_prescription(
             )
         )
 
-    progress = (
-        goal_progress()
-    )
-
     phase = (
         goal.get(
             "phase"
