@@ -34,6 +34,10 @@ from analytics import (
     init_analytics,
 )
 
+from body_composition_progress import (
+    body_composition_progress,
+)
+
 from baselines import (
     init_baselines,
 )
@@ -776,6 +780,54 @@ async def weekly_health_analytics(
                 f"{exc}"
             ),
         ) from exc
+
+
+# ============================================================
+#Admin Disgnostic endpoint 
+# ============================================================
+@app.get(
+    "/body-composition/progress"
+)
+async def body_composition_progress_admin(
+    request: Request,
+):
+    require_admin(request)
+
+    try:
+        return body_composition_progress()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Body Composition Progress failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+@app.get(
+    "/api/v1/body-composition/progress"
+)
+async def body_composition_progress_mobile(
+    request: Request,
+):
+    require_ingest_key(
+        request
+    )
+
+    try:
+        return body_composition_progress()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Body Composition Progress failed: "
+                f"{exc}"
+            ),
+        ) from exc
+# ============================================================
     
 # ============================================================
 # WEEKLY HEALTH INTELLIGENCE AI TEST
