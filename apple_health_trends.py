@@ -3,6 +3,8 @@ from zoneinfo import ZoneInfo
 
 from db import get_conn
 
+from body_composition_goal import phase_aware_daily_mean
+
 from goals import (
     get_active_goal,
 )
@@ -3524,6 +3526,72 @@ def _goal_metric_payload(
 # Body-composition progress
 # ---------------------------------------------------------
 
+def _phase_hume_goal_values(
+    phase_start_date,
+    phase_age_days,
+):
+    """Build Goal-only means from phase-scoped Hume days."""
+
+    start_time = datetime.combine(
+        phase_start_date,
+        datetime.min.time(),
+        tzinfo=EASTERN,
+    )
+
+    weight_rows = _source_daily_history(
+        "body_weight",
+        HUME_BUNDLE_ID,
+        start_time=start_time,
+    )
+    body_fat_rows = _source_daily_history(
+        "body_fat_percentage",
+        HUME_BUNDLE_ID,
+        start_time=start_time,
+    )
+    derived_rows = _derived_composition_rows(
+        HUME_BUNDLE_ID
+    )
+
+    series = {
+        "weight": [
+            {
+                "date": row["measurement_date"],
+                "value": float(row["value"]) * KG_TO_LB,
+            }
+            for row in weight_rows
+        ],
+        "body_fat_percentage": [
+            {
+                "date": row["measurement_date"],
+                "value": float(row["value"]),
+            }
+            for row in body_fat_rows
+        ],
+        "fat_mass": [
+            {
+                "date": row["measurement_date"],
+                "value": float(row["body_fat_mass_kg"]) * KG_TO_LB,
+            }
+            for row in derived_rows
+        ],
+        "lean_mass": [
+            {
+                "date": row["measurement_date"],
+                "value": float(row["lean_body_mass_kg"]) * KG_TO_LB,
+            }
+            for row in derived_rows
+        ],
+    }
+
+    return {
+        key: phase_aware_daily_mean(
+            values,
+            phase_start_date,
+            phase_age_days,
+        )[0]
+        for key, values in series.items()
+    }
+
 def _body_composition_progress(
     weight,
     body_fat,
@@ -3594,6 +3662,15 @@ def _body_composition_progress(
         >= MIN_GOAL_PHASE_AGE_DAYS
     )
 
+    phase_goal_values = (
+        _phase_hume_goal_values(
+            parsed_phase_start_date,
+            phase_age_days,
+        )
+        if phase_start_date
+        else {}
+    )
+
     start_weight_lb = (
         active_goal.get(
             "phase_start_weight_lb"
@@ -3619,43 +3696,19 @@ def _body_composition_progress(
     )
 
     current_weight_lb = (
-        weight.get(
-            "current_7d_average_lb"
-        )
-        if weight.get(
-            "available"
-        )
-        else None
+        phase_goal_values.get("weight")
     )
 
     current_body_fat = (
-        body_fat.get(
-            "current_7d_average"
-        )
-        if body_fat.get(
-            "available"
-        )
-        else None
+        phase_goal_values.get("body_fat_percentage")
     )
 
     current_fat_mass_lb = (
-        body_fat_mass.get(
-            "current_7d_average_lb"
-        )
-        if body_fat_mass.get(
-            "available"
-        )
-        else None
+        phase_goal_values.get("fat_mass")
     )
 
     current_lean_mass_lb = (
-        derived_lean_mass.get(
-            "current_7d_average_lb"
-        )
-        if derived_lean_mass.get(
-            "available"
-        )
-        else None
+        phase_goal_values.get("lean_mass")
     )
 
     start_fat_mass_lb = None
@@ -4017,9 +4070,11 @@ def _body_composition_progress(
         "methodology": {
             "current_value":
                 (
-                    "Current goal calculations use the "
-                    "recent 7-day Hume daily-average mean "
-                    "rather than a single scale reading."
+                    "Goal calculations use only Hume daily "
+                    "measurements on or after phase start. "
+                    "Before phase day 7 they average every "
+                    "available phase day; afterward they use "
+                    "the latest rolling 7-calendar-day mean."
                 ),
 
             "trend":

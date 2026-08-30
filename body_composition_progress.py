@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from db import get_conn
+from body_composition_goal import phase_aware_daily_mean
 from goals import get_active_goal
 
 
@@ -20,6 +21,8 @@ FITDAYS_BUNDLE_ID = (
 KG_TO_LB = 2.2046226218
 
 CURRENT_SMOOTHING_DAYS = 7
+MIN_GOAL_PHASE_AGE_DAYS = 7
+_GOAL_CURRENT_UNSET = object()
 
 
 HORIZONS = {
@@ -34,6 +37,7 @@ HORIZONS = {
 TREND_TOLERANCES = {
     "weight": 0.25,
     "body_fat_percentage": 0.30,
+    "fat_mass": 0.25,
     "lean_mass": 0.25,
 }
 
@@ -301,6 +305,7 @@ def _build_source_history(
 
     weight = []
     body_fat = []
+    fat_mass = []
     lean_mass = []
 
     for date in sorted(
@@ -369,6 +374,17 @@ def _build_source_history(
                 - fat_mass_kg
             )
 
+            fat_mass.append(
+                {
+                    "date": date.isoformat(),
+                    "value": _round(
+                        fat_mass_kg * KG_TO_LB,
+                        1,
+                    ),
+                    "derived": True,
+                }
+            )
+
             lean_mass.append(
                 {
                     "date":
@@ -389,7 +405,72 @@ def _build_source_history(
     return {
         "weight": weight,
         "body_fat_percentage": body_fat,
+        "fat_mass": fat_mass,
         "lean_mass": lean_mass,
+    }
+
+
+def _phase_hume_goal_values(
+    rows,
+    phase_start_date,
+    phase_age_days,
+):
+    """Build Goal-only means from exact Hume daily rows."""
+
+    daily = {}
+
+    for row in rows:
+        if row["source_bundle_id"] != HUME_BUNDLE_ID:
+            continue
+
+        date = row["measurement_date"]
+        daily.setdefault(date, {})[
+            row["metric_name"]
+        ] = float(row["daily_value"])
+
+    series = {
+        "weight": [],
+        "body_fat_percentage": [],
+        "fat_mass": [],
+        "lean_mass": [],
+    }
+
+    for date, values in daily.items():
+        weight_kg = values.get("body_weight")
+        body_fat = values.get("body_fat_percentage")
+
+        if weight_kg is not None:
+            series["weight"].append({
+                "date": date,
+                "value": weight_kg * KG_TO_LB,
+            })
+
+        if body_fat is not None:
+            series["body_fat_percentage"].append({
+                "date": date,
+                "value": body_fat,
+            })
+
+        if weight_kg is not None and body_fat is not None:
+            fat_mass_lb = (
+                weight_kg * body_fat / 100.0 * KG_TO_LB
+            )
+            series["fat_mass"].append({
+                "date": date,
+                "value": fat_mass_lb,
+            })
+            series["lean_mass"].append({
+                "date": date,
+                "value": weight_kg * KG_TO_LB - fat_mass_lb,
+            })
+
+    return {
+        key: phase_aware_daily_mean(
+            values,
+            phase_start_date,
+            phase_age_days,
+        )[0]
+        for key, values in series.items()
     }
 
 
@@ -803,6 +884,7 @@ def _metric_payload(
     series,
     phase_start,
     target,
+    goal_current=_GOAL_CURRENT_UNSET,
 ):
     dated = (
         _dated_series(
@@ -851,6 +933,9 @@ def _metric_payload(
         )
     )
 
+    if goal_current is _GOAL_CURRENT_UNSET:
+        goal_current = current_value
+
     goal_direction = (
         _goal_direction(
             phase_start,
@@ -884,7 +969,7 @@ def _metric_payload(
     horizons["Goal"] = (
         _goal_horizon(
             phase_start,
-            current_value,
+            goal_current,
             target,
         )
     )
@@ -892,7 +977,7 @@ def _metric_payload(
     progress = (
         _goal_progress(
             phase_start,
-            current_value,
+            goal_current,
             target,
         )
     )
@@ -900,13 +985,13 @@ def _metric_payload(
     distance_to_target = None
 
     if (
-        current_value is not None
+        goal_current is not None
         and target is not None
     ):
 
         distance_to_target = (
             abs(
-                float(current_value)
+                float(goal_current)
                 - float(target)
             )
         )
@@ -943,6 +1028,9 @@ def _metric_payload(
 
         "current_7d_measurement_days":
             current_days,
+
+        "goal_current_value":
+            _round(goal_current, 1),
 
         "phase_start_value":
             _round(
@@ -1062,7 +1150,38 @@ def body_composition_progress():
         )
     )
 
+    phase_start_date = active_goal.get(
+        "phase_start_date"
+    )
+    parsed_phase_start_date = (
+        datetime.strptime(
+            phase_start_date,
+            "%Y-%m-%d",
+        ).date()
+        if isinstance(phase_start_date, str)
+        else phase_start_date
+    )
+    today = datetime.now(timezone.utc).astimezone(
+        EASTERN
+    ).date()
+    phase_age_days = (
+        max(0, (today - parsed_phase_start_date).days)
+        if parsed_phase_start_date
+        else None
+    )
+    phase_goal_values = (
+        _phase_hume_goal_values(
+            rows,
+            parsed_phase_start_date,
+            phase_age_days,
+        )
+        if parsed_phase_start_date
+        else {}
+    )
+
+    start_fat = None
     start_lean = None
+    target_fat = None
     target_lean = None
 
     if (
@@ -1070,32 +1189,24 @@ def body_composition_progress():
         and start_body_fat is not None
     ):
 
-        start_lean = (
+        start_fat = (
             float(start_weight)
-            * (
-                1.0
-                - (
-                    float(start_body_fat)
-                    / 100.0
-                )
-            )
+            * float(start_body_fat)
+            / 100.0
         )
+        start_lean = float(start_weight) - start_fat
 
     if (
         target_weight is not None
         and target_body_fat is not None
     ):
 
-        target_lean = (
+        target_fat = (
             float(target_weight)
-            * (
-                1.0
-                - (
-                    float(target_body_fat)
-                    / 100.0
-                )
-            )
+            * float(target_body_fat)
+            / 100.0
         )
+        target_lean = float(target_weight) - target_fat
 
     weight = (
         _metric_payload(
@@ -1108,6 +1219,8 @@ def body_composition_progress():
                 start_weight,
             target=
                 target_weight,
+            goal_current=
+                phase_goal_values.get("weight"),
         )
     )
 
@@ -1132,6 +1245,22 @@ def body_composition_progress():
 
             target=
                 target_body_fat,
+            goal_current=
+                phase_goal_values.get(
+                    "body_fat_percentage"
+                ),
+        )
+    )
+
+    fat_mass = (
+        _metric_payload(
+            key="fat_mass",
+            display_name="Fat Mass",
+            unit="lb",
+            series=hume["fat_mass"],
+            phase_start=start_fat,
+            target=target_fat,
+            goal_current=phase_goal_values.get("fat_mass"),
         )
     )
 
@@ -1156,6 +1285,8 @@ def body_composition_progress():
 
             target=
                 target_lean,
+            goal_current=
+                phase_goal_values.get("lean_mass"),
         )
     )
 
@@ -1188,6 +1319,12 @@ def body_composition_progress():
                 active_goal.get(
                     "phase_end_date"
                 ),
+
+            "phase_age_days":
+                phase_age_days,
+
+            "minimum_status_age_days":
+                MIN_GOAL_PHASE_AGE_DAYS,
         },
 
         "source_policy": {
@@ -1224,6 +1361,9 @@ def body_composition_progress():
             "body_fat_percentage":
                 body_fat,
 
+            "fat_mass":
+                fat_mass,
+
             "lean_mass":
                 lean_mass,
         },
@@ -1239,6 +1379,9 @@ def body_composition_progress():
                     fitdays[
                         "body_fat_percentage"
                     ],
+
+                "fat_mass":
+                    fitdays["fat_mass"],
 
                 "lean_mass":
                     fitdays[
@@ -1257,6 +1400,9 @@ def body_composition_progress():
                         "body_fat_percentage"
                     ],
 
+                "fat_mass":
+                    hume["fat_mass"],
+
                 "lean_mass":
                     hume[
                         "lean_mass"
@@ -1267,9 +1413,11 @@ def body_composition_progress():
         "methodology": {
             "current_value":
                 (
-                    "Current goal calculations use "
-                    "the recent 7-day Hume daily-average "
-                    "mean."
+                    "Goal calculations use only Hume daily "
+                    "measurements on or after phase start. "
+                    "Before phase day 7 they average every "
+                    "available phase day; afterward they use "
+                    "the latest rolling 7-calendar-day mean."
                 ),
 
             "one_week":
