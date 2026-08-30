@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta
+from math import isfinite
 from statistics import mean
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,7 @@ EASTERN = ZoneInfo(
 MIN_SLEEP_TARGET_HOURS = 7.5
 BASE_SLEEP_TARGET_HOURS = 8.0
 MAX_SLEEP_TARGET_HOURS = 9.0
+MAX_WHOOP_SLEEP_TARGET_HOURS = 10.5
 
 # Raw WHOOP sleep efficiency is useful context, but extremely
 # high single-night values should not make our planned sleep
@@ -46,7 +48,12 @@ def _float(value):
     if value is None:
         return None
 
-    return float(value)
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return result if isfinite(result) else None
 
 
 def _round(
@@ -506,10 +513,16 @@ def _calculate_sleep_target(
             "A higher-intensity planned training day adds sleep opportunity to the fallback target."
         )
 
+    maximum_target = (
+        MAX_WHOOP_SLEEP_TARGET_HOURS
+        if sleep_need_source == "whoop_sleep_need"
+        else MAX_SLEEP_TARGET_HOURS
+    )
+
     target = _round_to_quarter_hour(_clamp(
         target,
         MIN_SLEEP_TARGET_HOURS,
-        MAX_SLEEP_TARGET_HOURS,
+        maximum_target,
     ))
 
     return (
@@ -1134,8 +1147,10 @@ def build_sleep_prescription(rows=None, training=None):
             ),
 
             (
-                "Sleep targets are constrained to a practical "
-                "7.5-to-9-hour range."
+                "Fallback sleep targets are constrained to a "
+                "practical 7.5-to-9-hour range. Valid WHOOP "
+                "sleep need can exceed 9 hours and is bounded "
+                "at 10.5 hours only as a data-quality guardrail."
             ),
 
             (

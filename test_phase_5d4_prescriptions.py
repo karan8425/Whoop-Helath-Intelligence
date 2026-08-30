@@ -75,6 +75,30 @@ class SleepPrescriptionTests(unittest.TestCase):
         self.assertEqual(result["sleep_need_source"], "whoop_sleep_need")
         self.assertEqual(result["recovery_band"], "green")
 
+    def test_whoop_sleep_need_above_nine_is_not_fallback_capped(self):
+        result = sleep.build_sleep_prescription(
+            rows=self._rows(recovery=32, sleep_need=9.55)
+        )
+
+        self.assertEqual(result["target_sleep_hours"], 9.5)
+        self.assertEqual(result["target_sleep_minutes"], 570)
+        self.assertEqual(result["sleep_need_source"], "whoop_sleep_need")
+
+    def test_extreme_and_malformed_whoop_need_are_defensive(self):
+        extreme = sleep.build_sleep_prescription(
+            rows=self._rows(sleep_need=99)
+        )
+        malformed = sleep.build_sleep_prescription(
+            rows=self._rows(sleep_need="not-a-number")
+        )
+
+        self.assertEqual(extreme["target_sleep_hours"], 10.5)
+        self.assertEqual(
+            malformed["sleep_need_source"],
+            "personal_history_fallback",
+        )
+        self.assertLessEqual(malformed["target_sleep_hours"], 9.0)
+
     def test_personal_history_fallback_without_whoop_need(self):
         result = sleep.build_sleep_prescription(rows=self._rows())
 
@@ -83,6 +107,8 @@ class SleepPrescriptionTests(unittest.TestCase):
             result["sleep_need_source"],
             "personal_history_fallback",
         )
+        self.assertGreaterEqual(result["target_sleep_hours"], 7.5)
+        self.assertLessEqual(result["target_sleep_hours"], 9.0)
 
     def test_poor_recovery_cannot_reduce_sleep(self):
         good = sleep.build_sleep_prescription(rows=self._rows(recovery=85))
@@ -91,6 +117,14 @@ class SleepPrescriptionTests(unittest.TestCase):
         self.assertGreaterEqual(
             poor["target_sleep_minutes"],
             good["target_sleep_minutes"],
+        )
+
+        whoop_need = sleep.build_sleep_prescription(
+            rows=self._rows(recovery=20, sleep_need=9.55)
+        )
+        self.assertGreaterEqual(
+            whoop_need["target_sleep_hours"],
+            9.5,
         )
 
 
