@@ -407,6 +407,21 @@ def _nutrition_card(nutrition):
                 "calorie_target"
             ),
 
+        "calorie_target":
+            nutrition.get("calorie_target"),
+
+        "protein_target_g":
+            nutrition.get("protein_target_g"),
+
+        "protein_range_g":
+            nutrition.get("protein_range_g"),
+
+        "carbohydrate_target_g":
+            nutrition.get("carbohydrate_target_g"),
+
+        "fat_target_g":
+            nutrition.get("fat_target_g"),
+
         "protein_g":
             macros.get(
                 "protein_g"
@@ -447,6 +462,9 @@ def _nutrition_card(nutrition):
             nutrition.get(
                 "rationale"
             ),
+
+        "intake_tracking_status":
+            (nutrition.get("intake_tracking") or {}).get("status"),
 
         "action": {
             "label": "View Nutrition",
@@ -583,6 +601,27 @@ def _sleep_card(sleep):
             sleep.get(
                 "sleep_target_hours"
             ),
+
+        "target_sleep_hours":
+            sleep.get("target_sleep_hours"),
+
+        "target_sleep_minutes":
+            sleep.get("target_sleep_minutes"),
+
+        "target_bedtime":
+            sleep.get("target_bedtime"),
+
+        "recovery_band":
+            sleep.get("recovery_band"),
+
+        "sleep_need_source":
+            sleep.get("sleep_need_source"),
+
+        "recent_sleep_average":
+            sleep.get("recent_sleep_average"),
+
+        "confidence":
+            sleep.get("confidence"),
 
         "sleep_target_display":
             sleep.get(
@@ -775,7 +814,9 @@ def build_todays_plan():
     )
 
     sleep = _safe_engine(
-        build_sleep_prescription,
+        lambda: build_sleep_prescription(
+            training=workout,
+        ),
         "sleep",
     )
 

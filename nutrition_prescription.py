@@ -16,28 +16,13 @@ FAT_KCAL_PER_GRAM = 9
 
 PHASE_CONFIG = {
     "lean_cut": {
-        "calories_per_lb": 11.5,
-        "minimum_calories": 1800,
-        "maximum_calories": 2400,
-        "fat_grams_per_lb": 0.30,
-        "minimum_fat_grams": 50,
+        "protein_target_g": 185,
+        "protein_range_g": [180, 185],
+        "carbohydrate_target_g": 150,
+        "fat_target_g": 20,
     },
-
-    "maintenance": {
-        "calories_per_lb": 13.5,
-        "minimum_calories": 2000,
-        "maximum_calories": 2800,
-        "fat_grams_per_lb": 0.32,
-        "minimum_fat_grams": 55,
-    },
-
-    "lean_bulk": {
-        "calories_per_lb": 15.0,
-        "minimum_calories": 2200,
-        "maximum_calories": 3200,
-        "fat_grams_per_lb": 0.33,
-        "minimum_fat_grams": 60,
-    },
+    "maintenance": None,
+    "muscle_gain": None,
 }
 
 
@@ -501,30 +486,15 @@ def build_nutrition_prescription(
 
     phase_config = (
         PHASE_CONFIG.get(
-            phase,
-            PHASE_CONFIG[
-                "maintenance"
-            ],
+            phase
         )
     )
 
-    weight_lb = (
-        _current_weight_lb(
-            trends
-        )
-    )
-
-    if weight_lb is None:
-
+    if not phase_config:
         return {
-            "status":
-                "not_ready",
-
-            "reason":
-                (
-                    "A current Hume body-weight measurement "
-                    "is required."
-                ),
+            "status": "not_ready",
+            "phase": phase,
+            "reason": "Nutrition targets are not configured for this phase.",
         }
 
     activity = (
@@ -539,68 +509,18 @@ def build_nutrition_prescription(
         )
     )
 
-    base_calories = (
-        _base_calories(
-            weight_lb,
-            phase_config,
-        )
-    )
-
-    activity_delta = (
-        _activity_adjustment(
-            activity_status
-        )
-    )
-
-    progress_delta = (
-        _progress_adjustment(
-            phase,
-            progress,
-        )
-    )
-
+    protein_g = phase_config["protein_target_g"]
+    protein_range = list(phase_config["protein_range_g"])
+    fat_g = phase_config["fat_target_g"]
+    carb_g = phase_config["carbohydrate_target_g"]
     calorie_target = (
-        base_calories
-        + activity_delta
-        + progress_delta
+        protein_g * PROTEIN_KCAL_PER_GRAM
+        + carb_g * CARB_KCAL_PER_GRAM
+        + fat_g * FAT_KCAL_PER_GRAM
     )
-
-    calorie_target = _clamp(
-        calorie_target,
-        phase_config[
-            "minimum_calories"
-        ],
-        phase_config[
-            "maximum_calories"
-        ],
-    )
-
-    calorie_target = (
-        _round_to_5(
-            calorie_target
-        )
-    )
-
-    protein_g = (
-        _protein_target(
-            goal
-        )
-    )
-
-    fat_g = (
-        _fat_target(
-            weight_lb,
-            phase_config,
-        )
-    )
-
-    macros = (
-        _macro_calculation(
-            calorie_target,
-            protein_g,
-            fat_g,
-        )
-    )
+    activity_delta = 0
+    progress_delta = 0
+    current_weight_lb = _current_weight_lb(trends)
 
     progress_direction = (
         progress.get(
@@ -618,33 +538,45 @@ def build_nutrition_prescription(
         "calorie_target":
             calorie_target,
 
+        "protein_target_g": protein_g,
+        "protein_range_g": protein_range,
+        "carbohydrate_target_g": carb_g,
+        "fat_target_g": fat_g,
+
+        "macro_targets": {
+            "protein_g": protein_g,
+            "protein_range_g": protein_range,
+            "carbohydrate_g": carb_g,
+            "fat_g": fat_g,
+        },
+
         "macros": {
             "protein_g":
-                macros[
-                    "protein_g"
-                ],
+                protein_g,
 
             "fat_g":
-                macros[
-                    "fat_g"
-                ],
+                fat_g,
 
             "carbs_g":
-                macros[
-                    "carbs_g"
-                ],
+                carb_g,
         },
 
         "macro_calorie_check":
-            macros[
-                "calculated_macro_calories"
-            ],
+            calorie_target,
 
         "current_weight_lb":
-            round(
-                weight_lb,
-                1,
+            (
+                round(current_weight_lb, 1)
+                if current_weight_lb is not None
+                else None
             ),
+
+        "intake_tracking": {
+            "status": "not_connected",
+            "adherence": "not_connected",
+        },
+
+        "adherence_status": "not_connected",
 
         "activity": {
             **activity,
@@ -674,20 +606,17 @@ def build_nutrition_prescription(
             ),
 
         "rationale":
-            _rationale(
-                phase,
-                weight_lb,
-                protein_g,
-                fat_g,
-                activity,
-                activity_delta,
-                progress_delta,
-            ),
+            [
+                "Targets use the configured lean-cut prescription.",
+                "Calories are derived directly from protein, carbohydrate, and fat targets.",
+                "Recovery does not modify the user-defined macro targets.",
+                "Nutrition intake is not connected, so adherence is not inferred.",
+            ],
 
         "guardrails": [
             (
-                "Calories are adjusted conservatively rather "
-                "than reacting to individual daily weight changes."
+                "Calories are derived from the configured macros, "
+                "not maintained as an independent target."
             ),
 
             (
@@ -696,12 +625,13 @@ def build_nutrition_prescription(
             ),
 
             (
-                "Fat intake is protected with a minimum target."
+                "Recovery and daily activity do not silently alter "
+                "the configured macro targets."
             ),
 
             (
-                "Goal-progress calorie adjustments are disabled "
-                "during the first 7 days of a new phase."
+                "Intake adherence remains not connected until a "
+                "nutrition data source is integrated."
             ),
         ],
     }

@@ -90,6 +90,20 @@ def _hours_to_minutes(
     )
 
 
+def _round_to_quarter_hour(hours):
+    return round(float(hours) * 4) / 4
+
+
+def _recovery_band(score):
+    if score is None:
+        return "unknown"
+    if float(score) < 34:
+        return "red"
+    if float(score) < 67:
+        return "yellow"
+    return "green"
+
+
 def _minutes_to_text(
     minutes,
 ):
@@ -165,18 +179,30 @@ def _load_sleep_history():
             cur.execute(
                 """
                 SELECT
-                    metric_date,
-                    recovery_score,
-                    sleep_duration_hours,
-                    sleep_performance_percentage,
-                    sleep_consistency_percentage,
-                    sleep_efficiency_percentage,
-                    has_sleep,
-                    has_recovery
-                FROM public.whoop_daily_metrics
+                    m.metric_date,
+                    m.recovery_score,
+                    m.sleep_duration_hours,
+                    m.sleep_performance_percentage,
+                    m.sleep_consistency_percentage,
+                    m.sleep_efficiency_percentage,
+                    m.has_sleep,
+                    m.has_recovery,
+                    CASE
+                        WHEN s.score->'sleep_needed' IS NULL
+                        THEN NULL
+                        ELSE (
+                            COALESCE((s.score->'sleep_needed'->>'baseline_milli')::double precision, 0)
+                            + COALESCE((s.score->'sleep_needed'->>'need_from_sleep_debt_milli')::double precision, 0)
+                            + COALESCE((s.score->'sleep_needed'->>'need_from_recent_strain_milli')::double precision, 0)
+                            + COALESCE((s.score->'sleep_needed'->>'need_from_recent_nap_milli')::double precision, 0)
+                        ) / 3600000.0
+                    END AS sleep_need_hours
+                FROM public.whoop_daily_metrics m
+                LEFT JOIN public.whoop_sleeps s
+                    ON s.id = m.sleep_id
                 WHERE
-                    metric_date >= CURRENT_DATE - INTERVAL '30 days'
-                ORDER BY metric_date DESC
+                    m.metric_date >= CURRENT_DATE - INTERVAL '30 days'
+                ORDER BY m.metric_date DESC
                 """
             )
 
@@ -263,13 +289,33 @@ def _latest_complete_sleep(
 def _calculate_sleep_target(
     latest,
     rows,
+    training=None,
 ):
 
+    whoop_sleep_need = _float(
+        latest.get("sleep_need_hours")
+    )
     target = (
-        BASE_SLEEP_TARGET_HOURS
+        whoop_sleep_need
+        if whoop_sleep_need is not None and whoop_sleep_need > 0
+        else BASE_SLEEP_TARGET_HOURS
+    )
+    sleep_need_source = (
+        "whoop_sleep_need"
+        if whoop_sleep_need is not None and whoop_sleep_need > 0
+        else "personal_history_fallback"
     )
 
     reasons = []
+
+    if sleep_need_source == "whoop_sleep_need":
+        reasons.append(
+            f"WHOOP sleep need ({whoop_sleep_need:.2f} h) is the primary anchor."
+        )
+    else:
+        reasons.append(
+            "WHOOP sleep need is unavailable, so the target uses recent personal sleep history and recovery."
+        )
 
     recovery = _float(
         latest.get(
@@ -311,6 +357,21 @@ def _calculate_sleep_target(
         )
     )
 
+    if sleep_need_source == "personal_history_fallback":
+        personal_anchor = (
+            max(BASE_SLEEP_TARGET_HOURS, average_30)
+            if average_30 is not None
+            else BASE_SLEEP_TARGET_HOURS
+        )
+        target = personal_anchor
+        reasons.append(
+            (
+                f"The fallback anchor is {personal_anchor:.2f} h "
+                "from the recent personal baseline with an "
+                "8-hour undersleep floor."
+            )
+        )
+
     # --------------------------------------------------------
     # Recovery adjustment
     # --------------------------------------------------------
@@ -319,7 +380,7 @@ def _calculate_sleep_target(
 
         if recovery < 34:
 
-            target += 0.50
+            target = max(target, BASE_SLEEP_TARGET_HOURS + 0.50)
 
             reasons.append(
                 (
@@ -330,7 +391,7 @@ def _calculate_sleep_target(
 
         elif recovery < 67:
 
-            target += 0.25
+            target = max(target, BASE_SLEEP_TARGET_HOURS + 0.25)
 
             reasons.append(
                 (
@@ -357,7 +418,7 @@ def _calculate_sleep_target(
 
         if sleep_duration < 6.0:
 
-            target += 0.50
+            target = max(target, BASE_SLEEP_TARGET_HOURS + 0.50)
 
             reasons.append(
                 (
@@ -367,7 +428,7 @@ def _calculate_sleep_target(
 
         elif sleep_duration < 7.0:
 
-            target += 0.25
+            target = max(target, BASE_SLEEP_TARGET_HOURS + 0.25)
 
             reasons.append(
                 (
@@ -385,7 +446,7 @@ def _calculate_sleep_target(
         and sleep_performance < 80
     ):
 
-        target += 0.25
+        target = max(target, BASE_SLEEP_TARGET_HOURS + 0.25)
 
         reasons.append(
             (
@@ -421,7 +482,7 @@ def _calculate_sleep_target(
         < average_30 - 0.40
     ):
 
-        target += 0.25
+        target = max(target, BASE_SLEEP_TARGET_HOURS + 0.25)
 
         reasons.append(
             (
@@ -430,17 +491,33 @@ def _calculate_sleep_target(
             )
         )
 
-    target = _clamp(
+    planned_intensity = (
+        (training or {}).get("planned_intensity")
+        or (training or {}).get("category")
+    )
+    if (
+        sleep_need_source == "personal_history_fallback"
+        and str(planned_intensity).lower() in {
+            "high", "hard", "high_intensity", "strength",
+        }
+    ):
+        target += 0.25
+        reasons.append(
+            "A higher-intensity planned training day adds sleep opportunity to the fallback target."
+        )
+
+    target = _round_to_quarter_hour(_clamp(
         target,
         MIN_SLEEP_TARGET_HOURS,
         MAX_SLEEP_TARGET_HOURS,
-    )
+    ))
 
     return (
         target,
         reasons,
         average_7,
         average_30,
+        sleep_need_source,
     )
 
 
@@ -794,11 +871,10 @@ def _recommended_bedtime(
 # PUBLIC ENGINE
 # ============================================================
 
-def build_sleep_prescription():
+def build_sleep_prescription(rows=None, training=None):
 
-    rows = (
-        _load_sleep_history()
-    )
+    if rows is None:
+        rows = _load_sleep_history()
 
     latest = (
         _latest_complete_sleep(
@@ -824,9 +900,11 @@ def build_sleep_prescription():
         reasons,
         average_7,
         average_30,
+        sleep_need_source,
     ) = _calculate_sleep_target(
         latest,
         rows,
+        training=training,
     )
 
     trend = (
@@ -922,6 +1000,21 @@ def build_sleep_prescription():
                 sleep_target,
                 2,
             ),
+
+        "target_sleep_hours": _round(sleep_target, 2),
+        "target_sleep_minutes": target_minutes,
+        "target_bedtime": (
+            bedtime.get("recommended_bedtime_local")
+            if bedtime.get("available")
+            else None
+        ),
+        "recovery_score": _round(latest.get("recovery_score"), 0),
+        "recovery_band": _recovery_band(latest.get("recovery_score")),
+        "sleep_need_source": sleep_need_source,
+        "recent_sleep_average": _round(average_7, 2),
+        "confidence": (
+            "high" if sleep_need_source == "whoop_sleep_need" else "moderate"
+        ),
 
         "sleep_target_minutes":
             target_minutes,
