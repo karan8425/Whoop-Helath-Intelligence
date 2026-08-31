@@ -16,6 +16,15 @@ sys.modules.setdefault(
     "body_composition_progress",
     types.SimpleNamespace(body_composition_progress=lambda: {}),
 )
+sys.modules.setdefault(
+    "integrations.tonal.strength_adherence",
+    types.SimpleNamespace(
+        strength_adherence=lambda target: {
+            "status": "not_connected",
+            "target_sessions_per_week": target,
+        }
+    ),
+)
 
 goal_progress_module = importlib.import_module("goal_progress")
 
@@ -131,6 +140,38 @@ class GoalProgressDerivedCompositionTests(unittest.TestCase):
         self.assertEqual(result["body_fat"]["progress_percentage"], 20)
         self.assertEqual(result["weight"]["current_lb"], 194)
         self.assertEqual(result["weight"]["progress_percentage"], 30)
+
+    def test_exposes_tonal_strength_adherence_without_changing_protein(self):
+        strength = {
+            "status": "target_met",
+            "sessions_7d": 3,
+            "target_sessions_per_week": 3,
+            "percentage_of_target": 100.0,
+            "remaining_sessions": 0,
+            "window_start_date": "2026-08-24",
+            "window_end_date": "2026-08-30",
+        }
+
+        result = goal_progress_module.goal_progress(
+            self.goal,
+            self.trends,
+            {"metrics": {}},
+            strength,
+        )
+
+        self.assertEqual(result["strength"], strength)
+        self.assertEqual(
+            result["protein"],
+            {
+                "status": "not_connected",
+                "target_grams_per_day": 180,
+            },
+        )
+        self.assertIn(
+            "Strength adherence uses distinct qualifying Tonal sessions",
+            result["data_notes"][-2],
+        )
+        self.assertIn("Protein adherence", result["data_notes"][-1])
 
 
 if __name__ == "__main__":

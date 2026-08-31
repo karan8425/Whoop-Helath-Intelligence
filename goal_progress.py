@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from goals import get_active_goal
 from apple_health_trends import apple_health_trends
 from body_composition_progress import body_composition_progress
+from integrations.tonal.strength_adherence import strength_adherence
 
 
 KG_TO_LB = 2.2046226218
@@ -469,6 +470,7 @@ def goal_progress(
     goal=None,
     trends=None,
     body_progress=None,
+    strength=None,
 ):
 
     if goal is None:
@@ -612,6 +614,13 @@ def goal_progress(
         )
     )
 
+    if strength is None:
+        strength = strength_adherence(
+            goal.get(
+                "strength_sessions_per_week"
+            )
+        )
+
     return {
         "status":
             "ok",
@@ -705,15 +714,8 @@ def goal_progress(
         "activity":
             activity_result,
 
-        "strength": {
-            "status":
-                "not_connected",
-
-            "target_sessions_per_week":
-                goal.get(
-                    "strength_sessions_per_week"
-                ),
-        },
+        "strength":
+            strength,
 
         "protein": {
             "status":
@@ -752,8 +754,22 @@ def goal_progress(
                 "not population norms."
             ),
             (
-                "Strength and protein adherence are not yet "
-                "connected to the progress engine."
+                "Strength adherence uses distinct qualifying "
+                "Tonal sessions from the latest 7 calendar days."
+                if strength.get("status") not in (
+                    "not_connected",
+                    "not_configured",
+                )
+                else (
+                    "Strength adherence is not connected to the "
+                    "progress engine."
+                    if strength.get("status") == "not_connected"
+                    else "Strength adherence has no configured weekly goal."
+                )
+            ),
+            (
+                "Protein adherence is not yet connected to the "
+                "progress engine."
             ),
         ],
     }
