@@ -96,8 +96,8 @@ from daily_health_intelligence_store import (
     get_daily_health_intelligence,
 )
 
-from todays_plan import (
-    build_todays_plan,
+from todays_plan_store import (
+    get_or_build_todays_plan,
 )
 from today_experience import build_today_experience
 
@@ -1102,7 +1102,7 @@ async def todays_plan(
     try:
 
         return (
-            build_todays_plan()
+            get_or_build_todays_plan()
         )
 
     except Exception as exc:
@@ -1139,7 +1139,7 @@ async def mobile_todays_plan(
     try:
 
         return (
-            build_todays_plan()
+            get_or_build_todays_plan()
         )
 
     except Exception as exc:
@@ -1171,7 +1171,11 @@ async def mobile_today_experience(
     )
 
     try:
-        return build_today_experience()
+        plan = get_or_build_todays_plan()
+
+        return build_today_experience(
+            plan=plan
+        )
 
     except Exception as exc:
         raise HTTPException(
