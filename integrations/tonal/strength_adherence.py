@@ -2,6 +2,9 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
+ABBREVIATED_FREESTYLE_REASON = (
+    "atypical abbreviated freestyle session"
+)
 
 
 def _load_workout_eligibility():
@@ -24,6 +27,8 @@ def _load_workout_eligibility():
                         o.include_in_training_analysis,
                         TRUE
                     ) AS included,
+                    o.exclusion_reason,
+                    o.notes,
                     EXISTS (
                         SELECT 1
                         FROM tonal_sets s
@@ -38,6 +43,57 @@ def _load_workout_eligibility():
             return cur.fetchall()
 
 
+def _is_supplemental_strength_activity(row):
+    """Recognize only the known abbreviated-but-real override case."""
+
+    reason = row.get("exclusion_reason")
+
+    if not isinstance(reason, str):
+        return False
+
+    normalized_reason = " ".join(
+        reason.casefold().split()
+    )
+
+    return normalized_reason == ABBREVIATED_FREESTYLE_REASON
+
+
+def _classify_sessions(
+    rows,
+    window_start,
+    window_end,
+):
+    """Return deduplicated qualifying and supplemental activity IDs."""
+
+    qualifying = set()
+    supplemental = set()
+
+    for row in rows:
+        activity_id = row.get("activity_id")
+        workout_date = row.get("workout_date")
+
+        if (
+            activity_id is None
+            or row.get("has_sets") is not True
+            or workout_date is None
+            or not window_start <= workout_date <= window_end
+        ):
+            continue
+
+        if row.get("included") is True:
+            qualifying.add(activity_id)
+            supplemental.discard(activity_id)
+        elif (
+            activity_id not in qualifying
+            and _is_supplemental_strength_activity(row)
+        ):
+            supplemental.add(activity_id)
+
+    supplemental.difference_update(qualifying)
+
+    return qualifying, supplemental
+
+
 def _count_qualifying_sessions(
     rows,
     window_start,
@@ -45,17 +101,13 @@ def _count_qualifying_sessions(
 ):
     """Apply the existing Tonal whole-session eligibility policy."""
 
-    activity_ids = {
-        row["activity_id"]
-        for row in rows
-        if row.get("activity_id") is not None
-        and row.get("included") is True
-        and row.get("has_sets") is True
-        and row.get("workout_date") is not None
-        and window_start <= row["workout_date"] <= window_end
-    }
+    qualifying, _ = _classify_sessions(
+        rows,
+        window_start,
+        window_end,
+    )
 
-    return len(activity_ids)
+    return len(qualifying)
 
 
 def strength_adherence(
@@ -74,6 +126,9 @@ def strength_adherence(
 
     base = {
         "sessions_7d": None,
+        "qualifying_sessions_7d": None,
+        "supplemental_sessions_7d": None,
+        "total_strength_activities_7d": None,
         "target_sessions_per_week": target_sessions_per_week,
         "percentage_of_target": None,
         "remaining_sessions": None,
@@ -107,11 +162,13 @@ def strength_adherence(
             **base,
         }
 
-    sessions = _count_qualifying_sessions(
+    qualifying_ids, supplemental_ids = _classify_sessions(
         rows,
         window_start,
         window_end,
     )
+    sessions = len(qualifying_ids)
+    supplemental_sessions = len(supplemental_ids)
 
     percentage = (
         100.0
@@ -126,6 +183,11 @@ def strength_adherence(
             else "below_target"
         ),
         "sessions_7d": sessions,
+        "qualifying_sessions_7d": sessions,
+        "supplemental_sessions_7d": supplemental_sessions,
+        "total_strength_activities_7d": (
+            sessions + supplemental_sessions
+        ),
         "target_sessions_per_week": target,
         "percentage_of_target": percentage,
         "remaining_sessions": max(0, target - sessions),

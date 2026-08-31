@@ -145,6 +145,9 @@ class GoalProgressDerivedCompositionTests(unittest.TestCase):
         strength = {
             "status": "target_met",
             "sessions_7d": 3,
+            "qualifying_sessions_7d": 3,
+            "supplemental_sessions_7d": 0,
+            "total_strength_activities_7d": 3,
             "target_sessions_per_week": 3,
             "percentage_of_target": 100.0,
             "remaining_sessions": 0,
@@ -169,6 +172,10 @@ class GoalProgressDerivedCompositionTests(unittest.TestCase):
         )
         self.assertIn(
             "Strength adherence uses distinct qualifying Tonal sessions",
+            result["data_notes"][-2],
+        )
+        self.assertIn(
+            "supplemental strength activity",
             result["data_notes"][-2],
         )
         self.assertIn("Protein adherence", result["data_notes"][-1])

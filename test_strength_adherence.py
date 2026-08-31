@@ -16,12 +16,16 @@ def workout(
     workout_date,
     included=True,
     has_sets=True,
+    exclusion_reason=None,
+    notes=None,
 ):
     return {
         "activity_id": activity_id,
         "workout_date": date.fromisoformat(workout_date),
         "included": included,
         "has_sets": has_sets,
+        "exclusion_reason": exclusion_reason,
+        "notes": notes,
     }
 
 
@@ -33,20 +37,70 @@ class StrengthAdherenceTests(unittest.TestCase):
         ):
             return strength_adherence(target, now=NOW)
 
-    def test_target_three_sessions_three_is_target_met(self):
+    def test_four_qualifying_sessions_meet_target(self):
         result = self.result(
-            3,
+            4,
             [
                 workout("a", "2026-08-24"),
                 workout("b", "2026-08-26"),
-                workout("c", "2026-08-30"),
+                workout("c", "2026-08-28"),
+                workout("d", "2026-08-30"),
             ],
         )
 
         self.assertEqual(result["status"], "target_met")
-        self.assertEqual(result["sessions_7d"], 3)
+        self.assertEqual(result["sessions_7d"], 4)
+        self.assertEqual(result["qualifying_sessions_7d"], 4)
+        self.assertEqual(result["supplemental_sessions_7d"], 0)
+        self.assertEqual(result["total_strength_activities_7d"], 4)
         self.assertEqual(result["percentage_of_target"], 100.0)
         self.assertEqual(result["remaining_sessions"], 0)
+
+    def test_supplemental_session_does_not_satisfy_target(self):
+        result = self.result(
+            4,
+            [
+                workout("a", "2026-08-24"),
+                workout("b", "2026-08-25"),
+                workout("c", "2026-08-27"),
+                workout(
+                    "short",
+                    "2026-08-26",
+                    included=False,
+                    exclusion_reason=(
+                        "Atypical abbreviated freestyle session"
+                    ),
+                ),
+            ],
+        )
+
+        self.assertEqual(result["sessions_7d"], 3)
+        self.assertEqual(result["qualifying_sessions_7d"], 3)
+        self.assertEqual(result["supplemental_sessions_7d"], 1)
+        self.assertEqual(result["total_strength_activities_7d"], 4)
+        self.assertEqual(result["status"], "below_target")
+        self.assertEqual(result["remaining_sessions"], 1)
+
+    def test_only_supplemental_activity_keeps_goal_progress_zero(self):
+        result = self.result(
+            4,
+            [
+                workout(
+                    "short",
+                    "2026-08-26",
+                    included=False,
+                    exclusion_reason=(
+                        "Atypical abbreviated freestyle session"
+                    ),
+                )
+            ],
+        )
+
+        self.assertEqual(result["qualifying_sessions_7d"], 0)
+        self.assertEqual(result["supplemental_sessions_7d"], 1)
+        self.assertEqual(result["total_strength_activities_7d"], 1)
+        self.assertEqual(result["percentage_of_target"], 0.0)
+        self.assertEqual(result["status"], "below_target")
 
     def test_target_four_sessions_two_is_below_target(self):
         result = self.result(
@@ -70,6 +124,7 @@ class StrengthAdherenceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "below_target")
         self.assertEqual(result["sessions_7d"], 0)
+        self.assertEqual(result["supplemental_sessions_7d"], 0)
 
     def test_no_strength_goal_is_not_configured(self):
         result = strength_adherence(None, now=NOW)
@@ -101,6 +156,20 @@ class StrengthAdherenceTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
 
+    def test_duplicate_supplemental_activity_counts_once(self):
+        row = workout(
+            "same-short",
+            "2026-08-28",
+            included=False,
+            exclusion_reason="Atypical abbreviated freestyle session",
+        )
+
+        result = self.result(4, [row, row])
+
+        self.assertEqual(result["qualifying_sessions_7d"], 0)
+        self.assertEqual(result["supplemental_sessions_7d"], 1)
+        self.assertEqual(result["total_strength_activities_7d"], 1)
+
     def test_excluded_and_setless_workouts_are_not_counted(self):
         result = self.result(
             3,
@@ -113,6 +182,24 @@ class StrengthAdherenceTests(unittest.TestCase):
 
         self.assertEqual(result["sessions_7d"], 1)
         self.assertEqual(result["status"], "below_target")
+
+    def test_excluded_invalid_or_test_workout_is_not_supplemental(self):
+        result = self.result(
+            4,
+            [
+                workout(
+                    "invalid",
+                    "2026-08-28",
+                    included=False,
+                    exclusion_reason="Invalid test workout",
+                    notes="Sync test artifact",
+                )
+            ],
+        )
+
+        self.assertEqual(result["qualifying_sessions_7d"], 0)
+        self.assertEqual(result["supplemental_sessions_7d"], 0)
+        self.assertEqual(result["total_strength_activities_7d"], 0)
 
     def test_window_is_seven_eastern_calendar_days(self):
         result = self.result(1, [workout("a", "2026-08-24")])

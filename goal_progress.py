@@ -755,7 +755,10 @@ def goal_progress(
             ),
             (
                 "Strength adherence uses distinct qualifying "
-                "Tonal sessions from the latest 7 calendar days."
+                "Tonal sessions from the latest 7 calendar days. "
+                "Abbreviated supplemental strength activity may be "
+                "tracked separately but does not satisfy a full-session "
+                "weekly goal."
                 if strength.get("status") not in (
                     "not_connected",
                     "not_configured",
