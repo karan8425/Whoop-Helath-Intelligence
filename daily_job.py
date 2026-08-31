@@ -15,6 +15,9 @@ from freshness import freshness_status
 from daily_health_intelligence_store import (
     get_daily_health_intelligence,
 )
+from todays_plan_store import (
+    invalidate_todays_plan,
+)
 
 
 # ============================================================
@@ -439,6 +442,36 @@ def run_daily_pipeline():
             intelligence_result,
             freshness,
         )
+
+        # The complete, current physiology and intelligence state is now
+        # durable. Invalidate only at this success boundary so the next
+        # Today request cannot cache a plan built from partially refreshed
+        # WHOOP data.
+        try:
+
+            invalidated_date = (
+                invalidate_todays_plan()
+            )
+
+            print(
+                "TODAYS_PLAN_CACHE "
+                "status=invalidated "
+                "reason=whoop_daily_pipeline "
+                f"date={invalidated_date}",
+                flush=True,
+            )
+
+        except Exception as exc:
+
+            # Cache maintenance must not rewrite an otherwise successful
+            # pipeline audit result or obscure the refreshed source data.
+            print(
+                "TODAYS_PLAN_CACHE "
+                "status=invalidation_failed "
+                "reason=whoop_daily_pipeline "
+                f"error={type(exc).__name__}",
+                flush=True,
+            )
 
         brief = (
             intelligence_result.get(

@@ -328,6 +328,8 @@ def invalidate_todays_plan():
 
         conn.commit()
 
+    return plan_date
+
 
 # ============================================================
 # CACHE SERVICE
