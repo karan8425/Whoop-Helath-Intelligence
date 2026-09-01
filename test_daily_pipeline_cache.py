@@ -209,6 +209,51 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
         fail_run.assert_called_once()
         invalidate.assert_not_called()
 
+    def test_degraded_intelligence_persists_and_invalidates(self):
+        events = []
+        patches = self._successful_pipeline_patches(events)
+        degraded = {
+            "status": "ok",
+            "brief": {"headline": "Deterministic fallback"},
+            "cache": {"source": "forced_refresh", "llm_called": False},
+            "ai_synthesis_status": "degraded",
+        }
+        patches["get_daily_health_intelligence"] = patch.object(
+            daily_job,
+            "get_daily_health_intelligence",
+            side_effect=lambda **kwargs: events.append("intelligence") or degraded,
+        )
+
+        with ExitStack() as stack:
+            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
+            result = daily_job.run_daily_pipeline()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["ai_synthesis_status"], "degraded")
+        mocks["store_intelligence"].assert_called_once()
+        mocks["finish_run"].assert_called_once()
+        mocks["invalidate_todays_plan"].assert_called_once()
+        mocks["fail_run"].assert_not_called()
+
+    def test_unexpected_intelligence_error_still_fails_pipeline(self):
+        events = []
+        patches = self._successful_pipeline_patches(events)
+        patches["get_daily_health_intelligence"] = patch.object(
+            daily_job,
+            "get_daily_health_intelligence",
+            side_effect=ValueError("programming defect"),
+        )
+
+        with ExitStack() as stack:
+            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
+            with self.assertRaisesRegex(ValueError, "programming defect"):
+                daily_job.run_daily_pipeline()
+
+        mocks["store_intelligence"].assert_not_called()
+        mocks["finish_run"].assert_not_called()
+        mocks["invalidate_todays_plan"].assert_not_called()
+        mocks["fail_run"].assert_called_once()
+
     def test_sleep_webhook_only_schedules_delayed_pipeline(self):
         payload = {
             "type": "sleep.updated",
