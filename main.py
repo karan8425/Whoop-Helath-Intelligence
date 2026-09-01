@@ -105,6 +105,11 @@ from whoop_webhook import (
     router as whoop_webhook_router,
 )
 
+from whoop import (
+    authorization_url,
+    exchange_code,
+)
+
 
 # ============================================================
 # CONFIGURATION
@@ -331,6 +336,104 @@ async def health():
 # ============================================================
 # WHOOP
 # ============================================================
+
+@app.get(
+    "/whoop/login"
+)
+async def whoop_login(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    state = secrets.token_urlsafe(6)[:8]
+
+    request.session[
+        "oauth_state"
+    ] = state
+
+    return RedirectResponse(
+        authorization_url(
+            state
+        )
+    )
+
+
+@app.get(
+    "/whoop/callback"
+)
+async def whoop_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+
+    require_admin(
+        request
+    )
+
+    expected_state = request.session.pop(
+        "oauth_state",
+        None,
+    )
+
+    if (
+        not state
+        or not expected_state
+        or not secrets.compare_digest(
+            state,
+            expected_state,
+        )
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OAuth state.",
+        )
+
+    if error:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "WHOOP authorization was not completed."
+            ),
+        )
+
+    if not code:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Missing authorization code.",
+        )
+
+    try:
+
+        await exchange_code(
+            code
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail="WHOOP token exchange failed.",
+        ) from exc
+
+    return HTMLResponse(
+        """
+        <html>
+            <body>
+                <h2>WHOOP connected successfully.</h2>
+                <p>Token stored securely.</p>
+                <a href="/">Return</a>
+            </body>
+        </html>
+        """
+    )
 
 @app.get(
     "/freshness"
