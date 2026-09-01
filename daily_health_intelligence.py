@@ -42,6 +42,10 @@ Rules:
 # OPENAI CLIENT
 # ============================================================
 
+class OpenAIUnavailableError(RuntimeError):
+    pass
+
+
 def _client():
 
     api_key = os.getenv(
@@ -51,12 +55,13 @@ def _client():
 
     if not api_key:
 
-        raise RuntimeError(
+        raise OpenAIUnavailableError(
             "OPENAI_API_KEY is not configured."
         )
 
     return OpenAI(
-        api_key=api_key
+        api_key=api_key,
+        max_retries=0,
     )
 
 
@@ -153,11 +158,108 @@ def build_daily_health_ai_payload():
 # AI SYNTHESIS
 # ============================================================
 
-def generate_daily_health_intelligence():
+def _deterministic_fallback(payload, reason):
+    training = payload.get("training") or {}
+    nutrition = payload.get("nutrition") or {}
+    hydration = payload.get("hydration") or {}
+    sleep = payload.get("sleep") or {}
+    coaching = payload.get("daily_coaching_summary") or {}
+    top_actions = coaching.get("top_actions") or []
+    top_priorities = coaching.get("top_priorities") or []
+    warnings = coaching.get("warnings") or []
+    why_it_matters = [
+        item.get("priority")
+        for item in top_priorities
+        if isinstance(item, dict) and item.get("priority")
+    ][:4]
+    if not why_it_matters:
+        why_it_matters = warnings[:4]
 
-    payload = (
-        build_daily_health_ai_payload()
-    )
+    return {
+        "status": "ok",
+        "model": "deterministic-health-intelligence-fallback",
+        "plan_date": payload.get("plan_date"),
+        "brief": {
+            "date": payload.get("plan_date"),
+            "headline": coaching.get("headline")
+            or "Follow today's deterministic health plan.",
+            "today_summary": coaching.get("summary")
+            or "Follow the available deterministic recommendations today.",
+            "training": {
+                "category": training.get("category"),
+                "session": training.get("session_type"),
+                "instruction": next(
+                    (
+                        action for action in top_actions
+                        if "training" in action.lower()
+                        or "session" in action.lower()
+                    ),
+                    training.get("instruction") or training.get("priority"),
+                ),
+            },
+            "nutrition": {
+                "calories": nutrition.get("calories"),
+                "protein_g": nutrition.get("protein_g"),
+                "carbs_g": nutrition.get("carbs_g"),
+                "fat_g": nutrition.get("fat_g"),
+                "instruction": nutrition.get("priority"),
+            },
+            "hydration": {
+                "target": hydration.get("daily_target_display"),
+                "instruction": hydration.get("priority"),
+            },
+            "sleep": {
+                "sleep_target": sleep.get("sleep_target_display"),
+                "time_in_bed_target": sleep.get("time_in_bed_target_display"),
+                "instruction": next(
+                    (action for action in top_actions if "sleep" in action.lower()),
+                    sleep.get("priority"),
+                ),
+            },
+            "why_it_matters": why_it_matters,
+            "highest_impact_action": top_actions[0] if top_actions else None,
+            "trend_to_watch": sleep.get("trend_summary")
+            or sleep.get("sleep_trend")
+            or (warnings[0] if warnings else None),
+            "confidence": coaching.get("confidence") or "low",
+            "uncertainty_note": " ".join(warnings)
+            if warnings
+            else "AI synthesis is unavailable; deterministic guidance is preserved.",
+            "medical_safety_note": (
+                "Wearable guidance is informational and is not a medical diagnosis."
+            ),
+        },
+        "daily_coaching_summary": coaching,
+        "ai_synthesis_status": "degraded",
+        "ai_synthesis_reason": reason,
+    }
+
+
+def _openai_failure_reason(exc):
+    if isinstance(exc, OpenAIUnavailableError):
+        return "not_configured"
+
+    error_type = type(exc).__name__
+    status_code = getattr(exc, "status_code", None)
+    body_text = json.dumps(getattr(exc, "body", None), default=str).lower()
+
+    if "insufficient_quota" in body_text or "credit_balance_exhausted" in body_text:
+        return "insufficient_quota"
+    if status_code == 429 or error_type == "RateLimitError":
+        return "rate_limit"
+    if error_type == "APITimeoutError":
+        return "timeout"
+    if error_type == "APIConnectionError":
+        return "connection_error"
+    if isinstance(status_code, int) and status_code >= 500:
+        return "api_error"
+    return None
+
+
+def generate_daily_health_intelligence(payload=None):
+
+    if payload is None:
+        payload = build_daily_health_ai_payload()
 
     training = (
         payload.get(
@@ -326,17 +428,24 @@ DATA:
 {json.dumps(payload, default=str)}
 """
 
-    client = (
-        _client()
-    )
-
-    response = (
-        client.responses.create(
-            model=_model(),
-            instructions=SYSTEM_PROMPT,
-            input=user_prompt,
+    try:
+        client = _client()
+        response = (
+            client.responses.create(
+                model=_model(),
+                instructions=SYSTEM_PROMPT,
+                input=user_prompt,
+            )
         )
-    )
+    except Exception as exc:
+        reason = _openai_failure_reason(exc)
+        if reason is None:
+            raise
+        print(
+            f"AI_SYNTHESIS status=degraded reason={reason}",
+            flush=True,
+        )
+        return _deterministic_fallback(payload, reason)
 
     raw = (
         _strip_json_fence(
@@ -475,6 +584,9 @@ DATA:
 
         "daily_coaching_summary":
             payload.get("daily_coaching_summary"),
+
+        "ai_synthesis_status":
+            "success",
     }
 
 
@@ -482,11 +594,10 @@ DATA:
 # MOCK GENERATOR FOR LOCAL VALIDATION
 # ============================================================
 
-def _mock_daily_health_intelligence():
+def _mock_daily_health_intelligence(payload=None):
 
-    payload = (
-        build_daily_health_ai_payload()
-    )
+    if payload is None:
+        payload = build_daily_health_ai_payload()
 
     training = (
         payload.get(

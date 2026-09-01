@@ -434,6 +434,13 @@ def get_or_create_intelligence(
                     deterministic_payload.get(
                         "daily_coaching_summary"
                     ),
+
+                "ai_synthesis_status": (
+                    "degraded"
+                    if cached.get("model_name")
+                    == "deterministic-health-intelligence-fallback"
+                    else "success"
+                ),
             }
 
     if generator is None:
@@ -443,8 +450,8 @@ def get_or_create_intelligence(
             "for a cache miss."
         )
 
-    generated = (
-        generator()
+    generated = generator(
+        deterministic_payload
     )
 
     if generated.get(
@@ -478,6 +485,12 @@ def get_or_create_intelligence(
             "llm_called":
                 (
                     generated.get(
+                        "ai_synthesis_status",
+                        "success",
+                    )
+                    == "success"
+                    and
+                    generated.get(
                         "model"
                     )
                     !=
@@ -509,6 +522,12 @@ def get_or_create_intelligence(
         "daily_coaching_summary":
             deterministic_payload.get(
                 "daily_coaching_summary"
+            ),
+
+        "ai_synthesis_status":
+            generated.get(
+                "ai_synthesis_status",
+                "success",
             ),
     }
 

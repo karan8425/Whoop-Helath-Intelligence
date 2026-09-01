@@ -518,6 +518,12 @@ def run_daily_pipeline():
                     "cache"
                 ),
 
+            "ai_synthesis_status":
+                intelligence_result.get(
+                    "ai_synthesis_status",
+                    "success",
+                ),
+
             "completed_at":
                 datetime.now(
                     timezone.utc
