@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from contextlib import ExitStack
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
 
@@ -188,6 +188,67 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
         mocks["invalidate_todays_plan"].assert_called_once_with()
         mocks["fail_run"].assert_not_called()
 
+    def test_pending_freshness_skips_recommendation_and_invalidation(self):
+        events = []
+        patches = self._successful_pipeline_patches(events)
+        pending = {
+            "status": "pending_today",
+            "can_generate_current_recommendation": False,
+            "latest_physiology_date": "2026-09-03",
+        }
+        patches["freshness_status"] = patch.object(
+            daily_job,
+            "freshness_status",
+            side_effect=lambda: events.append("freshness") or pending,
+        )
+
+        with ExitStack() as stack:
+            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
+            result = daily_job.run_daily_pipeline()
+
+        self.assertEqual(result["status"], "pending_freshness")
+        self.assertNotIn("recommendation", events)
+        self.assertNotIn("intelligence", events)
+        self.assertNotIn("invalidate", events)
+        mocks["daily_recommendation"].assert_not_called()
+        mocks["get_daily_health_intelligence"].assert_not_called()
+        mocks["store_intelligence"].assert_not_called()
+        mocks["invalidate_todays_plan"].assert_not_called()
+        mocks["fail_run"].assert_not_called()
+
+    def test_freshness_recovers_and_generates_on_next_run(self):
+        # First run: pending. Second run: source has arrived -> full pipeline.
+        first_events = []
+        pending_patches = self._successful_pipeline_patches(first_events)
+        pending = {
+            "status": "pending_today",
+            "can_generate_current_recommendation": False,
+            "latest_physiology_date": "2026-09-03",
+        }
+        pending_patches["freshness_status"] = patch.object(
+            daily_job,
+            "freshness_status",
+            side_effect=lambda: first_events.append("freshness") or pending,
+        )
+        with ExitStack() as stack:
+            for item in pending_patches.values():
+                stack.enter_context(item)
+            first = daily_job.run_daily_pipeline()
+
+        second_events = []
+        ok_patches = self._successful_pipeline_patches(second_events)
+        with ExitStack() as stack:
+            mocks = {
+                name: stack.enter_context(item)
+                for name, item in ok_patches.items()
+            }
+            second = daily_job.run_daily_pipeline()
+
+        self.assertEqual(first["status"], "pending_freshness")
+        self.assertEqual(second["status"], "completed")
+        mocks["get_daily_health_intelligence"].assert_called_once()
+        mocks["invalidate_todays_plan"].assert_called_once()
+
     def test_failed_pipeline_does_not_invalidate(self):
         with (
             patch.object(daily_job, "init_db"),
@@ -290,17 +351,57 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
         invalidate.assert_not_called()
 
 
+PLAN_SOURCE_FRESHNESS = {
+    "metric_date": "2026-09-04",
+    "source_updated_at": "2026-09-04T11:00:00+00:00",
+    "metrics_generated_at": "2026-09-04T11:05:00+00:00",
+}
+
+PLAN_SOURCE_FRESHNESS_NEWER = {
+    "metric_date": "2026-09-04",
+    "source_updated_at": "2026-09-04T16:45:00+00:00",
+    "metrics_generated_at": "2026-09-04T16:50:00+00:00",
+}
+
+
+def _plan_freshness(*, can_generate=True, status="fresh", source_freshness=None):
+    return {
+        "status": status,
+        "local_today": "2026-09-04",
+        "latest_physiology_date": "2026-09-04",
+        "age_days": 0 if can_generate else 1,
+        "can_generate_current_recommendation": can_generate,
+        "source_freshness": (
+            PLAN_SOURCE_FRESHNESS if source_freshness is None else source_freshness
+        ),
+        "message": "test freshness",
+    }
+
+
 class TodaysPlanCacheBehaviorTests(unittest.TestCase):
 
-    def test_cache_hit_still_uses_saved_plan(self):
-        cached_plan = {"status": "ok", "headline": "cached"}
+    # ----- CASE F: cache current with source -> fast hit preserved -----
+    def test_case_f_cache_hit_with_matching_source_uses_saved_plan(self):
+        cached_plan = {
+            "status": "ok",
+            "headline": "cached",
+            "source_freshness": PLAN_SOURCE_FRESHNESS,
+        }
+        cached_row = {
+            "plan_payload": cached_plan,
+            "updated_at": datetime.now(timezone.utc),
+        }
         with (
             patch.object(
                 todays_plan_store,
-                "load_cached_plan",
-                return_value={"plan_payload": cached_plan},
+                "freshness_status",
+                return_value=_plan_freshness(),
             ),
-            patch.object(todays_plan_store, "_cache_is_fresh", return_value=True),
+            patch.object(
+                todays_plan_store,
+                "load_cached_plan",
+                return_value=cached_row,
+            ),
             patch.object(todays_plan_store, "build_todays_plan") as build,
         ):
             result = todays_plan_store.get_or_build_todays_plan()
@@ -308,9 +409,56 @@ class TodaysPlanCacheBehaviorTests(unittest.TestCase):
         self.assertEqual(result, cached_plan)
         build.assert_not_called()
 
+    # ----- CASE E: cache generated before newer WHOOP source -> rejected -----
+    def test_case_e_cache_with_stale_source_is_rejected_and_rebuilt(self):
+        stale_cached = {
+            "plan_payload": {
+                "status": "ok",
+                "headline": "old",
+                "source_freshness": PLAN_SOURCE_FRESHNESS,
+            },
+            "updated_at": datetime.now(timezone.utc),
+        }
+        built_plan = {"status": "ok", "headline": "fresh"}
+        with (
+            patch.object(
+                todays_plan_store,
+                "freshness_status",
+                return_value=_plan_freshness(
+                    source_freshness=PLAN_SOURCE_FRESHNESS_NEWER
+                ),
+            ),
+            patch.object(
+                todays_plan_store,
+                "load_cached_plan",
+                return_value=stale_cached,
+            ),
+            patch.object(
+                todays_plan_store,
+                "build_todays_plan",
+                return_value=built_plan,
+            ) as build,
+            patch.object(todays_plan_store, "save_plan") as save,
+        ):
+            result = todays_plan_store.get_or_build_todays_plan()
+
+        build.assert_called_once_with()
+        save.assert_called_once()
+        saved_plan = save.call_args[0][0]
+        self.assertEqual(
+            saved_plan["source_freshness"], PLAN_SOURCE_FRESHNESS_NEWER
+        )
+        self.assertEqual(result["source_freshness"], PLAN_SOURCE_FRESHNESS_NEWER)
+
+    # ----- CASE I: existing cache-miss behavior still works -----
     def test_cache_miss_still_builds_and_saves_plan(self):
         built_plan = {"status": "ok", "headline": "fresh"}
         with (
+            patch.object(
+                todays_plan_store,
+                "freshness_status",
+                return_value=_plan_freshness(),
+            ),
             patch.object(todays_plan_store, "load_cached_plan", return_value=None),
             patch.object(
                 todays_plan_store,
@@ -321,9 +469,33 @@ class TodaysPlanCacheBehaviorTests(unittest.TestCase):
         ):
             result = todays_plan_store.get_or_build_todays_plan()
 
-        self.assertEqual(result, built_plan)
         build.assert_called_once_with()
-        save.assert_called_once_with(built_plan)
+        save.assert_called_once()
+        saved_plan = save.call_args[0][0]
+        self.assertEqual(saved_plan["status"], "ok")
+        self.assertEqual(saved_plan["source_freshness"], PLAN_SOURCE_FRESHNESS)
+        self.assertEqual(result["source_freshness"], PLAN_SOURCE_FRESHNESS)
+
+    # ----- CASE C (plan layer): pending freshness is not silently served -----
+    def test_pending_freshness_returns_structured_state_without_building(self):
+        with (
+            patch.object(
+                todays_plan_store,
+                "freshness_status",
+                return_value=_plan_freshness(
+                    can_generate=False, status="pending_today"
+                ),
+            ),
+            patch.object(todays_plan_store, "load_cached_plan") as load,
+            patch.object(todays_plan_store, "build_todays_plan") as build,
+        ):
+            result = todays_plan_store.get_or_build_todays_plan()
+
+        self.assertEqual(result["status"], "pending_freshness")
+        self.assertTrue(result["plan_date"])
+        self.assertIn("freshness", result)
+        build.assert_not_called()
+        load.assert_not_called()
 
 
 if __name__ == "__main__":

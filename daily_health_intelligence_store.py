@@ -1,8 +1,10 @@
 import hashlib
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from db import get_conn
+from freshness import freshness_status
 
 from daily_health_intelligence import (
     build_daily_health_ai_payload,
@@ -20,6 +22,7 @@ TABLE_NAME = (
 )
 
 INTELLIGENCE_VERSION = 1
+EASTERN = ZoneInfo("America/New_York")
 
 
 # ============================================================
@@ -31,6 +34,13 @@ def _utc_now():
     return datetime.now(
         timezone.utc
     )
+
+
+def _current_plan_date():
+
+    return datetime.now(
+        EASTERN
+    ).date().isoformat()
 
 
 def _canonical_json(
@@ -211,6 +221,126 @@ def load_cached_intelligence(
     return row
 
 
+def load_current_intelligence(
+    plan_date,
+):
+
+    ensure_table()
+
+    with get_conn() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    plan_date,
+                    plan_fingerprint,
+                    intelligence_version,
+                    model_name,
+                    deterministic_payload,
+                    intelligence_payload,
+                    created_at,
+                    updated_at
+                FROM public.{TABLE_NAME}
+                WHERE
+                    plan_date = %s
+                    AND intelligence_version = %s
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (
+                    plan_date,
+                    INTELLIGENCE_VERSION,
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    row = dict(row)
+    row["deterministic_payload"] = _json_value(
+        row.get("deterministic_payload")
+    )
+    row["intelligence_payload"] = _json_value(
+        row.get("intelligence_payload")
+    )
+
+    return row
+
+
+def _is_current_cached_intelligence(
+    cached,
+    plan_date,
+    source_freshness,
+):
+
+    deterministic_payload = (
+        (cached or {}).get("deterministic_payload")
+        or {}
+    )
+
+    return bool(
+        cached
+        and str(cached.get("plan_date")) == str(plan_date)
+        and cached.get("intelligence_version") == INTELLIGENCE_VERSION
+        and deterministic_payload.get("source_freshness")
+        == source_freshness
+    )
+
+
+def _stored_response(cached):
+
+    deterministic_payload = (
+        cached.get("deterministic_payload")
+        or {}
+    )
+
+    return {
+        "status": "ok",
+        "cache": {
+            "source": "stored",
+            "llm_called": False,
+            "fingerprint": cached.get("plan_fingerprint"),
+            "record_id": cached.get("id"),
+        },
+        "model": cached.get("model_name"),
+        "plan_date": str(cached.get("plan_date")),
+        "brief": cached.get("intelligence_payload"),
+        "daily_coaching_summary": deterministic_payload.get(
+            "daily_coaching_summary"
+        ),
+        "ai_synthesis_status": (
+            "degraded"
+            if cached.get("model_name")
+            == "deterministic-health-intelligence-fallback"
+            else "success"
+        ),
+    }
+
+
+def _pending_response(
+    plan_date,
+    freshness,
+):
+
+    status = (
+        "pending_freshness"
+        if freshness.get("status") == "pending_today"
+        else "stale_data"
+    )
+
+    return {
+        "status": status,
+        "plan_date": str(plan_date),
+        "freshness": freshness,
+        "message": freshness.get("message"),
+    }
+
+
 # ============================================================
 # WRITE
 # ============================================================
@@ -366,9 +496,35 @@ def get_or_create_intelligence(
     force_refresh=False,
 ):
 
-    deterministic_payload = (
-        build_daily_health_ai_payload()
-    )
+    freshness = freshness_status()
+    current_plan_date = freshness.get("local_today") or _current_plan_date()
+    source_freshness = freshness.get("source_freshness") or {}
+
+    if not freshness.get("can_generate_current_recommendation"):
+
+        return _pending_response(
+            current_plan_date,
+            freshness,
+        )
+
+    if not force_refresh:
+
+        current_cached = load_current_intelligence(
+            current_plan_date
+        )
+
+        if _is_current_cached_intelligence(
+            current_cached,
+            current_plan_date,
+            source_freshness,
+        ):
+
+            return _stored_response(
+                current_cached
+            )
+
+    deterministic_payload = build_daily_health_ai_payload()
+    deterministic_payload["source_freshness"] = source_freshness
 
     plan_date = (
         deterministic_payload.get(

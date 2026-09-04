@@ -216,7 +216,22 @@ class DailyHealthIntelligenceFallbackTests(unittest.TestCase):
         )
         generator = Mock(return_value=generated)
         saved = {"id": 41}
+        source_freshness = {
+            "metric_date": "2026-09-01",
+            "source_updated_at": "2026-09-01T10:00:00+00:00",
+            "metrics_generated_at": "2026-09-01T10:05:00+00:00",
+        }
         with (
+            patch.object(
+                store_module,
+                "freshness_status",
+                return_value={
+                    "status": "fresh",
+                    "local_today": "2026-09-01",
+                    "can_generate_current_recommendation": True,
+                    "source_freshness": source_freshness,
+                },
+            ),
             patch.object(
                 store_module,
                 "build_daily_health_ai_payload",

@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 
 from db import get_conn
+from freshness import weekly_source_freshness
 
 from weekly_health_intelligence import (
     build_weekly_health_ai_payload,
@@ -214,6 +215,119 @@ def load_cached_intelligence(
     return row
 
 
+def _latest_metric_date():
+
+    with get_conn() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT MAX(metric_date) AS latest_date
+                FROM public.whoop_daily_metrics
+                """
+            )
+
+            row = cur.fetchone()
+
+    return (
+        row.get("latest_date")
+        if row
+        else None
+    )
+
+
+def load_current_intelligence(
+    period_end_date,
+):
+
+    if not period_end_date:
+        return None
+
+    ensure_table()
+
+    with get_conn() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    period_end_date,
+                    analytics_fingerprint,
+                    intelligence_version,
+                    model_name,
+                    deterministic_payload,
+                    intelligence_payload,
+                    created_at,
+                    updated_at
+                FROM public.{TABLE_NAME}
+                WHERE
+                    period_end_date = %s
+                    AND intelligence_version = %s
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (
+                    period_end_date,
+                    INTELLIGENCE_VERSION,
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    row = dict(row)
+    row["deterministic_payload"] = _json_value(
+        row.get("deterministic_payload")
+    )
+    row["intelligence_payload"] = _json_value(
+        row.get("intelligence_payload")
+    )
+
+    return row
+
+
+def _is_current_cached_intelligence(
+    cached,
+    period_end_date,
+    source_freshness,
+):
+
+    deterministic_payload = (
+        (cached or {}).get("deterministic_payload")
+        or {}
+    )
+
+    return bool(
+        cached
+        and str(cached.get("period_end_date"))
+        == str(period_end_date)
+        and cached.get("intelligence_version") == INTELLIGENCE_VERSION
+        and deterministic_payload.get("source_freshness")
+        == source_freshness
+    )
+
+
+def _stored_response(cached):
+
+    return {
+        "status": "ok",
+        "cache": {
+            "source": "stored",
+            "llm_called": False,
+            "fingerprint": cached.get("analytics_fingerprint"),
+            "record_id": cached.get("id"),
+        },
+        "model": cached.get("model_name"),
+        "period_end_date": str(cached.get("period_end_date")),
+        "brief": cached.get("intelligence_payload"),
+    }
+
+
 # ============================================================
 # WRITE
 # ============================================================
@@ -371,9 +485,27 @@ def get_or_create_intelligence(
     force_refresh=False,
 ):
 
-    deterministic_payload = (
-        build_weekly_health_ai_payload()
-    )
+    source_freshness = weekly_source_freshness()
+    current_period_end_date = source_freshness.get("metric_date")
+
+    if not force_refresh:
+
+        current_cached = load_current_intelligence(
+            current_period_end_date
+        )
+
+        if _is_current_cached_intelligence(
+            current_cached,
+            current_period_end_date,
+            source_freshness,
+        ):
+
+            return _stored_response(
+                current_cached
+            )
+
+    deterministic_payload = build_weekly_health_ai_payload()
+    deterministic_payload["source_freshness"] = source_freshness
 
     period_end_date = (
         deterministic_payload.get(
