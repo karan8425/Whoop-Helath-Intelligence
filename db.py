@@ -1,12 +1,24 @@
 from contextlib import contextmanager
+from contextvars import ContextVar
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from cryptography.fernet import Fernet
 from config import DATABASE_URL, TOKEN_ENCRYPTION_KEY
 
+# Set only inside request_scoped_connection(). When present, get_conn()
+# reuses this connection instead of opening a new physical connection.
+_active_connection = ContextVar("_active_connection", default=None)
+
 @contextmanager
 def get_conn():
+    shared = _active_connection.get()
+    if shared is not None:
+        # Inside a request_scoped_connection() block: reuse the one
+        # open connection. The outer block owns commit/rollback/close.
+        yield shared
+        return
+
     conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
     try:
         yield conn
@@ -15,6 +27,43 @@ def get_conn():
         conn.rollback()
         raise
     finally:
+        conn.close()
+
+@contextmanager
+def request_scoped_connection():
+    """
+    Open exactly one physical DB connection and make every nested
+    get_conn() call inside this block reuse it, instead of each one
+    opening (and TLS/auth-handshaking) its own connection.
+
+    Intended for read-heavy call graphs that invoke get_conn() many
+    times to serve a single logical request (e.g. Goal Progress,
+    which calls it dozens of times across apple_health_trends(),
+    body_composition_progress(), and Tonal strength adherence) -
+    per-call connection setup, not query time, dominates there.
+
+    Safe for read-only nested get_conn() usage: everything reads
+    through the one shared connection and is committed together (or
+    rolled back together on error) when this block exits. Callers
+    outside this block are completely unaffected - get_conn() keeps
+    opening/closing its own connection exactly as before.
+    """
+    if _active_connection.get() is not None:
+        # Already inside a request-scoped connection - nothing to do,
+        # the enclosing block owns it.
+        yield
+        return
+
+    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+    token = _active_connection.set(conn)
+    try:
+        yield
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _active_connection.reset(token)
         conn.close()
 
 def init_db():
