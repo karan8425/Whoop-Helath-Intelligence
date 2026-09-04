@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from db import get_conn
+from freshness import freshness_status
 from todays_plan import build_todays_plan
 
 
@@ -185,6 +186,7 @@ def load_cached_plan(
 
 def _cache_is_fresh(
     cached,
+    source_freshness=None,
 ):
 
     if not cached:
@@ -211,11 +213,42 @@ def _cache_is_fresh(
         updated_at
     ).total_seconds()
 
-    return (
+    time_fresh = (
         age_seconds
         <=
         CACHE_MAX_AGE_SECONDS
     )
+
+    stored_source_freshness = (
+        (cached.get("plan_payload") or {}).get(
+            "source_freshness"
+        )
+    )
+
+    return (
+        time_fresh
+        and source_freshness is not None
+        and stored_source_freshness == source_freshness
+    )
+
+
+def _pending_plan(
+    plan_date,
+    freshness,
+):
+
+    status = (
+        "pending_freshness"
+        if freshness.get("status") == "pending_today"
+        else "stale_data"
+    )
+
+    return {
+        "status": status,
+        "plan_date": str(plan_date),
+        "freshness": freshness,
+        "reason": freshness.get("message"),
+    }
 
 
 # ============================================================
@@ -340,6 +373,15 @@ def get_or_build_todays_plan(
 ):
 
     plan_date = _today_local()
+    freshness = freshness_status()
+    source_freshness = freshness.get("source_freshness") or {}
+
+    if not freshness.get("can_generate_current_recommendation"):
+
+        return _pending_plan(
+            plan_date,
+            freshness,
+        )
 
     if not force_refresh:
 
@@ -351,7 +393,8 @@ def get_or_build_todays_plan(
             cached
             and
             _cache_is_fresh(
-                cached
+                cached,
+                source_freshness,
             )
         ):
 
@@ -390,9 +433,10 @@ def get_or_build_todays_plan(
 
         return plan
 
-    save_plan(
-        plan
-    )
+    plan = dict(plan)
+    plan["source_freshness"] = source_freshness
+
+    save_plan(plan)
 
     print(
         "TODAYS_PLAN_CACHE "
