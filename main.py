@@ -1,5 +1,7 @@
 import secrets
 
+import anyio.to_thread
+
 from fastapi import (
     FastAPI,
     Request,
@@ -28,6 +30,7 @@ from config import (
 
 from db import (
     init_db,
+    request_scoped_connection,
 )
 
 from analytics import (
@@ -572,8 +575,28 @@ async def mobile_goal_progress(
         request
     )
 
-    return (
-        goal_progress()
+    def _compute_goal_progress():
+
+        # goal_progress() calls get_conn() dozens of
+        # times across apple_health_trends(),
+        # body_composition_progress(), and Tonal
+        # strength adherence. Each call normally opens
+        # its own physical DB connection; sharing one
+        # connection for the whole request removes that
+        # repeated TCP/TLS/auth handshake cost without
+        # touching any calculation, query, or the
+        # response shape.
+        with request_scoped_connection():
+            return goal_progress()
+
+    # goal_progress() is a synchronous, DB-heavy call
+    # (apple_health_trends, body_composition_progress,
+    # Tonal strength adherence). Run it in the worker
+    # thread pool so it cannot block the asyncio event
+    # loop and stall unrelated concurrent requests on
+    # this Uvicorn worker.
+    return await anyio.to_thread.run_sync(
+        _compute_goal_progress
     )
 
 
