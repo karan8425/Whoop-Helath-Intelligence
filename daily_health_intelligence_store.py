@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from db import get_conn
+from freshness import freshness_status
 
 from daily_health_intelligence import (
     build_daily_health_ai_payload,
@@ -274,12 +275,20 @@ def load_current_intelligence(
 def _is_current_cached_intelligence(
     cached,
     plan_date,
+    source_freshness,
 ):
+
+    deterministic_payload = (
+        (cached or {}).get("deterministic_payload")
+        or {}
+    )
 
     return bool(
         cached
         and str(cached.get("plan_date")) == str(plan_date)
         and cached.get("intelligence_version") == INTELLIGENCE_VERSION
+        and deterministic_payload.get("source_freshness")
+        == source_freshness
     )
 
 
@@ -310,6 +319,25 @@ def _stored_response(cached):
             == "deterministic-health-intelligence-fallback"
             else "success"
         ),
+    }
+
+
+def _pending_response(
+    plan_date,
+    freshness,
+):
+
+    status = (
+        "pending_freshness"
+        if freshness.get("status") == "pending_today"
+        else "stale_data"
+    )
+
+    return {
+        "status": status,
+        "plan_date": str(plan_date),
+        "freshness": freshness,
+        "message": freshness.get("message"),
     }
 
 
@@ -468,9 +496,19 @@ def get_or_create_intelligence(
     force_refresh=False,
 ):
 
+    freshness = freshness_status()
+    current_plan_date = freshness.get("local_today") or _current_plan_date()
+    source_freshness = freshness.get("source_freshness") or {}
+
+    if not freshness.get("can_generate_current_recommendation"):
+
+        return _pending_response(
+            current_plan_date,
+            freshness,
+        )
+
     if not force_refresh:
 
-        current_plan_date = _current_plan_date()
         current_cached = load_current_intelligence(
             current_plan_date
         )
@@ -478,6 +516,7 @@ def get_or_create_intelligence(
         if _is_current_cached_intelligence(
             current_cached,
             current_plan_date,
+            source_freshness,
         ):
 
             return _stored_response(
@@ -485,6 +524,7 @@ def get_or_create_intelligence(
             )
 
     deterministic_payload = build_daily_health_ai_payload()
+    deterministic_payload["source_freshness"] = source_freshness
 
     plan_date = (
         deterministic_payload.get(

@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 
 from db import get_conn
+from freshness import weekly_source_freshness
 
 from weekly_health_intelligence import (
     build_weekly_health_ai_payload,
@@ -293,13 +294,21 @@ def load_current_intelligence(
 def _is_current_cached_intelligence(
     cached,
     period_end_date,
+    source_freshness,
 ):
+
+    deterministic_payload = (
+        (cached or {}).get("deterministic_payload")
+        or {}
+    )
 
     return bool(
         cached
         and str(cached.get("period_end_date"))
         == str(period_end_date)
         and cached.get("intelligence_version") == INTELLIGENCE_VERSION
+        and deterministic_payload.get("source_freshness")
+        == source_freshness
     )
 
 
@@ -476,9 +485,11 @@ def get_or_create_intelligence(
     force_refresh=False,
 ):
 
+    source_freshness = weekly_source_freshness()
+    current_period_end_date = source_freshness.get("metric_date")
+
     if not force_refresh:
 
-        current_period_end_date = _latest_metric_date()
         current_cached = load_current_intelligence(
             current_period_end_date
         )
@@ -486,6 +497,7 @@ def get_or_create_intelligence(
         if _is_current_cached_intelligence(
             current_cached,
             current_period_end_date,
+            source_freshness,
         ):
 
             return _stored_response(
@@ -493,6 +505,7 @@ def get_or_create_intelligence(
             )
 
     deterministic_payload = build_weekly_health_ai_payload()
+    deterministic_payload["source_freshness"] = source_freshness
 
     period_end_date = (
         deterministic_payload.get(
