@@ -7,6 +7,7 @@ from integrations.tonal.movement_performance import (
 )
 
 from integrations.tonal.training_priority import (
+    _session_from_templates,
     build_training_priority,
 )
 
@@ -36,6 +37,7 @@ SESSION_RULES = {
         "allow_progression": True,
         "allow_smart_weight": True,
         "target_rir": "1-2",
+        "max_exercises": 5,
     },
 
     "good": {
@@ -45,6 +47,7 @@ SESSION_RULES = {
         "allow_progression": True,
         "allow_smart_weight": False,
         "target_rir": "2",
+        "max_exercises": 5,
     },
 
     "moderate": {
@@ -54,15 +57,17 @@ SESSION_RULES = {
         "allow_progression": False,
         "allow_smart_weight": False,
         "target_rir": "2-3",
+        "max_exercises": 5,
     },
 
     "low": {
-        "min_sets": 6,
-        "target_sets": 8,
-        "max_sets": 10,
+        "min_sets": 4,
+        "target_sets": 6,
+        "max_sets": 6,
         "allow_progression": False,
         "allow_smart_weight": False,
         "target_rir": "3-4",
+        "max_exercises": 3,
     },
 }
 
@@ -403,238 +408,108 @@ def _candidate_score(
 # muscles receive direct work.
 # ============================================================
 
+def _normalized_muscles(profile):
+    normalized = []
+    for muscle in profile.get("muscle_groups") or []:
+        muscle = "Core" if muscle in ("Abs", "Obliques") else muscle
+        if muscle and muscle not in normalized:
+            normalized.append(muscle)
+    return normalized
+
+
+def _movement_eligibility(profile, target_muscles, suppressed_muscles):
+    muscles = _normalized_muscles(profile)
+    if not muscles:
+        return False, "Movement has no resolved muscle mapping."
+    if (profile.get("performance") or {}).get("status") != "usable":
+        return False, "Movement does not have usable performance/load history."
+
+    target = set(target_muscles)
+    suppressed = set(suppressed_muscles)
+    incidental = {
+        "Core" if muscle in ("Abs", "Obliques") else muscle
+        for muscle in profile.get("incidental_muscles") or []
+    }
+    primary = muscles[0]
+    materially_loaded = set(muscles) - incidental
+
+    if primary in suppressed:
+        return False, f"Primary muscle {primary} is suppressed."
+    blocked = materially_loaded & suppressed
+    if blocked:
+        return False, "Movement materially loads suppressed muscle(s): " + ", ".join(sorted(blocked))
+    if primary not in target:
+        return False, "Primary muscle does not match the selected session targets."
+    return True, "Primary muscle matches an eligible selected target."
+
+
+def _selection_family(profile):
+    return (
+        _family_for_movement(profile.get("name"))
+        or f"movement:{profile.get('movement_id') or profile.get('name')}"
+    )
+
+
 def _select_movements(
     profiles,
     primary_focus,
     secondary_focus,
+    suppressed_muscles=None,
+    max_exercises=5,
 ):
-
+    target_muscles = list(dict.fromkeys(primary_focus + secondary_focus))
+    suppressed_names = {
+        item.get("muscle") if isinstance(item, dict) else item
+        for item in (suppressed_muscles or [])
+    }
     candidates = []
-
     for profile in profiles:
-
-        score = _candidate_score(
+        eligible, reason = _movement_eligibility(
             profile,
-            primary_focus,
-            secondary_focus,
+            target_muscles,
+            suppressed_names,
         )
-
-        if score <= 0:
+        if not eligible:
             continue
+        candidates.append({
+            "score": _candidate_score(profile, primary_focus, secondary_focus),
+            "profile": profile,
+            "eligibility_reason": reason,
+        })
 
-        candidates.append(
-            {
-                "score":
-                    score,
-
-                "profile":
-                    profile,
-            }
-        )
-
-    candidates.sort(
-        key=lambda item:
-            item["score"],
-        reverse=True,
-    )
-
+    candidates.sort(key=lambda item: item["score"], reverse=True)
     selected = []
-
     used_families = set()
+    covered_targets = set()
 
-    # --------------------------------------------------------
-    # 1. Squat pattern
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family != "squat":
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 2. Hip-hinge pattern
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
-            continue
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family != "hinge":
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 3. Unilateral / lunge pattern
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
-            continue
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family != "split_squat_lunge":
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 4. Direct core
-    # --------------------------------------------------------
-
-    core_candidates = [
-        item
-        for item in candidates
-        if _is_core_movement(
-            item["profile"]
-        )
-    ]
-
-    if core_candidates:
-
-        profile = (
-            core_candidates[0][
-                "profile"
-            ]
-        )
-
-        if profile not in selected:
-
-            selected.append(
-                profile
-            )
-
-            used_families.add(
-                _family_for_movement(
-                    profile.get(
-                        "name"
-                    )
-                )
-            )
-
-    # --------------------------------------------------------
-    # 5. Second direct core pattern
-    # --------------------------------------------------------
-
-    for candidate in core_candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
-            continue
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family in used_families:
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 6. Optional fifth movement
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        if len(selected) >= 5:
+    # Rank only inside the allowed pool. Prefer direct coverage of each target,
+    # then fill remaining slots without duplicating movement families.
+    for target in target_muscles:
+        for candidate in candidates:
+            profile = candidate["profile"]
+            if profile in selected or _normalized_muscles(profile)[0] != target:
+                continue
+            family = _selection_family(profile)
+            if family in used_families:
+                continue
+            selected.append(profile)
+            used_families.add(family)
+            covered_targets.add(target)
+            break
+        if len(selected) >= max_exercises:
             break
 
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
+    for candidate in candidates:
+        if len(selected) >= max_exercises:
+            break
+        profile = candidate["profile"]
+        family = _selection_family(profile)
+        if profile in selected or family in used_families:
             continue
+        selected.append(profile)
+        used_families.add(family)
 
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family in used_families:
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-    return selected[:5]
+    return selected
 
 
 # ============================================================
@@ -660,6 +535,9 @@ def _set_allocation(
 
     if exercise_count == 0:
         return []
+
+    if readiness_band == "low":
+        return [2 for _ in selected[:rules["max_exercises"]]]
 
     base_sets = max(
         2,
@@ -1854,16 +1732,87 @@ def build_daily_workout_prescription(now=None):
         or []
     )
 
-    selected = (
-        _select_movements(
-            profiles_result.get(
-                "profiles",
-                []
-            ),
-            primary_focus,
-            secondary_focus,
+    profiles = profiles_result.get("profiles", [])
+    suppressed = priorities.get("suppressed_muscles", [])
+    max_exercises = SESSION_RULES[readiness_band]["max_exercises"]
+
+    def select_for_focus(primary, secondary):
+        return _select_movements(
+            profiles,
+            primary,
+            secondary,
+            suppressed_muscles=suppressed,
+            max_exercises=max_exercises,
         )
-    )
+
+    selected = select_for_focus(primary_focus, secondary_focus)
+    fallback_reason = None
+
+    def sufficient(movements, targets, session_type):
+        covered = {
+            _normalized_muscles(profile)[0]
+            for profile in movements
+            if _normalized_muscles(profile)
+        }
+        covered_targets = covered & set(targets)
+        if len(covered_targets) < min(2, len(set(targets))):
+            return False
+        if session_type == "Full Body":
+            has_upper = bool(covered & {"Chest", "Back", "Shoulders", "Biceps", "Triceps"})
+            has_lower = bool(covered & {"Glutes", "Hamstrings", "Quads"})
+            return has_upper and has_lower
+        if session_type == "Core + Accessories":
+            return "Core" in covered and bool(covered - {"Core"})
+        return True
+
+    if not sufficient(
+        selected,
+        primary_focus + secondary_focus,
+        recommended_session.get("session_type"),
+    ):
+        for template_score in priorities.get("session_template_scores", [])[1:]:
+            if not template_score.get("eligible"):
+                continue
+            alternate = _session_from_templates(
+                [template_score],
+                priorities.get("ranked_muscles", []),
+            )
+            alternate_primary = alternate.get("primary_focus") or []
+            alternate_secondary = alternate.get("secondary_focus") or []
+            alternate_selected = select_for_focus(
+                alternate_primary,
+                alternate_secondary,
+            )
+            if sufficient(
+                alternate_selected,
+                alternate_primary + alternate_secondary,
+                alternate.get("session_type"),
+            ):
+                recommended_session = alternate
+                primary_focus = alternate_primary
+                secondary_focus = alternate_secondary
+                selected = alternate_selected
+                fallback_reason = (
+                    "The winning template lacked enough compatible historical "
+                    "movements, so the next coherent eligible template was used."
+                )
+                break
+
+    suppressed_names = {
+        item.get("muscle") if isinstance(item, dict) else item
+        for item in priorities.get("suppressed_muscles", [])
+    }
+    target_muscles = list(dict.fromkeys(primary_focus + secondary_focus))
+    for profile in selected:
+        eligible, reason = _movement_eligibility(
+            profile,
+            target_muscles,
+            suppressed_names,
+        )
+        if not eligible:
+            raise RuntimeError(
+                "Prescription movement invariant failed: " + reason
+            )
 
     allocations = (
         _set_allocation(
@@ -1961,7 +1910,7 @@ def build_daily_workout_prescription(now=None):
                 secondary_focus,
 
             "target_muscles":
-                priorities.get("target_muscles", primary_focus + secondary_focus),
+                primary_focus + secondary_focus,
 
             "suppressed_muscles":
                 priorities.get("suppressed_muscles", []),
@@ -1973,7 +1922,7 @@ def build_daily_workout_prescription(now=None):
                 priorities.get("selection_confidence"),
 
             "session_focus_reason":
-                priorities.get("session_focus_reason"),
+                fallback_reason or priorities.get("session_focus_reason"),
 
             "session_template_scores":
                 priorities.get("session_template_scores", []),

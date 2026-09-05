@@ -12,7 +12,7 @@ from todays_plan import build_todays_plan
 # ============================================================
 
 TABLE_NAME = "todays_plan_cache"
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
