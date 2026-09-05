@@ -338,6 +338,40 @@ def _training_card(workout):
             )
             or {},
 
+        "target_muscles":
+            session.get(
+                "target_muscles"
+            )
+            or [],
+
+        "suppressed_muscles":
+            session.get(
+                "suppressed_muscles"
+            )
+            or [],
+
+        "recent_training_context":
+            session.get(
+                "recent_training_context"
+            )
+            or {},
+
+        "selection_confidence":
+            session.get(
+                "selection_confidence"
+            ),
+
+        "session_focus_reason":
+            session.get(
+                "session_focus_reason"
+            ),
+
+        "whoop_dosage_effect":
+            session.get(
+                "whoop_dosage_effect"
+            )
+            or {},
+
         "exercises":
             exercise_details,
 

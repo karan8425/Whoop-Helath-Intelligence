@@ -7,3 +7,4 @@ itsdangerous>=2.2,<3
 python-multipart>=0.0.20,<1
 psycopg[binary]>=3.2,<4
 openai>=1.100,<3
+requests>=2.32,<3

@@ -1,12 +1,45 @@
 import json
 from datetime import datetime, timezone
 
+from db import get_conn
+
 from integrations.tonal.strength_analytics import (
     strength_analytics,
 )
+from integrations.tonal.muscle_readiness import calculate_muscle_readiness
 
 
 TARGET_FREQUENCY_7D = 2
+
+SESSION_TEMPLATES = {
+    "Upper Push": {
+        "muscles": ["Chest", "Shoulders", "Triceps"],
+        "minimum_eligible": 2,
+    },
+    "Upper Pull": {
+        "muscles": ["Back", "Biceps"],
+        "minimum_eligible": 2,
+    },
+    "Lower Body": {
+        "muscles": ["Glutes", "Hamstrings", "Quads"],
+        "minimum_eligible": 2,
+    },
+    "Upper Mixed": {
+        "muscles": ["Chest", "Back", "Shoulders", "Biceps", "Triceps"],
+        "minimum_eligible": 3,
+    },
+    "Core + Accessories": {
+        "muscles": ["Core", "Biceps", "Triceps", "Shoulders"],
+        "minimum_eligible": 2,
+    },
+    "Full Body": {
+        "muscles": ["Chest", "Back", "Shoulders", "Glutes", "Hamstrings", "Quads", "Core"],
+        "minimum_eligible": 3,
+    },
+}
+YESTERDAY_FOCUS_PENALTY = 35.0
+REPEATED_FOCUS_PENALTY = 15.0
+RECOVERING_MUSCLE_PENALTY = 15.0
 
 
 REGION_MUSCLES = {
@@ -371,7 +404,98 @@ def _build_session_focus(
     }
 
 
-def build_training_priority() -> dict:
+def _recommendation_history(now):
+    target_date = now.date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT plan_date, plan_payload #>> '{training,session_type}' AS focus
+                FROM todays_plan_cache
+                WHERE plan_date < %s
+                  AND plan_payload #>> '{training,session_type}' IS NOT NULL
+                ORDER BY plan_date DESC
+                LIMIT 3
+                """,
+                (target_date,),
+            )
+            return cur.fetchall()
+
+
+def _score_session_templates(ranked, readiness, history):
+    priority = {row["muscle"]: float(row["priority_score"]) for row in ranked}
+    readiness_by_muscle = {row["muscle"]: row for row in readiness["muscles"]}
+    yesterday_focus = history[0].get("focus") if history else None
+    repeated = [row.get("focus") for row in history]
+    scored = []
+
+    for name, template in SESSION_TEMPLATES.items():
+        eligible = []
+        for muscle in template["muscles"]:
+            state = readiness_by_muscle[muscle]["readiness_state"]
+            if state not in ("SUPPRESSED", "FATIGUED"):
+                eligible.append(muscle)
+
+        valid = len(eligible) >= template["minimum_eligible"]
+        if name == "Full Body":
+            upper = any(m in eligible for m in ("Chest", "Back", "Shoulders"))
+            lower = any(m in eligible for m in ("Glutes", "Hamstrings", "Quads"))
+            valid = valid and upper and lower
+        if name == "Core + Accessories":
+            valid = valid and "Core" in eligible
+
+        score = -999.0
+        rotation_penalty = 0.0
+        if valid:
+            components = []
+            for muscle in eligible:
+                item = readiness_by_muscle[muscle]
+                value = priority.get(muscle, 0.0) + item["readiness_score"] * 0.45
+                if item["readiness_state"] == "RECOVERING":
+                    value -= RECOVERING_MUSCLE_PENALTY
+                components.append(value)
+            components.sort(reverse=True)
+            score = sum(components[: template["minimum_eligible"]])
+            if yesterday_focus == name:
+                rotation_penalty += YESTERDAY_FOCUS_PENALTY
+            rotation_penalty += repeated.count(name) * REPEATED_FOCUS_PENALTY
+            if readiness["selection_confidence"] != "high" and name in repeated:
+                rotation_penalty += 20.0
+            score -= rotation_penalty
+
+        scored.append({
+            "session_type": name,
+            "eligible": valid,
+            "eligible_muscles": eligible,
+            "score": round(score, 1),
+            "rotation_penalty": rotation_penalty,
+        })
+
+    scored.sort(key=lambda row: row["score"], reverse=True)
+    return scored
+
+
+def _session_from_templates(scores, ranked):
+    winner = next((row for row in scores if row["eligible"]), None)
+    if not winner:
+        return {"session_type": "Active Recovery", "primary_focus": [], "secondary_focus": []}
+
+    rank_order = [row["muscle"] for row in ranked]
+    eligible = set(winner["eligible_muscles"])
+    ordered = [muscle for muscle in rank_order if muscle in eligible]
+    primary_count = min(3, len(ordered))
+    primary = ordered[:primary_count]
+    secondary = ordered[primary_count:4]
+    return {
+        "session_type": winner["session_type"],
+        "primary_focus": primary,
+        "secondary_focus": secondary,
+    }
+
+
+def build_training_priority(now=None) -> dict:
+
+    now = now or datetime.now(timezone.utc)
 
     analytics = (
         strength_analytics()
@@ -489,11 +613,17 @@ def build_training_priority() -> dict:
         ] >= TARGET_FREQUENCY_7D
     ]
 
-    session_focus = (
-        _build_session_focus(
-            priority_muscles
-        )
+    muscle_readiness = calculate_muscle_readiness(now=now)
+    try:
+        recommendation_history = _recommendation_history(now)
+    except Exception:
+        recommendation_history = []
+    template_scores = _score_session_templates(
+        ranked,
+        muscle_readiness,
+        recommendation_history,
     )
+    session_focus = _session_from_templates(template_scores, ranked)
 
     rationale = []
 
@@ -611,6 +741,39 @@ def build_training_priority() -> dict:
 
         "recommended_session":
             session_focus,
+
+        "muscle_readiness":
+            muscle_readiness,
+
+        "target_muscles":
+            session_focus["primary_focus"] + session_focus["secondary_focus"],
+
+        "suppressed_muscles": [
+            item for item in muscle_readiness["muscles"]
+            if item["readiness_state"] == "SUPPRESSED"
+        ],
+
+        "eligible_muscles": [
+            item for item in muscle_readiness["muscles"]
+            if item["readiness_state"] not in ("SUPPRESSED", "FATIGUED")
+        ],
+
+        "session_template_scores":
+            template_scores,
+
+        "recent_training_context": {
+            "latest_tonal_workout_at": muscle_readiness["latest_tonal_workout_at"],
+            "latest_workout_age_hours": muscle_readiness["latest_workout_age_hours"],
+            "recommendation_history": recommendation_history,
+        },
+
+        "selection_confidence":
+            muscle_readiness["selection_confidence"],
+
+        "session_focus_reason": (
+            "Highest-scoring coherent template after local muscle suppression, "
+            "program-balance priority and recommendation-rotation penalties."
+        ),
 
         "training_focus":
             session_focus[

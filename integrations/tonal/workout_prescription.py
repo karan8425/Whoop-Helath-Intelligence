@@ -180,14 +180,19 @@ def _is_core_movement(profile):
 # WHOOP READINESS
 # ============================================================
 
-def _latest_readiness():
+def _latest_readiness(now=None):
 
     with get_conn() as conn:
 
         with conn.cursor() as cur:
 
+            date_filter = ""
+            params = ()
+            if now is not None:
+                date_filter = "AND metric_date <= %s"
+                params = (now.date(),)
             cur.execute(
-                """
+                f"""
                 SELECT
                     metric_date,
                     recovery_score,
@@ -196,9 +201,11 @@ def _latest_readiness():
                     sleep_duration_hours
                 FROM public.whoop_daily_metrics
                 WHERE has_recovery = TRUE
+                {date_filter}
                 ORDER BY metric_date DESC
                 LIMIT 1
-                """
+                """,
+                params,
             )
 
             row = cur.fetchone()
@@ -1732,10 +1739,10 @@ def _prescribe_exercise(
 # DAILY WORKOUT ENGINE
 # ============================================================
 
-def build_daily_workout_prescription():
+def build_daily_workout_prescription(now=None):
 
     readiness = (
-        _latest_readiness()
+        _latest_readiness(now=now)
     )
 
     if not readiness.get(
@@ -1819,7 +1826,7 @@ def build_daily_workout_prescription():
         }
 
     priorities = (
-        build_training_priority()
+        build_training_priority(now=now)
     )
 
     profiles_result = (
@@ -1952,6 +1959,29 @@ def build_daily_workout_prescription():
 
             "secondary_focus":
                 secondary_focus,
+
+            "target_muscles":
+                priorities.get("target_muscles", primary_focus + secondary_focus),
+
+            "suppressed_muscles":
+                priorities.get("suppressed_muscles", []),
+
+            "recent_training_context":
+                priorities.get("recent_training_context", {}),
+
+            "selection_confidence":
+                priorities.get("selection_confidence"),
+
+            "session_focus_reason":
+                priorities.get("session_focus_reason"),
+
+            "session_template_scores":
+                priorities.get("session_template_scores", []),
+
+            "whoop_dosage_effect": (
+                f"WHOOP {readiness.get('training_category')} controls session dose; "
+                "it does not override locally suppressed muscles."
+            ),
 
             "exercise_count":
                 len(

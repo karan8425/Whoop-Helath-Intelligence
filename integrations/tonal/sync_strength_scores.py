@@ -4,6 +4,10 @@ import json
 import requests
 
 from db import get_conn
+from integrations.tonal.client import (
+    authenticate as shared_authenticate,
+    tonal_get,
+)
 
 
 AUTH0_DOMAIN = "tonal.auth0.com"
@@ -16,36 +20,7 @@ def authenticate(
     password: str,
 ) -> str:
 
-    response = requests.post(
-        f"https://{AUTH0_DOMAIN}/oauth/token",
-        json={
-            "grant_type": "password",
-            "client_id": CLIENT_ID,
-            "username": email,
-            "password": password,
-            "scope": "openid profile email offline_access",
-        },
-        timeout=30,
-    )
-
-    if response.status_code == 401:
-        raise RuntimeError(
-            "Tonal rejected the email or password."
-        )
-
-    if response.status_code == 403:
-        raise RuntimeError(
-            "Tonal denied access."
-        )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            "Tonal authentication failed with "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
-        )
-
-    token = response.json().get(
+    token = shared_authenticate(email, password).get(
         "id_token"
     )
 
@@ -62,20 +37,12 @@ def get_user_id(
     token: str,
 ) -> str:
 
-    response = requests.get(
-        f"{API_BASE}/v6/users/userinfo",
-        headers={
-            "Authorization":
-                f"Bearer {token}"
-        },
-        timeout=30,
-    )
+    response = tonal_get(token, "/v6/users/userinfo")
 
     if response.status_code != 200:
         raise RuntimeError(
             "Could not retrieve Tonal user information. "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
+            f"HTTP {response.status_code}."
         )
 
     data = response.json()
@@ -98,26 +65,16 @@ def get_strength_history(
     user_id: str,
 ) -> list:
 
-    response = requests.get(
-        (
-            f"{API_BASE}/v6/users/"
-            f"{user_id}/strength-scores/history"
-        ),
-        headers={
-            "Authorization":
-                f"Bearer {token}"
-        },
-        params={
-            "limit": 5000
-        },
-        timeout=60,
+    response = tonal_get(
+        token,
+        f"/v6/users/{user_id}/strength-scores/history",
+        params={"limit": 5000},
     )
 
     if response.status_code != 200:
         raise RuntimeError(
             "Could not retrieve Strength Score history. "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
+            f"HTTP {response.status_code}."
         )
 
     records = response.json()
