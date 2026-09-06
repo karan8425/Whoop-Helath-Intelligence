@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import hashlib
 import hmac
@@ -26,6 +25,7 @@ from whoop_webhook_store import (
     mark_pipeline_skipped,
     mark_pipeline_failed,
     pipeline_lock,
+    take_superseded_skips,
 )
 
 
@@ -42,12 +42,6 @@ WHOOP_CLIENT_SECRET = os.getenv(
 )
 
 MAX_TIMESTAMP_AGE_SECONDS = 300
-
-SLEEP_EVENT_DELAY_SECONDS = 45
-
-SLEEP_EVENT_MAX_ATTEMPTS = 4
-
-SLEEP_EVENT_RETRY_SECONDS = 45
 
 
 # ============================================================
@@ -231,11 +225,46 @@ def _run_immediate_pipeline(
 
     try:
 
-        _execute_pipeline_once(
+        result = _execute_pipeline_once(
             event_id,
             trace_id,
             event_type,
         )
+
+        # Coalesce related events. WHOOP delivers sleep.updated and
+        # recovery.updated within seconds of each other and they share the
+        # pipeline lock window: one skips while the other runs. If this run
+        # completed and an overlapping event was skipped as busy, re-run the
+        # pipeline exactly once so today's physiology converges now instead
+        # of at the next reconciliation cron. There is no fixed delay - the
+        # skip has already happened, and incremental_sync in the second run
+        # picks up whichever resource arrived last.
+        status = (
+            result.get("status")
+            if result
+            else None
+        )
+
+        if status == "completed":
+
+            superseded = take_superseded_skips()
+
+            if superseded:
+
+                print(
+                    "[whoop-webhook] "
+                    "re-running pipeline to cover "
+                    f"{superseded} superseded event(s) "
+                    f"event_id={event_id} "
+                    f"trace_id={trace_id}",
+                    flush=True,
+                )
+
+                _execute_pipeline_once(
+                    event_id,
+                    trace_id,
+                    event_type,
+                )
 
     except Exception as exc:
 
@@ -254,116 +283,6 @@ def _run_immediate_pipeline(
             "pipeline failed "
             f"event_id={event_id} "
             f"type={event_type} "
-            f"trace_id={trace_id} "
-            f"error={type(exc).__name__}: {exc}",
-            flush=True,
-        )
-
-
-async def _run_sleep_pipeline(
-    event_id: int,
-    trace_id: str,
-    event_type: str,
-) -> None:
-
-    print(
-        "[whoop-webhook] "
-        "sleep event received; "
-        f"waiting {SLEEP_EVENT_DELAY_SECONDS}s "
-        "for WHOOP Recovery processing "
-        f"event_id={event_id} "
-        f"trace_id={trace_id}",
-        flush=True,
-    )
-
-    await asyncio.sleep(
-        SLEEP_EVENT_DELAY_SECONDS
-    )
-
-    try:
-
-        for attempt in range(
-            1,
-            SLEEP_EVENT_MAX_ATTEMPTS + 1,
-        ):
-
-            result = await asyncio.to_thread(
-                _execute_pipeline_once,
-                event_id,
-                trace_id,
-                event_type,
-            )
-
-            status = (
-                result.get(
-                    "status"
-                )
-                if result
-                else None
-            )
-
-            if status == "completed":
-
-                return
-
-            if status == "skipped_pipeline_busy":
-
-                return
-
-            if status not in {
-                "pending_freshness",
-                "stale_data",
-            }:
-
-                return
-
-            if (
-                attempt
-                >= SLEEP_EVENT_MAX_ATTEMPTS
-            ):
-
-                print(
-                    "[whoop-webhook] "
-                    "Recovery still not ready after "
-                    f"{attempt} attempts "
-                    f"event_id={event_id} "
-                    f"trace_id={trace_id}",
-                    flush=True,
-                )
-
-                return
-
-            print(
-                "[whoop-webhook] "
-                "Recovery not ready; "
-                f"retrying in "
-                f"{SLEEP_EVENT_RETRY_SECONDS}s "
-                f"attempt={attempt} "
-                f"event_id={event_id} "
-                f"trace_id={trace_id}",
-                flush=True,
-            )
-
-            await asyncio.sleep(
-                SLEEP_EVENT_RETRY_SECONDS
-            )
-
-    except Exception as exc:
-
-        error_text = (
-            f"{type(exc).__name__}: {exc}\n"
-            f"{traceback.format_exc()}"
-        )
-
-        mark_pipeline_failed(
-            event_id,
-            error_text,
-        )
-
-        print(
-            "[whoop-webhook] "
-            "sleep-triggered pipeline failed "
-            f"event_id={event_id} "
             f"trace_id={trace_id} "
             f"error={type(exc).__name__}: {exc}",
             flush=True,
@@ -582,13 +501,18 @@ async def receive_whoop_webhook(
         }
 
     # --------------------------------------------------------
-    # SLEEP FALLBACK
+    # SLEEP
+    #
+    # Run immediately with no artificial wait. If WHOOP Recovery for the
+    # night has not been scored yet, the pipeline records pending_freshness
+    # (Today keeps showing "still syncing", never yesterday's plan) and the
+    # subsequent recovery.updated event completes the day.
     # --------------------------------------------------------
 
     if event_type == "sleep.updated":
 
         background_tasks.add_task(
-            _run_sleep_pipeline,
+            _run_immediate_pipeline,
             event_id,
             trace_id,
             event_type,
@@ -611,7 +535,7 @@ async def receive_whoop_webhook(
                 True,
 
             "trigger_mode":
-                "wait_for_recovery",
+                "immediate",
         }
 
     # --------------------------------------------------------

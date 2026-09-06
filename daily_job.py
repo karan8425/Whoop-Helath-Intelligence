@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from psycopg.types.json import Jsonb
 
 from db import get_conn, init_db
+from json_safe import json_safe
 from analytics import init_analytics, rebuild_daily_metrics
 from baselines import init_baselines, rebuild_baselines
 from sync import incremental_sync
@@ -113,20 +114,20 @@ def finish_run(
             """, (
                 status,
                 metric_date,
-                Jsonb(sync_result),
-                Jsonb(analytics_result),
-                Jsonb(baselines_result),
+                Jsonb(json_safe(sync_result)),
+                Jsonb(json_safe(analytics_result)),
+                Jsonb(json_safe(baselines_result)),
                 (
-                    Jsonb(deterministic)
+                    Jsonb(json_safe(deterministic))
                     if deterministic is not None
                     else None
                 ),
                 (
-                    Jsonb(intelligence_result)
+                    Jsonb(json_safe(intelligence_result))
                     if intelligence_result is not None
                     else None
                 ),
-                Jsonb(freshness),
+                Jsonb(json_safe(freshness)),
                 run_id,
             ))
 
@@ -222,8 +223,8 @@ def store_intelligence(
                         NOW()
             """, (
                 metric_date,
-                Jsonb(deterministic),
-                Jsonb(brief),
+                Jsonb(json_safe(deterministic)),
+                Jsonb(json_safe(brief)),
                 model,
             ))
 
@@ -428,25 +429,17 @@ def run_daily_pipeline():
         )
 
         # ----------------------------------------------------
-        # Complete automation audit
+        # Today cache invalidation (freshness-critical)
+        #
+        # The complete, current physiology and intelligence state is now
+        # durable. Invalidate at this success boundary so the next Today
+        # request cannot serve a plan built from partially refreshed WHOOP
+        # data. This runs BEFORE the automation audit write below: audit
+        # finalization is bookkeeping only, and a failure there (e.g. a
+        # serialization regression) must never strand a stale Today plan
+        # in cache.
         # ----------------------------------------------------
 
-        finish_run(
-            run_id,
-            "completed",
-            metric_date,
-            sync_result,
-            analytics_result,
-            baselines_result,
-            deterministic,
-            intelligence_result,
-            freshness,
-        )
-
-        # The complete, current physiology and intelligence state is now
-        # durable. Invalidate only at this success boundary so the next
-        # Today request cannot cache a plan built from partially refreshed
-        # WHOOP data.
         try:
 
             invalidated_date = (
@@ -463,8 +456,8 @@ def run_daily_pipeline():
 
         except Exception as exc:
 
-            # Cache maintenance must not rewrite an otherwise successful
-            # pipeline audit result or obscure the refreshed source data.
+            # Cache maintenance must not mask an otherwise successful
+            # refresh; surface it and continue to the audit write.
             print(
                 "TODAYS_PLAN_CACHE "
                 "status=invalidation_failed "
@@ -472,6 +465,22 @@ def run_daily_pipeline():
                 f"error={type(exc).__name__}",
                 flush=True,
             )
+
+        # ----------------------------------------------------
+        # Complete automation audit (bookkeeping)
+        # ----------------------------------------------------
+
+        finish_run(
+            run_id,
+            "completed",
+            metric_date,
+            sync_result,
+            analytics_result,
+            baselines_result,
+            deterministic,
+            intelligence_result,
+            freshness,
+        )
 
         brief = (
             intelligence_result.get(
