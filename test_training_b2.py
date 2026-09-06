@@ -417,9 +417,11 @@ class SepFiveReplayTests(unittest.TestCase):
 class BackwardCompatibilityTests(unittest.TestCase):
 
     def test_plan_version_bumped_for_b2(self):
-        # Scenario 19
+        # Scenario 19 - B2 moved PLAN_VERSION to at least 3 (from B1.1's
+        # 2); later B2-related payload bumps must not regress it, since a
+        # lower value would let a pre-B2 cache row be reused.
         import todays_plan_store
-        self.assertEqual(todays_plan_store.PLAN_VERSION, 3)
+        self.assertGreaterEqual(todays_plan_store.PLAN_VERSION, 3)
 
     def test_dose_diagnostics_is_additive_key(self):
         # Scenario 20 - the new diagnostics block must not replace or
