@@ -11,6 +11,8 @@ from integrations.tonal.training_priority import (
     build_training_priority,
 )
 
+from integrations.tonal import training_dose
+
 
 # ============================================================
 # TONAL HARDWARE LIMITS
@@ -519,25 +521,33 @@ def _select_movements(
 def _set_allocation(
     selected,
     readiness_band,
+    target_sets=None,
+    max_sets=None,
 ):
+    """Distributes a total working-set target across `selected` exercises.
+
+    `target_sets`/`max_sets` are the Training-B2 personalized dose (see
+    training_dose.compute_dose_target). They default to the legacy static
+    SESSION_RULES values only when not supplied, so any other caller keeps
+    working unchanged.
+    """
 
     rules = SESSION_RULES[
         readiness_band
     ]
 
-    target_sets = rules[
-        "target_sets"
-    ]
+    if target_sets is None:
+        target_sets = rules["target_sets"]
+
+    if max_sets is None:
+        max_sets = rules["max_sets"]
 
     exercise_count = len(
         selected
     )
 
-    if exercise_count == 0:
-        return []
-
-    if readiness_band == "low":
-        return [2 for _ in selected[:rules["max_exercises"]]]
+    if exercise_count == 0 or target_sets <= 0:
+        return [0 for _ in selected]
 
     base_sets = max(
         2,
@@ -612,15 +622,11 @@ def _set_allocation(
         allocations
     )
 
-    if total > rules[
-        "max_sets"
-    ]:
+    if total > max_sets:
 
         excess = (
             total
-            - rules[
-                "max_sets"
-            ]
+            - max_sets
         )
 
         for index in reversed(
@@ -1814,10 +1820,50 @@ def build_daily_workout_prescription(now=None):
                 "Prescription movement invariant failed: " + reason
             )
 
+    # --------------------------------------------------------
+    # TRAINING-B2: personalized dose target
+    #
+    # Replaces the static SESSION_RULES set/volume targets with a dose
+    # derived from the user's own comparable Tonal history, adjusted by
+    # WHOOP capacity and recent load, and hard-capped by the B1 per-muscle
+    # readiness budget. B2 never changes WHICH movements/muscles are
+    # eligible (that remains B1/B1.1) - only how much of them to do.
+    # --------------------------------------------------------
+
+    muscle_readiness_by_name = {
+        entry.get("muscle"): entry
+        for entry in (priorities.get("muscle_readiness") or {}).get("muscles", [])
+    }
+
+    dose = training_dose.compute_dose_target(
+        now or datetime.now(timezone.utc),
+        readiness_band,
+        readiness.get("recovery_score"),
+        target_muscles,
+        recommended_session.get("session_type"),
+        muscle_readiness_by_name,
+        (priorities.get("muscle_readiness") or {}).get("latest_workout_age_hours"),
+    )
+
+    dose_limited_by = dose["dose_limited_by"]
+
+    # The dose engine can only ever shrink the already-approved B1.1
+    # candidate pool, never add movements outside it.
+    target_exercise_count = dose["target"]["exercise_count"]
+    if target_exercise_count and target_exercise_count < len(selected):
+        selected = selected[:target_exercise_count]
+    elif target_exercise_count > len(selected) and not dose_limited_by:
+        dose_limited_by = "movement_availability"
+
+    dose_target_sets = dose["target"]["working_sets"]
+    dose_max_sets = max(dose_target_sets, 2 * len(selected)) if selected else dose_target_sets
+
     allocations = (
         _set_allocation(
             selected,
             readiness_band,
+            target_sets=dose_target_sets,
+            max_sets=dose_max_sets,
         )
     )
 
@@ -1943,25 +1989,16 @@ def build_daily_workout_prescription(now=None):
             "target_set_range": {
 
                 "minimum":
-                    SESSION_RULES[
-                        readiness_band
-                    ][
-                        "min_sets"
-                    ],
+                    min(
+                        dose_target_sets,
+                        total_sets,
+                    ),
 
                 "target":
-                    SESSION_RULES[
-                        readiness_band
-                    ][
-                        "target_sets"
-                    ],
+                    dose_target_sets,
 
                 "maximum":
-                    SESSION_RULES[
-                        readiness_band
-                    ][
-                        "max_sets"
-                    ],
+                    dose_max_sets,
             },
 
             "estimated_total_volume":
@@ -1978,6 +2015,117 @@ def build_daily_workout_prescription(now=None):
 
             "exercises":
                 exercises,
+
+            # Training-B2: additive diagnostics. Existing fields above are
+            # untouched in shape, so this is backward compatible with the
+            # current iOS contract.
+            "dose_diagnostics": {
+
+                "dose_baseline_source":
+                    dose["baseline"]["source"],
+
+                "comparable_session_count":
+                    dose["baseline"]["session_count"],
+
+                "historical": {
+
+                    "median_sets":
+                        dose["baseline"]["median_sets"],
+
+                    "median_volume":
+                        dose["baseline"]["median_volume"],
+
+                    "median_duration_minutes":
+                        dose["baseline"]["median_duration_minutes"],
+
+                    "weekly_sets":
+                        dose["session_baselines"]["windows"][30]["sets_per_week"],
+
+                    "weekly_volume":
+                        dose["session_baselines"]["windows"][30]["volume_per_week"],
+
+                    # Full rolling session-level baselines (30d + 90d
+                    # windows: qualifying counts, medians, percentiles,
+                    # weekly rates) so B2 real-data behavior is auditable
+                    # from the deployed API without direct DB access.
+                    "session_baseline_windows":
+                        dose["session_baselines"]["windows"],
+
+                    "excluded_session_count":
+                        dose["session_baselines"]["excluded_session_count"],
+
+                    "excluded_sessions":
+                        dose["session_baselines"]["excluded_sessions"],
+
+                    "muscle_baseline_windows": {
+                        name: entry["windows"]
+                        for name, entry in dose["muscle_baselines"]["muscles"].items()
+                    },
+                },
+
+                "modifiers": {
+
+                    "whoop_multiplier":
+                        dose["modifiers"]["whoop_capacity"],
+
+                    "recent_load_multiplier":
+                        dose["modifiers"]["recent_load"],
+
+                    "recent_load_reason":
+                        dose["modifiers"]["recent_load_reason"],
+
+                    "readiness_limiter":
+                        dose_limited_by,
+                },
+
+                "target": {
+
+                    "exercises":
+                        dose["target"]["exercise_count"],
+
+                    "sets":
+                        dose["target"]["working_sets"],
+
+                    "volume_low":
+                        dose["target"]["volume_low"],
+
+                    "volume_target":
+                        dose["target"]["volume_target"],
+
+                    "volume_high":
+                        dose["target"]["volume_high"],
+
+                    "duration_low_minutes":
+                        dose["target"]["duration_low_minutes"],
+
+                    "duration_high_minutes":
+                        dose["target"]["duration_high_minutes"],
+
+                    "duration_available":
+                        dose["target"]["duration_available"],
+                },
+
+                "actual": {
+
+                    "exercises":
+                        len(exercises),
+
+                    "sets":
+                        total_sets,
+
+                    "estimated_volume":
+                        round(total_volume, 1),
+                },
+
+                "muscle_budgets":
+                    dose["muscle_budgets"],
+
+                "dose_limited_by":
+                    dose_limited_by,
+
+                "dose_confidence":
+                    dose["dose_confidence"],
+            },
         },
 
         "progression_policy": {

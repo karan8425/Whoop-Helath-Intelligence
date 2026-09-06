@@ -99,7 +99,10 @@ class MovementEligibilityTests(unittest.TestCase):
         self.assertEqual(len(selected), 2)
 
     def test_cache_version_rejects_pre_b1_rows(self):
-        self.assertEqual(todays_plan_store.PLAN_VERSION, 2)
+        # B1.1 bumped PLAN_VERSION past the pre-B1 baseline (1); later
+        # bumps (e.g. B2 -> 3) must never regress it back down, since a
+        # lower value would let a stale pre-B1.1 cache row be reused.
+        self.assertGreaterEqual(todays_plan_store.PLAN_VERSION, 2)
 
 
 if __name__ == "__main__":
