@@ -372,6 +372,14 @@ def _training_card(workout):
             )
             or {},
 
+        # Training-B2: additive personalized-dose diagnostics passed
+        # straight through from build_daily_workout_prescription().
+        "dose_diagnostics":
+            session.get(
+                "dose_diagnostics"
+            )
+            or {},
+
         "exercises":
             exercise_details,
 
