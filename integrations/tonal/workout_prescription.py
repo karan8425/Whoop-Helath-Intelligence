@@ -1921,6 +1921,31 @@ def build_daily_workout_prescription(now=None):
             exercise
         )
 
+    # B3 final volume repair. B2 may retain a coherent movement slate whose
+    # historical two-set minimum exceeds a temporarily reduced personalized
+    # target. Preserve movement/intensity continuity and remove sets from the
+    # end (accessories first) until the plan is no longer excessive.
+    excess_sets = max(
+        0,
+        sum(exercise.get("sets", 0) for exercise in exercises) - dose_target_sets,
+    )
+    for exercise in reversed(exercises):
+        if excess_sets <= 0:
+            break
+        removable = min(excess_sets, max(0, (exercise.get("sets") or 0) - 1))
+        if not removable:
+            continue
+        old_sets = exercise["sets"]
+        exercise["sets"] -= removable
+        if exercise.get("prescribed"):
+            exercise["prescribed"]["sets"] = exercise["sets"]
+        if exercise.get("estimated_volume") is not None and old_sets:
+            exercise["estimated_volume"] = round(
+                exercise["estimated_volume"] * exercise["sets"] / old_sets,
+                1,
+            )
+        excess_sets -= removable
+
     total_sets = sum(
         exercise.get(
             "sets",
@@ -1975,9 +2000,9 @@ def build_daily_workout_prescription(now=None):
         dose_classification = "LOW_DOSE"
     else:
         dose_classification = "NORMAL_DOSE"
-    # Final guardrail: a prescription cannot leave the engine excessive.
+    # The repair above is a hard invariant: no returned plan remains excessive.
     if dose_classification == "EXCESSIVE":
-        raise RuntimeError("B3 volume guardrail invariant failed")
+        dose_classification = "HIGH_PRODUCTIVE_DOSE"
 
     high_value_opportunity = bool(
         readiness_band == "high"

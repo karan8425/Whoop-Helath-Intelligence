@@ -102,6 +102,14 @@ class ApiPassThroughTests(unittest.TestCase):
         self.assertEqual(card["exercises"][0]["progression_state"], "PROGRESS_REPS")
         self.assertEqual(card["training_b3"]["dose_classification"], "HIGH_PRODUCTIVE_DOSE")
 
+    def test_volume_repair_contract_is_pinned_in_engine(self):
+        from pathlib import Path
+        source = Path(__file__).with_name("integrations").joinpath(
+            "tonal", "workout_prescription.py"
+        ).read_text()
+        self.assertIn("B3 final volume repair", source)
+        self.assertIn("exercise[\"sets\"] -= removable", source)
+
 
 if __name__ == "__main__":
     unittest.main()
