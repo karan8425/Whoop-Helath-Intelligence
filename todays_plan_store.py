@@ -26,7 +26,7 @@ TABLE_NAME = "todays_plan_cache"
 # 8 -> 9: expose normalized session/rotation diagnostics and preserve
 # exercise-level progression evidence under low systemic recovery.
 # 9 -> 10: reject the cached legacy low-readiness policy description.
-PLAN_VERSION = 11
+PLAN_VERSION = 12
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
