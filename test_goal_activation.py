@@ -246,5 +246,95 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertIn(f"add column if not exists {col}", joined)
 
 
+class GoalChangeCacheInvalidationTests(unittest.TestCase):
+    """Goal activation must drop the goal-dependent Today plan cache
+    (V2.1 stale-state fix). Goal Progress is computed fresh per request."""
+
+    def _activate(self, payload, *, invalidate_ok=True):
+        sink = []
+        calls = {"n": 0}
+        import todays_plan_store as tps
+
+        def fake_invalidate():
+            calls["n"] += 1
+            if not invalidate_ok:
+                raise RuntimeError("cache down")
+            return "2026-09-07"
+
+        with patch.object(goals, "get_conn", _patch_db(sink)), \
+             patch.object(goals, "_latest_hume_start_snapshot",
+                          return_value=CUR_SNAPSHOT), \
+             patch.object(goals, "init_goal_profiles"), \
+             patch.object(tps, "invalidate_todays_plan", fake_invalidate):
+            out = goals.activate_goal(payload)
+        return out, calls["n"]
+
+    def test_activation_invalidates_todays_plan_cache(self):
+        out, n = self._activate({
+            "goal_type": "lose_body_fat", "target": _target(180.0, 18.0),
+            "selected_pace": "recommended",
+        })
+        self.assertEqual(n, 1)
+        self.assertTrue(out["cache"]["todays_plan_invalidated"])
+        self.assertEqual(out["status"], "ok")
+
+    def test_cache_failure_does_not_fail_activation(self):
+        out, n = self._activate({
+            "goal_type": "lose_body_fat", "target": _target(180.0, 18.0),
+            "selected_pace": "recommended",
+        }, invalidate_ok=False)
+        self.assertEqual(n, 1)
+        self.assertEqual(out["status"], "ok")          # activation still valid
+        self.assertFalse(out["cache"]["todays_plan_invalidated"])
+        self.assertIsNotNone(out["goal"]["target_date"])
+
+    def test_activation_failure_does_not_invalidate_cache(self):
+        # bad target_body_fat -> ValueError before any write / cache call
+        import todays_plan_store as tps
+        calls = {"n": 0}
+        with patch.object(goals, "get_conn", _patch_db([])), \
+             patch.object(goals, "_latest_hume_start_snapshot",
+                          return_value=CUR_SNAPSHOT), \
+             patch.object(goals, "init_goal_profiles"), \
+             patch.object(tps, "invalidate_todays_plan",
+                          lambda: calls.__setitem__("n", calls["n"] + 1)):
+            with self.assertRaises(ValueError):
+                goals.activate_goal({
+                    "goal_type": "lose_body_fat",
+                    "target": _target(180.0, 200.0),   # invalid body fat
+                })
+        self.assertEqual(calls["n"], 0)
+
+
+class ActivationRegressionTests(unittest.TestCase):
+    """Item 13 - the exact stale-state repro, at the persistence boundary."""
+
+    def test_new_target_replaces_old_immediately(self):
+        sink = []
+        import todays_plan_store as tps
+        with patch.object(goals, "get_conn", _patch_db(sink)), \
+             patch.object(goals, "_latest_hume_start_snapshot",
+                          return_value=CUR_SNAPSHOT), \
+             patch.object(goals, "init_goal_profiles"), \
+             patch.object(tps, "invalidate_todays_plan", lambda: None):
+            out = goals.activate_goal({
+                "goal_type": "lose_body_fat",
+                "target": _target(180.0, 18.0),          # was 15%
+                "lean_mass_priority": "balanced",
+                "selected_pace": "recommended",
+            })
+        g = out["goal"]
+        # The persisted, authoritative contract carries the NEW targets.
+        self.assertEqual(g["target_weight_lb"], 180.0)
+        self.assertEqual(g["target_body_fat_percentage"], 18.0)
+        self.assertNotEqual(g["target_body_fat_percentage"], 15.0)
+        self.assertTrue(g["is_active"])
+        self.assertEqual(g["goal_version"], 2)
+        # prior phase was closed, not mutated
+        updates = [s for s, _ in sink if s.startswith("update health_goal_profiles")]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("set is_active = false", updates[0])
+
+
 if __name__ == "__main__":
     unittest.main()

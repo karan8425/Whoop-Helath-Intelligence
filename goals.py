@@ -749,6 +749,21 @@ def activate_goal(payload):
 
             goal = _serialize(cur.fetchone())
 
+    # Today's cached plan embeds a goal_progress card built from the PREVIOUS
+    # active goal. Drop today's cached plan now that the new goal is committed,
+    # so a subsequent /api/v1/todays-plan or /api/v1/today cannot serve a plan
+    # derived from the old goal contract. Goal Progress itself
+    # (/api/v1/goals/progress) is computed fresh per request and is not cached
+    # server-side. Cache maintenance must never fail an otherwise successful
+    # activation (item 10).
+    plan_invalidated = False
+    try:
+        from todays_plan_store import invalidate_todays_plan
+        invalidate_todays_plan()
+        plan_invalidated = True
+    except Exception:
+        plan_invalidated = False
+
     return {
         "status": "ok",
         "goal": goal,
@@ -756,4 +771,5 @@ def activate_goal(payload):
             "compatibility": preview["compatibility"]["state"],
             "timeline_status": timeline_status,
         },
+        "cache": {"todays_plan_invalidated": plan_invalidated},
     }
