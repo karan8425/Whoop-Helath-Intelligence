@@ -70,6 +70,80 @@ TREND_BAND = {
     "sleep_duration": 0.04,
 }
 
+# Which movement direction is favourable for each metric. Interpretation
+# (favorable / unfavorable / neutral / context_dependent) is derived from
+# this - NOT from the raw mathematical direction. `context_dependent` means
+# the phase/goal trajectory decides (weight, and fat in a lean bulk).
+FAVORABLE_DIRECTION = {
+    "hrv": "increasing",
+    "recovery": "increasing",
+    "resting_heart_rate": "decreasing",
+    "sleep_duration": "increasing",
+    "steps": "increasing",
+    "lean_mass": "increasing",
+    "body_fat": "context_dependent",
+    "fat_mass": "context_dependent",
+    "weight": "context_dependent",
+}
+
+# For body composition, the favourable direction depends on the phase.
+PHASE_FAT_FAVORS_DECREASE = {"lean_cut", "maintenance"}
+
+
+def _semantic(metric_key, direction, *, phase=None, goal_direction=None):
+    """Map a mathematical direction to a health interpretation.
+
+    Returns (interpretation, reason). interpretation is one of
+    favorable / unfavorable / neutral / context_dependent / insufficient_data.
+    Colour in the UI is driven by interpretation, never by direction.
+    """
+
+    if direction in (None, "insufficient_data"):
+        return "insufficient_data", "Not enough data to interpret."
+    if direction == "flat":
+        return "neutral", "Change is within normal daily variability."
+
+    favors = FAVORABLE_DIRECTION.get(metric_key, "increasing")
+
+    if metric_key in ("body_fat", "fat_mass"):
+        if phase in PHASE_FAT_FAVORS_DECREASE:
+            favors = "decreasing"
+        elif phase == "lean_bulk":
+            return (
+                "context_dependent",
+                "In a lean bulk some fat gain is expected; judge against "
+                "the plan.",
+            )
+        else:
+            favors = "decreasing"
+
+    if metric_key == "weight":
+        if goal_direction in ("decrease", "increase"):
+            favors = "decreasing" if goal_direction == "decrease" else "increasing"
+            good = direction == favors
+            return (
+                ("favorable" if good else "unfavorable"),
+                (
+                    "Weight is moving toward the goal target."
+                    if good else
+                    "Weight is moving away from the goal target."
+                ),
+            )
+        return (
+            "context_dependent",
+            "Weight direction is only meaningful against the goal trajectory.",
+        )
+
+    good = direction == favors
+    return (
+        ("favorable" if good else "unfavorable"),
+        (
+            f"{metric_key.replace('_', ' ').title()} {direction} is "
+            f"{'favourable' if good else 'unfavourable'} for this goal."
+        ),
+    )
+
+
 METHODOLOGY = {
     "phase_vs_history": (
         "Phase progress is scored only from measurements on or after "
@@ -84,6 +158,13 @@ METHODOLOGY = {
         "recovery 5%, steps 5%). Smaller moves are reported as flat "
         "(daily variability), not a sustained trend."
     ),
+    "direction_vs_interpretation": (
+        "`direction` (increasing / decreasing / flat) is the raw movement. "
+        "`interpretation` (favorable / unfavorable / neutral / "
+        "context_dependent) applies the goal context - e.g. a declining "
+        "resting heart rate is favorable, a declining HRV is unfavorable, "
+        "and weight is judged only against the goal trajectory."
+    ),
     "sources": (
         "Current goal scoring uses the preferred source only (Hume for "
         "body composition, WHOOP for physiology/sleep, Apple Health for "
@@ -92,6 +173,11 @@ METHODOLOGY = {
     ),
     "baselines": (
         "Personal 7/14/30/90-day rolling averages. No population norms."
+    ),
+    "comparison": (
+        "Outcome cards compare the current 7-day average with the "
+        "immediately preceding 7-day window (period_start..period_end). "
+        "Phase change is a separate comparison against the phase-start value."
     ),
 }
 
@@ -149,6 +235,14 @@ def _trend_from_delta(metric_key, current_avg, reference_avg, lower_is_better):
     )
 
 
+def _direction_word(delta, band_ok):
+    if delta is None:
+        return "insufficient_data"
+    if band_ok:
+        return "flat"
+    return "increasing" if delta > 0 else "decreasing"
+
+
 def _metric(
     *,
     name,
@@ -158,12 +252,18 @@ def _metric(
     status,
     source=None,
     source_label=None,
+    source_short=None,
+    history_source=None,
     current_value=None,
     current_period_average=None,
     previous_period_average=None,
     trend=None,
+    direction=None,
+    interpretation=None,
+    interpretation_reason=None,
     delta=None,
     delta_pct=None,
+    comparison=None,
     record_count=None,
     earliest_date=None,
     latest_date=None,
@@ -183,12 +283,26 @@ def _metric(
         "status": status,
         "preferred_source": preferred_source,
         "source": source,
+        # Full provenance is retained here...
         "source_label": source_label or source,
+        # ...and a concise pair for the card.
+        "source_short": source_short or source,
+        "history_source": history_source,
         "current_value": _round(current_value, 2),
         "current_period_average": _round(current_period_average, 2),
         "previous_period_average": _round(previous_period_average, 2),
         "delta": delta,
         "delta_pct": delta_pct,
+        # Explicit "where was I -> where am I" comparison for the card.
+        "comparison": comparison,
+        # Raw movement...
+        "direction": direction
+        or ("insufficient_data" if status not in ("ok", "stale") else "flat"),
+        # ...vs goal-aware interpretation (drives colour).
+        "interpretation": interpretation
+        or ("insufficient_data" if status not in ("ok", "stale") else "neutral"),
+        "interpretation_reason": interpretation_reason,
+        # trend kept for backward compatibility (improving/declining/flat).
         "trend": trend or ("insufficient_data" if status != "ok" else "flat"),
         "record_count": record_count,
         "earliest_date": _iso(earliest_date),
@@ -199,6 +313,34 @@ def _metric(
         "series_available": bool(series_available),
         "lower_is_better": lower_is_better,
         "note": note,
+    }
+
+
+def _build_comparison(series, end_date, *, label="vs previous 7 days"):
+    """current 7-day window vs the immediately preceding 7-day window,
+    with explicit dates and start -> current values."""
+
+    cur = _window_slice(series, 7, end_date)
+    prev_end = end_date - timedelta(days=7)
+    prev = _window_slice(series, 7, prev_end)
+    cur_avg = _mean([p["value"] for p in cur])
+    prev_avg = _mean([p["value"] for p in prev])
+    if cur_avg is None or prev_avg is None:
+        return None
+    abs_change = cur_avg - prev_avg
+    pct_change = (abs_change / abs(prev_avg) * 100.0) if prev_avg else None
+    return {
+        "label": label,
+        "period_start": (prev_end - timedelta(days=6)).isoformat(),
+        "period_end": prev_end.isoformat(),
+        "current_period_start": (end_date - timedelta(days=6)).isoformat(),
+        "current_period_end": end_date.isoformat(),
+        "start_value": _round(prev_avg, 2),
+        "current_value": _round(cur_avg, 2),
+        "absolute_change": _round(abs_change, 3),
+        "percent_change": _round(pct_change, 2),
+        "current_measurement_days": len(cur),
+        "reference_measurement_days": len(prev),
     }
 
 
@@ -242,6 +384,37 @@ def _whoop_series(rows, column):
         if v is not None:
             out.append({"date": r["metric_date"], "value": float(v)})
     return out
+
+
+def _load_apple_steps(days=400):
+    """Full daily-step series from apple_health_daily_activity, oldest first.
+
+    Used directly so the historical context and driver classification are not
+    limited to the 7/14/30/90-day baselines that apple_health_trends computes.
+    """
+
+    cutoff = _today_eastern() - timedelta(days=days)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT activity_date, steps
+                    FROM apple_health_daily_activity
+                    WHERE activity_date >= %s
+                      AND steps IS NOT NULL
+                      AND steps > 0
+                    ORDER BY activity_date ASC
+                    """,
+                    (cutoff,),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        return []
+    return [
+        {"date": r["activity_date"], "value": float(r["steps"])}
+        for r in rows
+    ]
 
 
 # ============================================================
@@ -347,7 +520,7 @@ def _phase_series(series, phase_start_date):
 
 def _outcome_metric(
     *, name, display_name, unit, bcp_metric, hist_hume, hist_fitdays,
-    phase_start_date, lower_is_better,
+    phase_start_date, lower_is_better, phase=None,
 ):
     """One OUTCOMES card. Preferred source Hume; Fitdays history labelled."""
 
@@ -361,6 +534,7 @@ def _outcome_metric(
         for p in (hist_fitdays or [])
         if p.get("value") is not None
     ]
+    goal_direction = (bcp_metric or {}).get("goal_direction")
 
     if not hume:
         # No Hume history at all - historical context can still show Fitdays.
@@ -371,6 +545,8 @@ def _outcome_metric(
             preferred_source="Hume", status=status,
             source=("Fitdays" if fitdays else None),
             source_label=("Fitdays (historical only)" if fitdays else None),
+            source_short=("Fitdays" if fitdays else None),
+            history_source=("Fitdays" if fitdays else None),
             record_count=count, earliest_date=earliest, latest_date=latest,
             series_available=bool(fitdays), lower_is_better=lower_is_better,
             note="No Hume measurements; Fitdays shown for historical context only."
@@ -383,6 +559,16 @@ def _outcome_metric(
     trend, delta, delta_pct = _trend_from_delta(
         _trend_key(name), cur_avg, reference, lower_is_better
     )
+    band_ok = trend == "flat"
+    sustained_delta = (
+        (cur_avg - reference)
+        if (cur_avg is not None and reference is not None) else None
+    )
+    direction = _direction_word(sustained_delta, band_ok)
+    interpretation, reason = _semantic(
+        name, direction, phase=phase, goal_direction=goal_direction
+    )
+    comparison = _build_comparison(hume, end_date)
 
     phase_pts = _phase_series(hume, phase_start_date)
     phase_start_value = phase_pts[0]["value"] if phase_pts else None
@@ -396,8 +582,9 @@ def _outcome_metric(
     earliest, latest, count = _series_bounds(hume)
     status = "ok" if cur_n >= 3 else "insufficient_history"
 
+    has_older_fitdays = bool(fitdays and fitdays[0]["date"] < hume[0]["date"])
     source_label = "Hume"
-    if fitdays and fitdays[0]["date"] < hume[0]["date"]:
+    if has_older_fitdays:
         source_label = (
             f"Hume (current) - Fitdays before {hume[0]['date'].isoformat()}"
         )
@@ -406,9 +593,13 @@ def _outcome_metric(
         name=name, display_name=display_name, unit=unit,
         preferred_source="Hume", status=status, source="Hume",
         source_label=source_label,
+        source_short="Hume",
+        history_source=("Fitdays" if has_older_fitdays else None),
         current_value=current_value,
         current_period_average=cur_avg, previous_period_average=prev_avg,
-        trend=trend, delta=delta, delta_pct=delta_pct,
+        trend=trend, direction=direction, interpretation=interpretation,
+        interpretation_reason=reason, delta=delta, delta_pct=delta_pct,
+        comparison=comparison,
         record_count=count, earliest_date=earliest, latest_date=latest,
         phase_start_value=phase_start_value, phase_change=phase_change,
         baselines=_personal_baselines(hume, end_date),
@@ -543,75 +734,111 @@ def _intelligence(*, phase_age_days, outcomes, drivers, physiology, timeline):
     hypotheses = []
 
     bf = outcomes["body_fat"]
+    fatm = outcomes["fat_mass"]
     lean = outcomes["lean_mass"]
     weight = outcomes["weight"]
     strength = drivers["strength"]
     sleep = drivers["sleep"]
+    hrv = physiology["hrv"]
+    rhr = physiology["resting_heart_rate"]
     recovery = physiology["recovery"]
 
-    def t(metric):
-        return metric.get("trend")
+    # Consume the goal-aware INTERPRETATION, not the raw direction.
+    def interp(m):
+        return m.get("interpretation")
 
-    bf_down = t(bf) == "improving"
-    lean_stable_or_up = t(lean) in ("flat", "improving")
-    lean_down = t(lean) == "declining"
-    weight_down = t(weight) == "improving"
-    weight_flat = t(weight) == "flat"
-    strength_ok = strength.get("status") in ("target_met", "ok")
-    strength_low = strength.get("status") == "below_target"
-    recovery_down = t(recovery) == "declining"
-    sleep_ok = sleep.get("status") == "ok" and t(sleep) in ("flat", "improving")
-    sleep_poor = sleep.get("status") == "ok" and t(sleep) == "declining"
+    def direction(m):
+        return m.get("direction")
 
-    if bf.get("status") == "ok":
-        observations.append(
-            f"Body fat 7-day trend is {t(bf)} "
-            f"({bf.get('delta_pct')}% vs prior week)."
-        )
-    if weight.get("status") == "ok":
-        observations.append(
-            f"Weight 7-day trend is {t(weight)} "
-            f"({weight.get('delta')} {weight.get('unit')} vs prior week)."
-        )
+    def usable(m):
+        return m.get("status") in ("ok", "stale")
 
-    # Recomposition signal
-    if bf_down and lean_stable_or_up and strength_ok:
+    bf_fav = usable(bf) and interp(bf) == "favorable"
+    fat_fav = usable(fatm) and interp(fatm) == "favorable"
+    lean_unfav = usable(lean) and interp(lean) == "unfavorable"
+    lean_neutral_or_fav = usable(lean) and interp(lean) in ("neutral", "favorable")
+    weight_toward = usable(weight) and interp(weight) == "favorable"
+    weight_away = usable(weight) and interp(weight) == "unfavorable"
+    weight_flat = usable(weight) and direction(weight) == "flat"
+    weight_decreasing = usable(weight) and direction(weight) == "decreasing"
+
+    strength_low = strength.get("adherence_status") == "below_target"
+    strength_ok = (not strength_low) and strength.get("status") in ("ok", "stale")
+
+    hrv_unfav = usable(hrv) and interp(hrv) == "unfavorable"
+    hrv_fav_or_neutral = usable(hrv) and interp(hrv) in ("favorable", "neutral")
+    rhr_unfav = usable(rhr) and interp(rhr) == "unfavorable"
+    rhr_fav = usable(rhr) and interp(rhr) == "favorable"
+    recovery_unfav = usable(recovery) and interp(recovery) == "unfavorable"
+    recovery_fav = usable(recovery) and interp(recovery) == "favorable"
+    sleep_unfav = usable(sleep) and interp(sleep) == "unfavorable"
+    sleep_ok_or_up = usable(sleep) and interp(sleep) in ("favorable", "neutral")
+
+    # --- Observations (direct readings; no causation) ---
+    for label, m in (("Body fat", bf), ("Weight", weight), ("Lean mass", lean),
+                     ("HRV", hrv), ("Resting HR", rhr)):
+        if usable(m) and direction(m) not in (None, "insufficient_data"):
+            observations.append(
+                f"{label} is {direction(m)} vs the prior week "
+                f"({m.get('delta_pct')}%) - {interp(m)}."
+            )
+
+    # --- Positive signals ---
+    if bf_fav and lean_neutral_or_fav and strength_ok:
         positive.append(
-            "Body fat is declining while lean mass holds and strength is "
-            "maintained - a favourable recomposition signal."
+            "Body fat is down while lean mass holds and strength is maintained "
+            "- a favourable recomposition signal."
         )
-    if weight_flat and bf_down and t(lean) == "improving":
+    if weight_flat and bf_fav and interp(lean) == "favorable":
         positive.append(
             "Scale weight is flat but body fat is down and lean mass is up - "
             "recomposition despite a plateau on the scale."
         )
+    if fat_fav and lean_neutral_or_fav:
+        positive.append("Fat mass is down with lean mass protected - favourable lean-cut progress.")
+    if strength_ok and fat_fav:
+        positive.append("Strength is maintained while fat mass falls - a favourable signal.")
+    if hrv_fav_or_neutral and rhr_fav:
+        positive.append("HRV is stable-to-up and resting heart rate is down - a favourable physiological response.")
+    if recovery_fav:
+        positive.append("Recovery is trending up.")
+    if sleep_ok_or_up and interp(sleep) == "favorable":
+        positive.append("Sleep duration is trending up.")
 
-    # Overly aggressive deficit signal (hypothesis)
-    if weight_down and recovery_down and (strength_low or lean_down):
+    # --- Constraints ---
+    if strength_low:
+        constraints.append(
+            f"Strength sessions below target "
+            f"({strength.get('sessions_7d')}/{strength.get('target_sessions_per_week')} this week)."
+        )
+    if hrv_unfav and rhr_unfav:
+        constraints.append("HRV down and resting heart rate up - recovery physiology is trending adverse.")
+
+    # --- Hypotheses (plausible mechanism, NOT proven causation) ---
+    if weight_decreasing and recovery_unfav and (strength_low or lean_unfav):
         hypotheses.append(
             "Weight is dropping while recovery is trending down and strength/"
             "lean mass is slipping. This pattern is consistent with an overly "
             "aggressive deficit; consider a smaller deficit or a diet break."
         )
         constraints.append("Recovery is trending down alongside weight loss.")
-
-    # Recovery limited by sleep (hypothesis)
-    if strength_ok and sleep_poor:
+    if weight_decreasing and lean_unfav:
+        hypotheses.append(
+            "Weight is falling and lean mass shows a meaningful decline - this "
+            "may indicate excessive lean-tissue loss; protein and strength "
+            "volume are the usual levers."
+        )
+    if hrv_unfav and rhr_unfav:
+        hypotheses.append(
+            "HRV down and resting heart rate up together often reflect "
+            "accumulated fatigue or under-recovery."
+        )
+    if strength_ok and sleep_unfav:
         hypotheses.append(
             "Training consistency is adequate but sleep is trending down; "
             "sleep is the likely limiting factor for recovery and adaptation."
         )
-        watch.append("Sleep duration trend is declining.")
-
-    if strength_low:
-        constraints.append(
-            f"Strength sessions below target "
-            f"({strength.get('sessions_7d')}/{strength.get('target_sessions_per_week')} this week)."
-        )
-    if sleep_ok:
-        positive.append("Sleep duration is holding at or above recent norms.")
-    if recovery.get("status") == "ok" and t(recovery) == "improving":
-        positive.append("Recovery is trending up.")
+        watch.append("Sleep duration is trending down.")
 
     aggressive_deficit = any("aggressive deficit" in h for h in hypotheses)
 
@@ -660,7 +887,7 @@ def _intelligence(*, phase_age_days, outcomes, drivers, physiology, timeline):
             "Restore strength training to the weekly target - it is the "
             "biggest lever for retaining lean mass in a cut."
         )
-    elif sleep_poor:
+    elif sleep_unfav:
         action = "Prioritise sleep duration; it is the current limiter."
     elif overall == "on_track":
         action = "Hold the current plan; the trend is favourable."
@@ -689,45 +916,100 @@ def _intelligence(*, phase_age_days, outcomes, drivers, physiology, timeline):
 # DRIVERS
 # ============================================================
 
-def _steps_driver(trends, goal, end_date):
-    activity = trends.get("activity", {}) if trends else {}
-    baselines = activity.get("baselines", {}) or {}
-    w7 = baselines.get("7", {}) or {}
-    steps_7 = w7.get("steps")
-    days_7 = w7.get("days_available") or 0
+def _steps_driver(steps_series, goal, end_date):
+    """Apple Health steps. Classifies on the best available recent window so a
+    sparse last-7-days sync does not falsely report insufficient history when
+    weeks of step data exist."""
+
     target = goal.get("daily_step_target")
+    earliest, latest, count = _series_bounds(steps_series)
 
-    if steps_7 is None or days_7 < 4:
-        status = "insufficient_history"
+    if not steps_series:
+        return _metric(
+            name="steps", display_name="Steps", unit="steps/day",
+            preferred_source="Apple Health", status="unavailable",
+            source="Apple Health", source_label="Apple Health",
+            source_short="Apple Health", record_count=0,
+            lower_is_better=False,
+            note="No Apple Health step history is available.",
+        )
+
+    bl = _personal_baselines(steps_series, end_date)
+    w7 = _window_slice(steps_series, 7, end_date)
+    w14 = _window_slice(steps_series, 14, end_date)
+    w30 = _window_slice(steps_series, 30, end_date)
+
+    # Choose the shortest window with enough days for a stable current average.
+    if len(w7) >= 4:
+        cur_pts, cur_label, cur_days = w7, "last 7 days", 7
+    elif len(w14) >= 5:
+        cur_pts, cur_label, cur_days = w14, "last 14 days", 14
+    elif len(w30) >= 7:
+        cur_pts, cur_label, cur_days = w30, "last 30 days", 30
     else:
-        status = "ok"
+        cur_pts, cur_label, cur_days = [], None, 0
 
-    bl = {}
-    for w in BASELINE_WINDOWS:
-        x = baselines.get(str(w), {}) or {}
-        bl[str(w)] = {
-            "average": _round(x.get("steps"), 0),
-            "days": x.get("days_available"),
-        }
+    if not cur_pts:
+        return _metric(
+            name="steps", display_name="Steps", unit="steps/day",
+            preferred_source="Apple Health", status="insufficient_history",
+            source="Apple Health", source_label="Apple Health",
+            source_short="Apple Health", record_count=count,
+            earliest_date=earliest, latest_date=latest,
+            baselines=bl, series_available=True, lower_is_better=False,
+            note="Fewer than 4 recent days of step data.",
+        )
 
-    prev = (baselines.get("30", {}) or {}).get("steps")
+    cur_avg = _mean([p["value"] for p in cur_pts])
+    # Reference: the ~4 weeks before the current window.
+    ref_start = end_date - timedelta(days=cur_days + 28)
+    ref_stop = end_date - timedelta(days=cur_days)
+    ref_pts = [p for p in steps_series if ref_start <= p["date"] <= ref_stop]
+    ref_avg = _mean([p["value"] for p in ref_pts])
+
     trend, delta, delta_pct = _trend_from_delta(
-        "steps", steps_7, prev, lower_is_better=False
+        "steps", cur_avg, ref_avg, lower_is_better=False
     )
+    band_ok = trend == "flat"
+    sdelta = (cur_avg - ref_avg) if (cur_avg is not None and ref_avg is not None) else None
+    direction = _direction_word(sdelta, band_ok)
+    interpretation, reason = _semantic("steps", direction)
+
+    comparison = None
+    if ref_avg is not None:
+        comparison = {
+            "label": f"{cur_label} vs prior 4 weeks",
+            "period_start": ref_start.isoformat(),
+            "period_end": ref_stop.isoformat(),
+            "current_period_start": (end_date - timedelta(days=cur_days - 1)).isoformat(),
+            "current_period_end": end_date.isoformat(),
+            "start_value": _round(ref_avg, 0),
+            "current_value": _round(cur_avg, 0),
+            "absolute_change": _round(cur_avg - ref_avg, 0),
+            "percent_change": _round(delta_pct, 1),
+            "current_measurement_days": len(cur_pts),
+            "reference_measurement_days": len(ref_pts),
+        }
 
     m = _metric(
         name="steps", display_name="Steps", unit="steps/day",
-        preferred_source="Apple Health", status=status,
+        preferred_source="Apple Health", status="ok",
         source="Apple Health", source_label="Apple Health",
-        current_value=steps_7, current_period_average=steps_7,
-        previous_period_average=prev, trend=trend, delta=delta, delta_pct=delta_pct,
-        record_count=days_7, baselines=bl, series_available=True,
-        lower_is_better=False,
+        source_short="Apple Health",
+        current_value=cur_avg, current_period_average=cur_avg,
+        previous_period_average=ref_avg, trend=trend, direction=direction,
+        interpretation=interpretation, interpretation_reason=reason,
+        delta=delta, delta_pct=delta_pct, comparison=comparison,
+        record_count=count, earliest_date=earliest, latest_date=latest,
+        baselines=bl, series_available=True, lower_is_better=False,
+        note=(None if cur_label == "last 7 days"
+              else f"Recent daily step sync is sparse; showing the {cur_label} average."),
     )
     m["target"] = target
+    m["target_basis"] = cur_label
+    # A percentage is only meaningful when we have a usable current average.
     m["percentage_of_target"] = (
-        _round(steps_7 / target * 100.0, 1)
-        if (steps_7 is not None and target) else None
+        _round(cur_avg / target * 100.0, 0) if target else None
     )
     return m
 
@@ -785,13 +1067,21 @@ def _whoop_metric_driver_or_physio(
     trend, delta, delta_pct = _trend_from_delta(
         key, cur_avg, reference, lower_is_better
     )
+    band_ok = trend == "flat"
+    sdelta = (cur_avg - reference) if (cur_avg is not None and reference is not None) else None
+    direction = _direction_word(sdelta, band_ok)
+    semantic_key = {"sleep_duration": "sleep_duration"}.get(name, name)
+    interpretation, reason = _semantic(semantic_key, direction)
     return _metric(
         name=name, display_name=display_name, unit=unit,
         preferred_source="WHOOP", status="ok", source="WHOOP",
-        source_label="WHOOP",
+        source_label="WHOOP", source_short="WHOOP",
         current_value=(cur_avg if cur_avg is not None else series[-1]["value"]),
         current_period_average=cur_avg, previous_period_average=prev_avg,
-        trend=trend, delta=delta, delta_pct=delta_pct,
+        trend=trend, direction=direction, interpretation=interpretation,
+        interpretation_reason=reason,
+        delta=delta, delta_pct=delta_pct,
+        comparison=_build_comparison(series, end_date),
         record_count=count, earliest_date=earliest, latest_date=latest,
         baselines=_personal_baselines(series, end_date),
         series_available=True, lower_is_better=lower_is_better,
@@ -807,6 +1097,7 @@ def goal_progress_v2(
     trends=None,
     body_progress=None,
     whoop_rows=None,
+    steps_rows=None,
     v1=None,
 ):
     if goal is None:
@@ -830,6 +1121,14 @@ def goal_progress_v2(
             whoop_rows = _load_whoop_daily()
         except Exception:
             whoop_rows = []
+    if steps_rows is None:
+        steps_rows = _load_apple_steps()
+    steps_series = [
+        {"date": _parse_date(p["date"]), "value": p["value"]}
+        for p in (steps_rows or [])
+        if p.get("value") is not None
+    ]
+    phase_name = goal.get("phase")
 
     phase_start_date = None
     if goal.get("phase_start_date"):
@@ -852,6 +1151,7 @@ def goal_progress_v2(
             hist_hume=hume_hist.get("weight"),
             hist_fitdays=fitdays_hist.get("weight"),
             phase_start_date=phase_start_date, lower_is_better=True,
+            phase=phase_name,
         ),
         "body_fat": _outcome_metric(
             name="body_fat", display_name="Body Fat", unit="percent",
@@ -859,6 +1159,7 @@ def goal_progress_v2(
             hist_hume=hume_hist.get("body_fat_percentage"),
             hist_fitdays=fitdays_hist.get("body_fat_percentage"),
             phase_start_date=phase_start_date, lower_is_better=True,
+            phase=phase_name,
         ),
         "fat_mass": _outcome_metric(
             name="fat_mass", display_name="Fat Mass", unit="lb",
@@ -866,6 +1167,7 @@ def goal_progress_v2(
             hist_hume=hume_hist.get("fat_mass"),
             hist_fitdays=fitdays_hist.get("fat_mass"),
             phase_start_date=phase_start_date, lower_is_better=True,
+            phase=phase_name,
         ),
         "lean_mass": _outcome_metric(
             name="lean_mass", display_name="Lean Body Mass", unit="lb",
@@ -873,12 +1175,13 @@ def goal_progress_v2(
             hist_hume=hume_hist.get("lean_mass"),
             hist_fitdays=fitdays_hist.get("lean_mass"),
             phase_start_date=phase_start_date, lower_is_better=False,
+            phase=phase_name,
         ),
     }
 
     whoop_end = _today_eastern()
     drivers = {
-        "steps": _steps_driver(trends, goal, whoop_end),
+        "steps": _steps_driver(steps_series, goal, whoop_end),
         "strength": _strength_driver(goal),
         "sleep": _whoop_metric_driver_or_physio(
             name="sleep_duration", display_name="Sleep Duration", unit="hours",
@@ -889,29 +1192,35 @@ def goal_progress_v2(
             "metric": "hydration", "display_name": "Hydration",
             "unit": "L/day", "status": "unavailable",
             "preferred_source": "Apple Health / manual",
-            "source": None, "source_label": None,
+            "source": None, "source_label": None, "source_short": None,
             "note": (
                 "No reliable actual hydration intake is connected. Prescribed "
                 "hydration targets are not shown as consumption."
             ),
             "trend": "insufficient_data",
+            "direction": "insufficient_data",
+            "interpretation": "insufficient_data",
         },
         "calories": {
             "metric": "calories", "display_name": "Calories",
             "unit": "kcal/day", "status": "not_connected",
             "preferred_source": "Nutrition integration (future)",
-            "source": None, "source_label": None,
+            "source": None, "source_label": None, "source_short": None,
             "note": "Actual calorie intake is not connected.",
             "trend": "insufficient_data",
+            "direction": "insufficient_data",
+            "interpretation": "insufficient_data",
         },
         "protein": {
             "metric": "protein", "display_name": "Protein",
             "unit": "g/day", "status": "not_connected",
             "preferred_source": "Nutrition integration (future)",
-            "source": None, "source_label": None,
+            "source": None, "source_label": None, "source_short": None,
             "target_grams_per_day": goal.get("protein_target_grams"),
             "note": "Actual protein intake is not connected.",
             "trend": "insufficient_data",
+            "direction": "insufficient_data",
+            "interpretation": "insufficient_data",
         },
     }
     # sleep-performance is a supporting reading on the sleep card
@@ -944,14 +1253,18 @@ def goal_progress_v2(
         ),
         "vo2_max": {
             "metric": "vo2_max", "display_name": "VO2 Max",
-            "unit": "ml/kg/min", "status": "insufficient_history",
+            "unit": "ml/kg/min", "status": "unavailable",
             "preferred_source": "Apple Health",
-            "source": None, "source_label": None,
+            "source": None, "source_label": None, "source_short": None,
             "note": (
-                "No VO2 max history is stored in the current Development "
-                "architecture."
+                "VO2 max is not collected by the current Apple Health sync "
+                "(the app reads body mass, body fat, lean mass, steps and "
+                "active energy). WHOOP does not expose VO2 max via its public "
+                "API, so no fallback is used."
             ),
             "trend": "insufficient_data",
+            "direction": "insufficient_data",
+            "interpretation": "insufficient_data",
         },
     }
 
@@ -989,14 +1302,11 @@ def goal_progress_v2(
             "fitdays_record_count": len(fd),
         }
     for key, column in (
-        ("steps", None),
         ("hrv", "hrv_rmssd_milli"),
         ("resting_heart_rate", "resting_heart_rate"),
         ("recovery", "recovery_score"),
         ("sleep_duration", "sleep_duration_hours"),
     ):
-        if key == "steps":
-            continue
         series = _whoop_series(whoop_rows, column)
         e, l, c = _series_bounds(series)
         historical_context[key] = {
@@ -1010,6 +1320,23 @@ def goal_progress_v2(
             "earliest_date": _iso(e),
             "latest_date": _iso(l),
         }
+
+    # Steps history is its own source (Apple Health), never phase-truncated.
+    se, sl, sc = _series_bounds(steps_series)
+    historical_context["steps"] = {
+        "preferred_source": "Apple Health",
+        "windows": (
+            _historical_windows(steps_series, steps_series[-1]["date"])
+            if steps_series else {}
+        ),
+        "series": [
+            {"date": p["date"].isoformat(), "value": _round(p["value"], 0)}
+            for p in steps_series
+        ],
+        "record_count": sc,
+        "earliest_date": _iso(se),
+        "latest_date": _iso(sl),
+    }
 
     timeline = _goal_timeline(goal, outcomes["weight"])
 

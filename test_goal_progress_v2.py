@@ -146,16 +146,27 @@ def _strength(status="target_met", sessions=4, target=4):
     }
 
 
+def _steps_rows(days=120, *, start=6000, per_day=20.0, end=None):
+    end = end or (TODAY - timedelta(days=1))
+    return [
+        {"date": (end - timedelta(days=days - 1 - i)),
+         "value": round(start + per_day * i)}
+        for i in range(days)
+    ]
+
+
 def _run(goal, body_progress, whoop_rows, *, trends=None, v1=None,
-         strength=None):
+         strength=None, steps_rows=None):
     trends = trends or _trends()
     v1 = v1 or _v1()
     strength = strength or _strength()
+    if steps_rows is None:
+        steps_rows = _steps_rows()
     with patch.object(v2, "strength_adherence", lambda t: strength), \
          patch.object(v2, "goal_progress", lambda **kw: v1):
         return v2.goal_progress_v2(
             goal=goal, trends=trends, body_progress=body_progress,
-            whoop_rows=whoop_rows, v1=v1,
+            whoop_rows=whoop_rows, steps_rows=steps_rows, v1=v1,
         )
 
 
@@ -214,10 +225,43 @@ class SourceHierarchyTests(unittest.TestCase):
         self.assertEqual(res["drivers"]["steps"]["source"], "Apple Health")
         self.assertEqual(res["drivers"]["steps"]["status"], "ok")
 
-    def test_steps_insufficient_history_when_few_days(self):
-        res = _run(_goal(), self._standard_body(), _whoop_rows(),
-                   trends=_trends(steps_7=None, days_7=1))
+    def test_steps_no_recent_days_but_history_exists_is_still_ok(self):
+        # last 7 days empty, but weeks of older step data -> classify on the
+        # longer window, not "insufficient_history".
+        rows = _steps_rows(days=60, start=7000, per_day=10,
+                           end=TODAY - timedelta(days=10))
+        res = _run(_goal(), self._standard_body(), _whoop_rows(), steps_rows=rows)
+        s = res["drivers"]["steps"]
+        self.assertEqual(s["status"], "ok")
+        self.assertIn("sparse", (s["note"] or "").lower())
+
+    def test_steps_insufficient_history_when_few_total_days(self):
+        rows = _steps_rows(days=2, start=800, per_day=0,
+                           end=TODAY - timedelta(days=1))
+        res = _run(_goal(), self._standard_body(), _whoop_rows(), steps_rows=rows)
         self.assertEqual(res["drivers"]["steps"]["status"], "insufficient_history")
+
+    def test_steps_percentage_only_present_when_usable(self):
+        rows = _steps_rows(days=2, start=800, per_day=0)
+        res = _run(_goal(), self._standard_body(), _whoop_rows(), steps_rows=rows)
+        s = res["drivers"]["steps"]
+        self.assertNotEqual(s["status"], "ok")
+        # no misleading "9%"-style number next to an unusable state
+        self.assertIsNone(s.get("percentage_of_target"))
+
+    def test_steps_history_not_phase_truncated(self):
+        rows = _steps_rows(days=200, start=5000, per_day=15,
+                           end=TODAY - timedelta(days=1))
+        res = _run(_goal(phase_start_days_ago=20), self._standard_body(),
+                   _whoop_rows(), steps_rows=rows)
+        hc = res["historical_context"]["steps"]
+        self.assertEqual(hc["record_count"], 200)
+        self.assertLess(
+            date.fromisoformat(hc["earliest_date"]),
+            date.fromisoformat(res["phase_detail"]["phase_start_date"]),
+        )
+        for k in ("7D", "14D", "30D", "90D", "6M", "1Y"):
+            self.assertIn(k, hc["windows"])
 
     def test_strength_reuses_tonal_adherence_and_labels_source(self):
         res = _run(_goal(), self._standard_body(), _whoop_rows(),
@@ -243,9 +287,13 @@ class SourceHierarchyTests(unittest.TestCase):
         res = _run(_goal(), self._standard_body(), _whoop_rows(days=3))
         self.assertEqual(res["physiology"]["hrv"]["status"], "insufficient_history")
 
-    def test_vo2_max_returns_typed_insufficient_state_not_failure(self):
+    def test_vo2_max_is_apple_sourced_and_unavailable_not_failure(self):
         res = _run(_goal(), self._standard_body(), _whoop_rows())
-        self.assertEqual(res["physiology"]["vo2_max"]["status"], "insufficient_history")
+        v = res["physiology"]["vo2_max"]
+        self.assertEqual(v["preferred_source"], "Apple Health")
+        self.assertEqual(v["status"], "unavailable")
+        self.assertIsNone(v["source"])          # no WHOOP fallback
+        self.assertIn("whoop does not expose", (v["note"] or "").lower())
 
     def test_hydration_is_unavailable_not_target_as_consumption(self):
         res = _run(_goal(), self._standard_body(), _whoop_rows())
@@ -485,6 +533,198 @@ class BackwardCompatTests(unittest.TestCase):
             res = v2.goal_progress_v2(goal=None)
         self.assertEqual(res["status"], "no_active_goal")
         self.assertEqual(res["version"], 2)
+
+
+# ============================================================
+# V2.1 - DIRECTION vs INTERPRETATION SEMANTICS
+# ============================================================
+
+class SemanticInterpretationTests(unittest.TestCase):
+    """`direction` is the raw movement; `interpretation` applies goal context
+    and drives colour. Reuse deterministic bands so noise stays neutral."""
+
+    def _standard_body(self, **kw):
+        return _body_progress(
+            hume_weight=_lin_series(45, start=190.0, per_day=-0.05),
+            hume_bf=_lin_series(45, start=22.0, per_day=-0.02),
+            hume_fm=_lin_series(45, start=41.8, per_day=-0.05),
+            hume_lm=_lin_series(45, start=148.0, per_day=0.0),
+            **kw,
+        )
+
+    def _phys(self, metric, per_day, **kw):
+        kwargs = {"hrv_per_day": 0.0, "rhr_per_day": 0.0,
+                  "recovery_per_day": 0.0, "sleep_per_day": 0.0}
+        kwargs[f"{metric}_per_day"] = per_day
+        kwargs.update(kw)
+        return _whoop_rows(days=60, **kwargs)
+
+    # ---- HRV ----
+    def test_hrv_increase_is_favorable(self):
+        res = _run(_goal(), self._standard_body(),
+                   self._phys("hrv", 0.4, hrv0=45.0))
+        h = res["physiology"]["hrv"]
+        self.assertEqual(h["direction"], "increasing")
+        self.assertEqual(h["interpretation"], "favorable")
+
+    def test_hrv_decline_is_unfavorable(self):
+        res = _run(_goal(), self._standard_body(),
+                   self._phys("hrv", -0.5, hrv0=80.0))
+        h = res["physiology"]["hrv"]
+        self.assertEqual(h["direction"], "decreasing")
+        self.assertEqual(h["interpretation"], "unfavorable")
+
+    # ---- Resting HR ----
+    def test_rhr_decline_is_favorable(self):
+        res = _run(_goal(), self._standard_body(),
+                   self._phys("rhr", -0.15, rhr0=62.0))
+        r = res["physiology"]["resting_heart_rate"]
+        self.assertEqual(r["direction"], "decreasing")
+        self.assertEqual(r["interpretation"], "favorable")
+
+    def test_rhr_increase_is_unfavorable(self):
+        res = _run(_goal(), self._standard_body(),
+                   self._phys("rhr", 0.15, rhr0=48.0))
+        r = res["physiology"]["resting_heart_rate"]
+        self.assertEqual(r["direction"], "increasing")
+        self.assertEqual(r["interpretation"], "unfavorable")
+
+    # ---- Recovery ----
+    def test_recovery_flat_is_neutral(self):
+        res = _run(_goal(), self._standard_body(),
+                   self._phys("recovery", 0.0, rec0=60.0))
+        rc = res["physiology"]["recovery"]
+        self.assertEqual(rc["direction"], "flat")
+        self.assertEqual(rc["interpretation"], "neutral")
+
+    # ---- Body comp in a Lean Cut ----
+    def test_body_fat_decline_in_lean_cut_is_favorable(self):
+        res = _run(_goal(),
+                   _body_progress(
+                       hume_weight=_lin_series(45, start=190.0, per_day=-0.05),
+                       hume_bf=_lin_series(45, start=22.0, per_day=-0.03),
+                       hume_fm=_lin_series(45, start=41.8, per_day=-0.05),
+                       hume_lm=_lin_series(45, start=148.0, per_day=0.0)),
+                   _whoop_rows())
+        b = res["outcomes"]["body_fat"]
+        self.assertEqual(b["direction"], "decreasing")
+        self.assertEqual(b["interpretation"], "favorable")
+
+    def test_fat_mass_decline_in_lean_cut_is_favorable(self):
+        res = _run(_goal(),
+                   _body_progress(
+                       hume_weight=_lin_series(45, start=190.0, per_day=-0.06),
+                       hume_bf=_lin_series(45, start=22.0, per_day=-0.02),
+                       hume_fm=_lin_series(45, start=41.8, per_day=-0.06),
+                       hume_lm=_lin_series(45, start=148.0, per_day=0.0)),
+                   _whoop_rows())
+        f = res["outcomes"]["fat_mass"]
+        self.assertEqual(f["direction"], "decreasing")
+        self.assertEqual(f["interpretation"], "favorable")
+
+    def test_lean_mass_meaningful_decline_is_unfavorable(self):
+        res = _run(_goal(),
+                   _body_progress(
+                       hume_weight=_lin_series(45, start=190.0, per_day=-0.15),
+                       hume_bf=_lin_series(45, start=22.0, per_day=-0.005),
+                       hume_fm=_lin_series(45, start=41.8, per_day=-0.10),
+                       hume_lm=_lin_series(45, start=148.0, per_day=-0.05)),
+                   _whoop_rows())
+        lm = res["outcomes"]["lean_mass"]
+        self.assertEqual(lm["direction"], "decreasing")
+        self.assertEqual(lm["interpretation"], "unfavorable")
+
+    def test_weight_interpretation_respects_goal_trajectory(self):
+        # Lean cut -> goal_direction decrease -> a clear weight drop = favorable
+        res = _run(_goal(),
+                   _body_progress(
+                       hume_weight=_lin_series(45, start=192.0, per_day=-0.14),
+                       hume_bf=_lin_series(45, start=22.0, per_day=-0.02),
+                       hume_fm=_lin_series(45, start=41.8, per_day=-0.10),
+                       hume_lm=_lin_series(45, start=148.0, per_day=0.0)),
+                   _whoop_rows())
+        w = res["outcomes"]["weight"]
+        self.assertEqual(w["direction"], "decreasing")
+        self.assertEqual(w["interpretation"], "favorable")
+
+    def test_weight_up_during_lean_cut_is_unfavorable(self):
+        res = _run(_goal(),
+                   _body_progress(
+                       hume_weight=_lin_series(45, start=185.0, per_day=0.08),
+                       hume_bf=_lin_series(45, start=21.0, per_day=0.01),
+                       hume_fm=_lin_series(45, start=39.0, per_day=0.06),
+                       hume_lm=_lin_series(45, start=146.0, per_day=0.0)),
+                   _whoop_rows())
+        w = res["outcomes"]["weight"]
+        self.assertEqual(w["direction"], "increasing")
+        self.assertEqual(w["interpretation"], "unfavorable")
+
+    def test_flat_change_stays_neutral(self):
+        res = _run(_goal(),
+                   _body_progress(
+                       hume_weight=_lin_series(45, start=185.0, per_day=0.0),
+                       hume_bf=_lin_series(45, start=21.0, per_day=0.0),
+                       hume_fm=_lin_series(45, start=39.0, per_day=0.0),
+                       hume_lm=_lin_series(45, start=146.0, per_day=0.0)),
+                   self._phys("hrv", 0.0, hrv0=60.0))
+        self.assertEqual(res["outcomes"]["weight"]["interpretation"], "neutral")
+        self.assertEqual(res["physiology"]["hrv"]["interpretation"], "neutral")
+
+    def test_insignificant_change_does_not_trigger_adverse(self):
+        # tiny HRV drop within the 4% band -> flat / neutral, not unfavorable
+        res = _run(_goal(), self._standard_body(),
+                   self._phys("hrv", -0.01, hrv0=60.0))
+        h = res["physiology"]["hrv"]
+        self.assertEqual(h["direction"], "flat")
+        self.assertEqual(h["interpretation"], "neutral")
+
+    def test_start_current_delta_are_internally_consistent(self):
+        res = _run(_goal(), self._standard_body(), _whoop_rows())
+        for sec in ("outcomes",):
+            for m in res[sec].values():
+                c = m.get("comparison")
+                if not c:
+                    continue
+                self.assertAlmostEqual(
+                    c["current_value"] - c["start_value"],
+                    c["absolute_change"], places=1,
+                )
+
+    def test_source_provenance_survives_simplification(self):
+        body = _body_progress(
+            hume_weight=_lin_series(40, start=190.0, per_day=-0.1),
+            hume_bf=_lin_series(40, start=22.0, per_day=-0.02),
+            hume_fm=_lin_series(40, start=41.8, per_day=-0.1),
+            hume_lm=_lin_series(40, start=148.0, per_day=0.0),
+            fitdays_weight=_lin_series(200, start=205.0, per_day=-0.02),
+        )
+        res = _run(_goal(), body, _whoop_rows())
+        w = res["outcomes"]["weight"]
+        self.assertEqual(w["source_short"], "Hume")
+        self.assertEqual(w["history_source"], "Fitdays")
+        # full provenance still present
+        self.assertIn("Fitdays before", w["source_label"])
+
+    def test_intelligence_consumes_interpretation_hrv_down_rhr_up(self):
+        rows = _whoop_rows(days=60, hrv_per_day=-0.5, hrv0=80.0,
+                           rhr_per_day=0.15, rhr0=48.0)
+        res = _run(_goal(phase_start_days_ago=30), self._standard_body(), rows)
+        joined = " ".join(
+            res["intelligence"]["constraints"] + res["intelligence"]["hypotheses"]
+        ).lower()
+        self.assertIn("resting heart rate up", joined)
+
+    def test_sleep_history_not_phase_truncated(self):
+        res = _run(_goal(phase_start_days_ago=20), self._standard_body(),
+                   _whoop_rows(days=200))
+        hc = res["historical_context"]["sleep_duration"]
+        self.assertGreaterEqual(hc["record_count"], 150)
+        self.assertLess(
+            date.fromisoformat(hc["earliest_date"]),
+            date.fromisoformat(res["phase_detail"]["phase_start_date"]),
+        )
+        for k in ("7D", "14D", "30D", "90D", "6M", "1Y"):
+            self.assertIn(k, hc["windows"])
 
 
 if __name__ == "__main__":
