@@ -149,5 +149,85 @@ class WeeklySourceFreshnessTests(unittest.TestCase):
         self.assertIsNone(marker["source_updated_at"])
 
 
+# ============================================================
+# WHOOP morning freshness is independent of Hume / body composition
+# ============================================================
+
+class _RecordingCursor:
+    def __init__(self, row):
+        self._row = row
+        self.sql = []
+
+    def execute(self, sql, *args, **kwargs):
+        self.sql.append(sql)
+        return None
+
+    def fetchone(self):
+        return self._row
+
+
+@contextmanager
+def _recording_conn(row, holder):
+    cur = _RecordingCursor(row)
+    holder.append(cur)
+
+    class _Conn:
+        @contextmanager
+        def cursor(self):
+            yield cur
+
+    yield _Conn()
+
+
+class HumeIndependenceTests(unittest.TestCase):
+    """WHOOP Today freshness must never depend on a Hume body-composition
+    measurement. The physiological-day rule is: a complete WHOOP main sleep
+    AND a WHOOP recovery for that day - nothing else.
+    """
+
+    def test_source_freshness_query_touches_only_whoop_daily_metrics(self):
+        holder = []
+        row = {
+            "metric_date": date(2026, 9, 7),
+            "source_updated_at": datetime(2026, 9, 7, 10, 24, tzinfo=timezone.utc),
+            "generated_at": datetime(2026, 9, 7, 10, 55, tzinfo=timezone.utc),
+        }
+        with patch.object(freshness, "get_conn",
+                          lambda: _recording_conn(row, holder)):
+            freshness.daily_source_freshness()
+
+        sql = " ".join(holder[0].sql).lower()
+        self.assertIn("from whoop_daily_metrics", sql)
+        self.assertIn("has_recovery = true", sql)
+        self.assertIn("has_sleep = true", sql)
+        for forbidden in ("apple_health_body_samples", "hume", "fitdays",
+                          "body_composition", "lean_body_mass", "body_fat"):
+            self.assertNotIn(forbidden, sql)
+
+    def test_today_becomes_fresh_from_whoop_alone_with_no_hume(self):
+        # The fake row models a DB that has today's complete WHOOP physiology
+        # and NOTHING else - in particular no Hume measurement today.
+        row = {
+            "metric_date": date(2026, 9, 7),
+            "source_updated_at": datetime(2026, 9, 7, 10, 24, tzinfo=timezone.utc),
+            "generated_at": datetime(2026, 9, 7, 10, 55, tzinfo=timezone.utc),
+        }
+        now = datetime(2026, 9, 7, 15, 0, tzinfo=timezone.utc)  # 11:00 EDT
+        with _patch_conn(row):
+            status = freshness.freshness_status(now_utc=now)
+
+        self.assertEqual(status["status"], "fresh")
+        self.assertTrue(status["can_generate_current_recommendation"])
+        self.assertEqual(status["latest_physiology_date"], "2026-09-07")
+        self.assertEqual(status["age_days"], 0)
+
+    def test_no_freshness_symbol_references_a_body_composition_source(self):
+        import inspect
+        src = inspect.getsource(freshness).lower()
+        for forbidden in ("apple_health_body_samples", "hume", "fitdays",
+                          "body_composition"):
+            self.assertNotIn(forbidden, src)
+
+
 if __name__ == "__main__":
     unittest.main()
