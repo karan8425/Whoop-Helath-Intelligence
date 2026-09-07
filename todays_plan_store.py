@@ -15,7 +15,9 @@ TABLE_NAME = "todays_plan_cache"
 # 3 -> 4: the B2 training card now carries the dose_diagnostics payload,
 # which a v3 row cached between the engine deploy and the pass-through
 # deploy would lack. Bumping forces a clean rebuild of the full B2 shape.
-PLAN_VERSION = 4
+# 4 -> 5: B3 adds exercise-level rep/load/RIR/rest/progression semantics and
+# body-composition strategy; cached v4 plans must be rebuilt to expose them.
+PLAN_VERSION = 5
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"

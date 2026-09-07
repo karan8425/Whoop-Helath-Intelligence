@@ -12,6 +12,10 @@ from integrations.tonal.training_priority import (
 )
 
 from integrations.tonal import training_dose
+from integrations.tonal import progressive_overload
+from body_composition_strategy import classify as classify_body_strategy
+from body_composition_progress import body_composition_progress
+from goal_contract import get_goal_contract
 
 
 # ============================================================
@@ -1311,6 +1315,12 @@ def _prescribe_exercise(
         or {}
     )
 
+    b3 = progressive_overload.prescribe(
+        profile,
+        readiness_band,
+        set_count,
+    )
+
     (
         weight,
         progression_applied,
@@ -1479,12 +1489,12 @@ def _prescribe_exercise(
 
     estimated_volume = None
 
-    if weight is not None:
+    if b3["target_resistance_lb"] is not None:
 
         estimated_volume = (
-            weight
-            * reps
-            * set_count
+            b3["target_resistance_lb"]
+            * b3["target_reps_per_set"]
+            * b3["sets"]
         )
 
     return {
@@ -1518,20 +1528,42 @@ def _prescribe_exercise(
             ),
 
         "sets":
-            set_count,
+            b3["sets"],
 
         "reps_per_set":
-            reps,
+            b3["target_reps_per_set"],
 
         "target_weight_lb":
-            weight,
+            b3["target_resistance_lb"],
 
         "target_rir":
-            SESSION_RULES[
-                readiness_band
-            ][
-                "target_rir"
-            ],
+            (
+                f"{b3['target_rir']['minimum']}-{b3['target_rir']['maximum']}"
+                if b3["target_rir"]["minimum"] != b3["target_rir"]["maximum"]
+                else str(b3["target_rir"]["minimum"])
+            ),
+
+        # Training-B3 additive contract. Existing scalar fields above remain
+        # available to older cached/mobile clients.
+        "primary_muscles": (profile.get("muscle_groups") or [])[:1],
+        "secondary_muscles": (profile.get("muscle_groups") or [])[1:],
+        "rep_range": b3["rep_range"],
+        "rir_range": b3["target_rir"],
+        "rest_seconds": b3["rest_seconds"],
+        "progression_state": b3["progression_state"],
+        "progression_label": b3["progression_label"],
+        "progression_target": b3["progression_target"],
+        "performance_trajectory": b3["trajectory"],
+        "progression_confidence": b3["confidence"],
+        "comparable_performance": b3["comparable_performance"],
+        "b3_rationale": b3["rationale"],
+        "prescribed": {
+            "resistance_lb": b3["target_resistance_lb"],
+            "sets": b3["sets"],
+            "rep_range": b3["rep_range"],
+            "rir_range": b3["target_rir"],
+        },
+        "actual": None,
 
         "estimated_volume":
             (
@@ -1554,7 +1586,7 @@ def _prescribe_exercise(
             overload_method,
 
         "progression_reason":
-            progression_reason,
+            b3["rationale"],
 
         "next_progression_option":
             next_progression,
@@ -1925,6 +1957,36 @@ def build_daily_workout_prescription(now=None):
         )
     )
 
+    try:
+        goal = get_goal_contract()
+        body_progress = body_composition_progress()
+        hume_history = (body_progress.get("historical_context") or {}).get("hume") or {}
+        body_strategy = classify_body_strategy(goal, hume_history)
+    except Exception:
+        goal = {"status": "unavailable"}
+        body_strategy = classify_body_strategy(goal, {})
+
+    dose_ratio = (total_sets / dose_target_sets) if dose_target_sets else 0
+    if dose_target_sets and dose_ratio > 1.15:
+        dose_classification = "EXCESSIVE"
+    elif readiness_band == "high" and dose_ratio >= 0.9:
+        dose_classification = "HIGH_PRODUCTIVE_DOSE"
+    elif dose_ratio < 0.7:
+        dose_classification = "LOW_DOSE"
+    else:
+        dose_classification = "NORMAL_DOSE"
+    # Final guardrail: a prescription cannot leave the engine excessive.
+    if dose_classification == "EXCESSIVE":
+        raise RuntimeError("B3 volume guardrail invariant failed")
+
+    high_value_opportunity = bool(
+        readiness_band == "high"
+        and target_muscles
+        and all(muscle_readiness_by_name.get(m, {}).get("readiness_state") in ("READY", "FRESH") for m in target_muscles)
+        and not dose_limited_by
+        and dose_classification == "HIGH_PRODUCTIVE_DOSE"
+    )
+
     return {
         "status":
             "ok",
@@ -2015,6 +2077,28 @@ def build_daily_workout_prescription(now=None):
 
             "exercises":
                 exercises,
+
+            "training_b3": {
+                "objective": "LEAN_TISSUE_PRESERVATION_AND_HYPERTROPHY",
+                "opportunity_state": (
+                    "HIGH_VALUE_HYPERTROPHY_OPPORTUNITY" if high_value_opportunity else "STANDARD_PRODUCTIVE_SESSION"
+                ),
+                "dose_classification": dose_classification,
+                "systemic_capacity": readiness_band.upper(),
+                "body_composition_strategy": body_strategy,
+                "goal_contract": {
+                    "status": goal.get("status"),
+                    "goal_type": goal.get("goal_type"),
+                    "compatibility": (goal.get("target") or {}).get("compatibility"),
+                },
+                "regional_fat_drives_muscle_selection": False,
+                "prescription_actual_matching": "available_for_future_reliable_match",
+                "rationale": (
+                    "Target muscles are well recovered, systemic recovery supports the upper personalized dose, and recent volume leaves room for productive work."
+                    if high_value_opportunity else
+                    "Movement selection follows muscle readiness; systemic capacity adjusts dose, RIR, and progression aggressiveness."
+                ),
+            },
 
             # Training-B2: additive diagnostics. Existing fields above are
             # untouched in shape, so this is backward compatible with the

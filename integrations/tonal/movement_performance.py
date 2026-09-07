@@ -1030,6 +1030,10 @@ def build_movement_performance_profiles():
         profile = {
             **meta,
 
+            # Request-scoped, already-batched comparable history for B3.  It is
+            # intentionally capped and contains aggregate performance only.
+            "recent_sessions": sessions[:MAX_RECENT_SESSIONS],
+
             "history": {
                 "sessions_in_lookback":
                     len(
