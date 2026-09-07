@@ -727,5 +727,76 @@ class SemanticInterpretationTests(unittest.TestCase):
             self.assertIn(k, hc["windows"])
 
 
+# ============================================================
+# Goal Setting V2 -> Goal Progress timeline integration
+# ============================================================
+
+class GoalProgressTimelineFromV2GoalTests(unittest.TestCase):
+
+    def _body(self):
+        return _body_progress(
+            hume_weight=_lin_series(40, start=190.0, per_day=-0.1),
+            hume_bf=_lin_series(40, start=22.0, per_day=-0.02),
+            hume_fm=_lin_series(40, start=41.8, per_day=-0.1),
+            hume_lm=_lin_series(40, start=148.0, per_day=0.0),
+        )
+
+    def test_activated_v2_goal_makes_timeline_configured(self):
+        target_date = _iso(TODAY + timedelta(days=90))
+        goal = _goal(
+            phase_start_days_ago=28,
+            target_date=target_date,
+            selected_pace="comfortable",
+            expected_weekly_weight_change_lb=-0.7,
+            timeline_status="configured",
+            goal_version=2,
+        )
+        res = _run(goal, self._body(), _whoop_rows())
+        tl = res["goal_timeline"]
+        self.assertEqual(tl["timeline_status"], "configured")
+        self.assertEqual(tl["goal_deadline"], target_date)
+        self.assertEqual(tl["selected_pace"], "comfortable")
+        # uses the persisted selected pace, not a re-derived rate
+        self.assertEqual(tl["required_weekly_weight_change_lb"], -0.7)
+
+    def test_outside_supported_range_is_carried_through(self):
+        goal = _goal(
+            phase_start_days_ago=14,
+            target_date=_iso(TODAY + timedelta(days=120)),
+            aspirational_target_date=_iso(TODAY + timedelta(days=20)),
+            selected_pace="recommended",
+            expected_weekly_weight_change_lb=-0.9,
+            timeline_status="outside_supported_range",
+            goal_version=2,
+        )
+        res = _run(goal, self._body(), _whoop_rows())
+        tl = res["goal_timeline"]
+        self.assertEqual(tl["timeline_status"], "outside_supported_range")
+        self.assertEqual(
+            tl["aspirational_target_date"], _iso(TODAY + timedelta(days=20))
+        )
+
+    def test_legacy_goal_with_only_phase_end_still_configures(self):
+        goal = _goal(phase_start_days_ago=28,
+                     phase_end=_iso(TODAY + timedelta(days=60)))
+        res = _run(goal, self._body(), _whoop_rows())
+        self.assertEqual(res["goal_timeline"]["timeline_status"], "configured")
+
+    def test_no_deadline_still_not_configured(self):
+        res = _run(_goal(), self._body(), _whoop_rows())
+        self.assertEqual(
+            res["goal_timeline"]["timeline_status"], "not_configured"
+        )
+
+    def test_v2_goal_preserves_all_six_history_windows_and_phase_day(self):
+        goal = _goal(phase_start_days_ago=20,
+                     target_date=_iso(TODAY + timedelta(days=90)),
+                     timeline_status="configured", goal_version=2)
+        res = _run(goal, self._body(), _whoop_rows(days=200))
+        self.assertEqual(res["phase_detail"]["phase_day"], 21)
+        for k in ("7D", "14D", "30D", "90D", "6M", "1Y"):
+            self.assertIn(k, res["historical_context"]["weight"]["windows"])
+
+
 if __name__ == "__main__":
     unittest.main()

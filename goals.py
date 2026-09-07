@@ -1,6 +1,28 @@
 from datetime import datetime, timezone
 
 from db import get_conn
+import goal_pace_config as pace_cfg
+import goal_timeline_engine as timeline_engine
+
+
+KG_TO_LB = 2.2046226218
+
+# Additive columns for the Goal Setting V2 timeline contract. Every column is
+# nullable / default-safe so existing (V1) goal rows keep working unchanged.
+_V2_COLUMNS = (
+    ("goal_type", "TEXT"),
+    ("lean_mass_priority", "TEXT"),
+    ("phase_start_fat_mass_lb", "DOUBLE PRECISION"),
+    ("phase_start_lean_mass_lb", "DOUBLE PRECISION"),
+    ("target_fat_mass_lb", "DOUBLE PRECISION"),
+    ("target_lean_mass_lb", "DOUBLE PRECISION"),
+    ("target_date", "DATE"),
+    ("aspirational_target_date", "DATE"),
+    ("selected_pace", "TEXT"),
+    ("expected_weekly_weight_change_lb", "DOUBLE PRECISION"),
+    ("timeline_status", "TEXT"),
+    ("goal_version", "INTEGER NOT NULL DEFAULT 1"),
+)
 
 
 DDL = """
@@ -57,6 +79,12 @@ def init_goal_profiles():
                 TIMESTAMPTZ
             """)
 
+            for _col, _type in _V2_COLUMNS:
+                cur.execute(
+                    "ALTER TABLE health_goal_profiles "
+                    f"ADD COLUMN IF NOT EXISTS {_col} {_type}"
+                )
+
             cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS
                 idx_health_goal_profiles_one_active
@@ -74,6 +102,8 @@ def _serialize(row):
     for key in (
         "phase_start_date",
         "phase_end_date",
+        "target_date",
+        "aspirational_target_date",
     ):
         if result.get(key):
             result[key] = result[key].isoformat()
@@ -461,3 +491,269 @@ def backfill_active_goal_start_snapshot():
                     cur.fetchone()
                 ),
             }
+
+
+# ============================================================
+# GOAL SETTING V2 - preview + activation
+# ============================================================
+
+ALLOWED_GOAL_TYPES = set(pace_cfg.GOAL_TYPE_TO_PHASE.keys())
+ALLOWED_LEAN_MASS_PRIORITIES = {"preserve_build", "balanced", "faster"}
+
+
+def _derived(weight_lb, body_fat_pct):
+    if weight_lb is None or body_fat_pct is None:
+        return None, None
+    fat = float(weight_lb) * float(body_fat_pct) / 100.0
+    return round(fat, 1), round(float(weight_lb) - fat, 1)
+
+
+def current_body_state():
+    """Latest reliable (Hume) body-composition state for the goal flow.
+
+    Reuses the same source rule as phase-start snapshots. fat/lean mass are
+    derived from the matched Hume weight + body fat (same rule as elsewhere).
+    """
+
+    snap = _latest_hume_start_snapshot()
+    w = snap.get("phase_start_weight_lb")
+    bf = snap.get("phase_start_body_fat_percentage")
+    fat_mass, lean_mass = _derived(w, bf)
+
+    available = w is not None and bf is not None
+    return {
+        "status": "ok" if available else "unavailable",
+        "source": "Hume",
+        "weight_lb": round(w, 1) if w is not None else None,
+        "body_fat_percentage": round(bf, 2) if bf is not None else None,
+        "fat_mass_lb": fat_mass,
+        "lean_mass_lb": lean_mass,
+        "recorded_at": (
+            snap["phase_start_recorded_at"].isoformat()
+            if snap.get("phase_start_recorded_at") else None
+        ),
+        "message": (
+            None if available
+            else "No reliable Hume weight / body-fat measurement is available "
+                 "yet. Enter your current values to continue."
+        ),
+    }
+
+
+def _resolve_current(payload):
+    """Prefer app-known Hume values; fall back to explicit manual input."""
+
+    state = current_body_state()
+    manual = payload.get("current") or {}
+    w = state["weight_lb"]
+    bf = state["body_fat_percentage"]
+    source = "Hume"
+    if w is None and manual.get("weight_lb") is not None:
+        w = float(manual["weight_lb"])
+        source = "manual"
+    if bf is None and manual.get("body_fat_percentage") is not None:
+        bf = float(manual["body_fat_percentage"])
+        source = "manual" if source == "manual" else "Hume+manual"
+    fat_mass, lean_mass = _derived(w, bf)
+    return {
+        "weight_lb": w, "body_fat_percentage": bf,
+        "fat_mass_lb": fat_mass, "lean_mass_lb": lean_mass,
+        "source": source,
+    }
+
+
+def preview_goal(payload):
+    """Deterministic, read-only. Never touches the active goal."""
+
+    init_goal_profiles()
+
+    goal_type = (payload.get("goal_type") or "").strip().lower()
+    if goal_type not in ALLOWED_GOAL_TYPES:
+        raise ValueError(
+            "goal_type must be one of: "
+            + ", ".join(sorted(ALLOWED_GOAL_TYPES))
+        )
+
+    priority = (
+        payload.get("lean_mass_priority")
+        or pace_cfg.DEFAULT_LEAN_MASS_PRIORITY
+    )
+    if priority not in ALLOWED_LEAN_MASS_PRIORITIES:
+        raise ValueError(
+            "lean_mass_priority must be one of: "
+            + ", ".join(sorted(ALLOWED_LEAN_MASS_PRIORITIES))
+        )
+
+    current = _resolve_current(payload)
+    target = payload.get("target") or {}
+
+    preview = timeline_engine.build_preview(
+        goal_type=goal_type,
+        current=current,
+        target={
+            "target_weight_lb": target.get("target_weight_lb"),
+            "target_body_fat_percentage": target.get("target_body_fat_percentage"),
+        },
+        lean_mass_priority=priority,
+        custom_target_date=payload.get("custom_target_date"),
+    )
+    preview["status"] = "ok"
+    preview["current"]["source"] = current["source"]
+    return preview
+
+
+def activate_goal(payload):
+    """Persist the full V2 goal contract and start the phase atomically.
+
+    Preserves prior phase rows unchanged (only flips is_active / phase_end_date).
+    """
+
+    init_goal_profiles()
+
+    goal_type = (payload.get("goal_type") or "").strip().lower()
+    if goal_type not in ALLOWED_GOAL_TYPES:
+        raise ValueError("Unknown goal_type.")
+
+    phase = pace_cfg.GOAL_TYPE_TO_PHASE[goal_type]
+    priority = (
+        payload.get("lean_mass_priority")
+        or pace_cfg.DEFAULT_LEAN_MASS_PRIORITY
+    )
+    if priority not in ALLOWED_LEAN_MASS_PRIORITIES:
+        raise ValueError("Unknown lean_mass_priority.")
+
+    current = _resolve_current(payload)
+    if current["weight_lb"] is None:
+        raise ValueError(
+            "A current weight is required to activate a goal."
+        )
+
+    target = payload.get("target") or {}
+    target_weight = target.get("target_weight_lb")
+    target_bf = target.get("target_body_fat_percentage")
+
+    if target_weight is not None and not 70 <= float(target_weight) <= 500:
+        raise ValueError("target_weight_lb must be between 70 and 500.")
+    if target_bf is not None and not 3 <= float(target_bf) <= 60:
+        raise ValueError("target_body_fat_percentage must be between 3 and 60.")
+
+    preview = timeline_engine.build_preview(
+        goal_type=goal_type, current=current,
+        target={"target_weight_lb": target_weight,
+                "target_body_fat_percentage": target_bf},
+        lean_mass_priority=priority,
+        custom_target_date=payload.get("custom_target_date"),
+    )
+
+    # Resolve the actionable timeline.
+    selected_pace = (payload.get("selected_pace") or "").strip().lower()
+    timeline_status = "not_configured"
+    target_date = None
+    aspirational_target_date = None
+    expected_weekly = None
+
+    if payload.get("custom_target_date"):
+        custom = preview.get("custom_timeline") or {}
+        status = custom.get("timeline_status")
+        if status == "outside_supported_range":
+            # Keep the aspirational date, but the actionable plan stays on the
+            # recommended date - never a more aggressive prescription.
+            aspirational_target_date = custom.get("chosen_date")
+            rec = preview["timeline_options"].get("recommended") \
+                or next(iter(preview["timeline_options"].values()), None)
+            if rec:
+                target_date = rec["estimated_target_date"]
+                expected_weekly = rec["required_average_weekly_change_lb"]
+            timeline_status = "outside_supported_range"
+            selected_pace = "recommended"
+        elif status in ("comfortable", "recommended", "faster",
+                        "faster_but_supported"):
+            target_date = custom.get("chosen_date")
+            expected_weekly = custom.get("required_weekly_change_lb")
+            timeline_status = "configured"
+            selected_pace = "custom"
+        else:
+            timeline_status = "not_configured"
+    elif selected_pace in ("comfortable", "recommended", "faster"):
+        opt = preview["timeline_options"].get(selected_pace)
+        if opt:
+            target_date = opt["estimated_target_date"]
+            expected_weekly = opt["required_average_weekly_change_lb"]
+            timeline_status = "configured"
+    else:
+        # default to the recommended band
+        band = preview.get("recommended_band")
+        opt = preview["timeline_options"].get(band) if band else None
+        if opt:
+            selected_pace = band
+            target_date = opt["estimated_target_date"]
+            expected_weekly = opt["required_average_weekly_change_lb"]
+            timeline_status = "configured"
+
+    ti = preview["target"]
+    now_date = datetime.now(timezone.utc).date().isoformat()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+
+            # Close the current phase WITHOUT touching its start snapshot.
+            cur.execute("""
+                UPDATE health_goal_profiles
+                SET is_active = FALSE,
+                    phase_end_date = %s::date - INTERVAL '1 day',
+                    updated_at = NOW()
+                WHERE is_active = TRUE
+            """, (now_date,))
+
+            cur.execute("""
+                INSERT INTO health_goal_profiles (
+                    phase, goal_type, lean_mass_priority,
+                    target_body_fat_percentage, target_weight_lb,
+                    target_fat_mass_lb, target_lean_mass_lb,
+                    daily_step_target, strength_sessions_per_week,
+                    protein_target_grams,
+                    phase_start_weight_lb, phase_start_body_fat_percentage,
+                    phase_start_fat_mass_lb, phase_start_lean_mass_lb,
+                    phase_start_recorded_at,
+                    phase_start_date, target_date, aspirational_target_date,
+                    selected_pace, expected_weekly_weight_change_lb,
+                    timeline_status, goal_version, is_active
+                )
+                VALUES (
+                    %s,%s,%s,
+                    %s,%s,
+                    %s,%s,
+                    %s,%s,
+                    %s,
+                    %s,%s,
+                    %s,%s,
+                    NOW(),
+                    %s,%s,%s,
+                    %s,%s,
+                    %s,2,TRUE
+                )
+                RETURNING *
+            """, (
+                phase, goal_type, priority,
+                target_bf, target_weight,
+                ti.get("fat_mass_lb"), ti.get("lean_mass_lb"),
+                payload.get("daily_step_target"),
+                payload.get("strength_sessions_per_week"),
+                payload.get("protein_target_grams"),
+                current["weight_lb"], current["body_fat_percentage"],
+                current["fat_mass_lb"], current["lean_mass_lb"],
+                now_date, target_date, aspirational_target_date,
+                selected_pace or None, expected_weekly,
+                timeline_status,
+            ))
+
+            goal = _serialize(cur.fetchone())
+
+    return {
+        "status": "ok",
+        "goal": goal,
+        "preview": {
+            "compatibility": preview["compatibility"]["state"],
+            "timeline_status": timeline_status,
+        },
+    }

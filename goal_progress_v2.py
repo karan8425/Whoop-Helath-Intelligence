@@ -640,27 +640,32 @@ def _parse_date(value):
 def _goal_timeline(goal, weight_metric):
     """Rate / trajectory / projection.
 
-    The goal profile has no target_date column. If phase_end_date is set we
-    treat it as the goal deadline; otherwise timeline_status is
-    not_configured and no deadline is invented.
+    A Goal Setting V2 goal persists an explicit `target_date` (plus
+    `selected_pace`, `expected_weekly_weight_change_lb`, `timeline_status`).
+    That is used when present. A legacy goal with only `phase_end_date`
+    still works. A goal with neither remains `not_configured` - no deadline
+    is invented.
     """
 
     target_weight = goal.get("target_weight_lb")
     start_weight = goal.get("phase_start_weight_lb")
-    phase_end = goal.get("phase_end_date")
     phase_start = goal.get("phase_start_date")
 
-    if not phase_end:
+    # V2 explicit contract first, then legacy phase_end_date.
+    deadline = goal.get("target_date") or goal.get("phase_end_date")
+    persisted_status = goal.get("timeline_status")
+
+    if not deadline:
         return {
-            "timeline_status": "not_configured",
+            "timeline_status": persisted_status or "not_configured",
             "note": (
-                "No goal deadline is configured. Set phase_end_date to "
-                "enable trajectory projection."
+                "No goal deadline is configured. Set a target date in Goal "
+                "Setting to enable trajectory projection."
             ),
         }
 
     try:
-        end_date = _parse_date(phase_end)
+        end_date = _parse_date(deadline)
         start_date = _parse_date(phase_start)
     except Exception:
         return {"timeline_status": "not_configured"}
@@ -675,6 +680,10 @@ def _goal_timeline(goal, weight_metric):
     if start_weight is not None and target_weight is not None:
         required_total = float(target_weight) - float(start_weight)
         required_weekly = required_total / weeks_total
+    # Prefer the pace the user actually selected at activation.
+    persisted_expected = goal.get("expected_weekly_weight_change_lb")
+    if persisted_expected is not None:
+        required_weekly = float(persisted_expected)
 
     observed_weekly = None
     current_weight = weight_metric.get("current_value")
@@ -706,8 +715,14 @@ def _goal_timeline(goal, weight_metric):
             )
 
     return {
-        "timeline_status": "configured",
+        "timeline_status": (
+            persisted_status
+            if persisted_status in ("configured", "outside_supported_range")
+            else "configured"
+        ),
         "goal_deadline": end_date.isoformat(),
+        "aspirational_target_date": goal.get("aspirational_target_date"),
+        "selected_pace": goal.get("selected_pace"),
         "weeks_total": _round(weeks_total, 1),
         "weeks_elapsed": _round(weeks_elapsed, 1),
         "weeks_remaining": _round(weeks_remaining, 1),

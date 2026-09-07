@@ -93,6 +93,9 @@ from goals import (
     get_goal_history,
     save_goal_profile,
     backfill_active_goal_start_snapshot,
+    current_body_state,
+    preview_goal,
+    activate_goal,
 )
 
 from daily_coaching_service import (
@@ -854,6 +857,41 @@ async def mobile_goals_save(
                 exc
             ),
         ) from exc
+
+
+# ============================================================
+# GOAL SETTING V2 - current state / deterministic preview / activation
+# ============================================================
+
+@app.get("/api/v1/goals/current-state")
+async def mobile_goal_current_state(request: Request):
+    require_ingest_key(request)
+    with request_scoped_connection():
+        return {"status": "ok", "current": current_body_state()}
+
+
+@app.post("/api/v1/goals/preview")
+async def mobile_goal_preview(request: Request):
+    """Deterministic timeline + compatibility preview. Never persists."""
+    require_ingest_key(request)
+    try:
+        payload = await request.json()
+        with request_scoped_connection():
+            return preview_goal(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/goals/activate")
+async def mobile_goal_activate(request: Request):
+    """Persist the full V2 goal contract and start the phase."""
+    require_ingest_key(request)
+    try:
+        payload = await request.json()
+        with request_scoped_connection():
+            return activate_goal(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get(
