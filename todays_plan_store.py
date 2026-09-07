@@ -17,7 +17,9 @@ TABLE_NAME = "todays_plan_cache"
 # deploy would lack. Bumping forces a clean rebuild of the full B2 shape.
 # 4 -> 5: B3 adds exercise-level rep/load/RIR/rest/progression semantics and
 # body-composition strategy; cached v4 plans must be rebuilt to expose them.
-PLAN_VERSION = 5
+# 5 -> 6: discard the transient B3 guardrail-error payload cached before the
+# deterministic set-repair path was deployed.
+PLAN_VERSION = 6
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
