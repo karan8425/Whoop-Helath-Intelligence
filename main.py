@@ -22,6 +22,10 @@ from goal_progress import (
     goal_progress,
 )
 
+from goal_progress_v2 import (
+    goal_progress_v2,
+)
+
 from config import (
     SESSION_SECRET,
     ADMIN_PASSWORD,
@@ -680,24 +684,21 @@ async def mobile_goal_progress(
 
     def _compute_goal_progress():
 
-        # goal_progress() calls get_conn() dozens of
-        # times across apple_health_trends(),
-        # body_composition_progress(), and Tonal
-        # strength adherence. Each call normally opens
-        # its own physical DB connection; sharing one
-        # connection for the whole request removes that
-        # repeated TCP/TLS/auth handshake cost without
-        # touching any calculation, query, or the
-        # response shape.
+        # goal_progress_v2() composes goal_progress(),
+        # apple_health_trends(), body_composition_progress(),
+        # Tonal strength adherence and a whoop_daily_metrics
+        # read - each opens get_conn() many times. Sharing one
+        # physical connection for the whole request removes the
+        # repeated TCP/TLS/auth handshake cost without touching
+        # any calculation, query, or the response shape. The V2
+        # response preserves every V1 key and adds the
+        # longitudinal sections alongside them.
         with request_scoped_connection():
-            return goal_progress()
+            return goal_progress_v2()
 
-    # goal_progress() is a synchronous, DB-heavy call
-    # (apple_health_trends, body_composition_progress,
-    # Tonal strength adherence). Run it in the worker
-    # thread pool so it cannot block the asyncio event
-    # loop and stall unrelated concurrent requests on
-    # this Uvicorn worker.
+    # Synchronous, DB-heavy call. Run it in the worker thread
+    # pool so it cannot block the asyncio event loop and stall
+    # unrelated concurrent requests on this Uvicorn worker.
     return await anyio.to_thread.run_sync(
         _compute_goal_progress
     )
@@ -866,9 +867,8 @@ async def goals_progress(
         request
     )
 
-    return (
-        goal_progress()
-    )
+    with request_scoped_connection():
+        return goal_progress_v2()
 
 
 # ============================================================
