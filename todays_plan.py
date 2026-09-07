@@ -9,6 +9,7 @@ from apple_health_trends import apple_health_trends
 from nutrition_prescription import build_nutrition_prescription
 from sleep_prescription import build_sleep_prescription
 from hydration_prescription import build_hydration_prescription
+from activity_plan import build_activity_plan
 
 from integrations.tonal.workout_prescription import (
     build_daily_workout_prescription,
@@ -901,6 +902,25 @@ def build_todays_plan():
             workout
         )
     )
+
+    activity_plan = _safe_engine(
+        lambda: build_activity_plan(
+            goal=active_goal,
+            strength=training_card,
+        ),
+        "activity_plan",
+    )
+
+    training_card["activity_plan"] = activity_plan
+    training_card["overall_training_summary"] = activity_plan.get(
+        "overall_training_summary"
+    )
+    training_card["strength_plan"] = {
+        "status": training_card.get("status"),
+        "session_type": training_card.get("session_type"),
+        "total_sets": training_card.get("total_sets"),
+        "exercise_count": training_card.get("exercise_count"),
+    }
 
     nutrition_card = (
         _nutrition_card(

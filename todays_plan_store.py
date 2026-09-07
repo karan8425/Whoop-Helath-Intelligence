@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from db import get_conn
 from freshness import freshness_status
 from todays_plan import build_todays_plan
+from activity_plan import build_activity_plan
 
 
 # ============================================================
@@ -25,7 +26,7 @@ TABLE_NAME = "todays_plan_cache"
 # 8 -> 9: expose normalized session/rotation diagnostics and preserve
 # exercise-level progression evidence under low systemic recovery.
 # 9 -> 10: reject the cached legacy low-readiness policy description.
-PLAN_VERSION = 10
+PLAN_VERSION = 11
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
@@ -418,9 +419,29 @@ def get_or_build_todays_plan(
                 flush=True,
             )
 
-            return cached.get(
-                "plan_payload"
-            )
+            payload = cached.get("plan_payload") or {}
+            training = payload.get("training") or {}
+            previous_activity = training.get("activity_plan") or {}
+            goal_context = previous_activity.get("goal_context") or {}
+            # Strength and the expensive plan remain cached. Current Apple
+            # activity is intentionally recomputed on every endpoint refresh.
+            try:
+                activity = build_activity_plan(
+                    goal=goal_context,
+                    strength=training,
+                )
+                training["activity_plan"] = activity
+                training["overall_training_summary"] = activity.get(
+                    "overall_training_summary"
+                )
+            except Exception as exc:
+                print(
+                    "TODAYS_ACTIVITY_REFRESH "
+                    f"status=degraded error_type={type(exc).__name__}",
+                    flush=True,
+                )
+            payload["training"] = training
+            return payload
 
     print(
         "TODAYS_PLAN_CACHE "
