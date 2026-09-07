@@ -168,6 +168,22 @@ def _training_card(workout):
                         "target_rir"
                     ),
 
+                # Training-B3 additive exercise contract.
+                "primary_muscles": exercise.get("primary_muscles") or [],
+                "secondary_muscles": exercise.get("secondary_muscles") or [],
+                "rep_range": exercise.get("rep_range") or {},
+                "rir_range": exercise.get("rir_range") or {},
+                "rest_seconds": exercise.get("rest_seconds") or {},
+                "progression_state": exercise.get("progression_state"),
+                "progression_label": exercise.get("progression_label"),
+                "progression_target": exercise.get("progression_target"),
+                "performance_trajectory": exercise.get("performance_trajectory"),
+                "progression_confidence": exercise.get("progression_confidence"),
+                "comparable_performance": exercise.get("comparable_performance") or {},
+                "b3_rationale": exercise.get("b3_rationale"),
+                "prescribed": exercise.get("prescribed") or {},
+                "actual": exercise.get("actual"),
+
                 "estimated_volume":
                     exercise.get(
                         "estimated_volume"
@@ -377,6 +393,12 @@ def _training_card(workout):
         "dose_diagnostics":
             session.get(
                 "dose_diagnostics"
+            )
+            or {},
+
+        "training_b3":
+            session.get(
+                "training_b3"
             )
             or {},
 

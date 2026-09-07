@@ -3,6 +3,7 @@ from datetime import date, timedelta
 
 from body_composition_strategy import classify
 from integrations.tonal.progressive_overload import comparable_history, prescribe, trajectory
+from todays_plan import _training_card
 
 
 def session(reps, load=50, volume=None, mode="standard", sets=3):
@@ -82,6 +83,24 @@ class BodyStrategyTests(unittest.TestCase):
         out = classify(self.goal(), {})
         self.assertEqual(out["regional_fat"]["status"], "regional_history_not_available")
         self.assertNotIn("Core", str(out))
+
+
+class ApiPassThroughTests(unittest.TestCase):
+    def test_today_card_preserves_b3_contract(self):
+        movement = {
+            "movement_id": "m1", "name": "Bench Press", "muscle_groups": ["Chest"],
+            "smart_weight": {}, "hardware_context": {}, "historical_context": {},
+            "rep_range": {"minimum": 8, "maximum": 12},
+            "rir_range": {"minimum": 1, "maximum": 2},
+            "rest_seconds": {"minimum": 120, "maximum": 180},
+            "progression_state": "PROGRESS_REPS", "progression_label": "ADD REPS",
+        }
+        card = _training_card({
+            "status": "ok", "readiness": {}, "progression_policy": {},
+            "session": {"exercises": [movement], "training_b3": {"dose_classification": "HIGH_PRODUCTIVE_DOSE"}},
+        })
+        self.assertEqual(card["exercises"][0]["progression_state"], "PROGRESS_REPS")
+        self.assertEqual(card["training_b3"]["dose_classification"], "HIGH_PRODUCTIVE_DOSE")
 
 
 if __name__ == "__main__":
