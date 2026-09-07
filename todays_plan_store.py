@@ -19,7 +19,8 @@ TABLE_NAME = "todays_plan_cache"
 # body-composition strategy; cached v4 plans must be rebuilt to expose them.
 # 5 -> 6: discard the transient B3 guardrail-error payload cached before the
 # deterministic set-repair path was deployed.
-PLAN_VERSION = 6
+# 6 -> 7: rebuild B3 strategy with legacy phase-to-goal compatibility.
+PLAN_VERSION = 7
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
