@@ -24,7 +24,8 @@ TABLE_NAME = "todays_plan_cache"
 # rejects the previous recovering-muscle recommendation semantics.
 # 8 -> 9: expose normalized session/rotation diagnostics and preserve
 # exercise-level progression evidence under low systemic recovery.
-PLAN_VERSION = 9
+# 9 -> 10: reject the cached legacy low-readiness policy description.
+PLAN_VERSION = 10
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
