@@ -1319,6 +1319,7 @@ def _prescribe_exercise(
         profile,
         readiness_band,
         set_count,
+        session_position=profile.get("_session_position", 0),
     )
 
     (
@@ -1901,17 +1902,17 @@ def build_daily_workout_prescription(now=None):
 
     exercises = []
 
-    for (
+    for session_position, (
         profile,
         set_count,
-    ) in zip(
+    ) in enumerate(zip(
         selected,
         allocations,
-    ):
+    )):
 
         exercise = (
             _prescribe_exercise(
-                profile,
+                {**profile, "_session_position": session_position},
                 readiness_band,
                 set_count,
             )
@@ -2143,6 +2144,8 @@ def build_daily_workout_prescription(now=None):
                 }
                 for entry in priorities.get("ranked_muscles", [])
             ],
+
+            "session_template_scores": priorities.get("session_template_scores") or [],
 
             # Training-B2: additive diagnostics. Existing fields above are
             # untouched in shape, so this is backward compatible with the

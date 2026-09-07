@@ -2,6 +2,7 @@ import unittest
 
 from integrations.tonal.training_priority import _score_session_templates
 from integrations.tonal.training_dose import whoop_capacity_multiplier, muscle_budget
+from integrations.tonal.progressive_overload import prescribe
 
 
 MUSCLES = ["Chest", "Back", "Shoulders", "Biceps", "Triceps", "Core", "Glutes", "Hamstrings", "Quads"]
@@ -59,6 +60,18 @@ class HierarchyCorrectionTests(unittest.TestCase):
 
     def test_regional_fat_is_not_an_input_to_selection(self):
         self.assertNotIn("fat", _score_session_templates.__code__.co_names)
+
+    def test_low_whoop_does_not_force_hold_when_history_supports_reps(self):
+        profile = {"name": "Bench Press", "recent_sessions": [
+            {"set_count": 3, "total_reps": 30, "total_volume": 1500, "median_base_weight": 50, "mode_counts": {"standard": 3}},
+            {"set_count": 3, "total_reps": 29, "total_volume": 1450, "median_base_weight": 50, "mode_counts": {"standard": 3}},
+            {"set_count": 3, "total_reps": 28, "total_volume": 1400, "median_base_weight": 50, "mode_counts": {"standard": 3}},
+        ]}
+        lead = prescribe(profile, "low", 3, session_position=0)
+        later = prescribe(profile, "low", 3, session_position=1)
+        self.assertEqual(lead["progression_state"], "PROGRESS_REPS")
+        self.assertEqual(lead["target_rir"], {"minimum": 2, "maximum": 3})
+        self.assertEqual(later["target_rir"], {"minimum": 3, "maximum": 4})
 
 
 if __name__ == "__main__":

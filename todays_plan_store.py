@@ -22,7 +22,9 @@ TABLE_NAME = "todays_plan_cache"
 # 6 -> 7: rebuild B3 strategy with legacy phase-to-goal compatibility.
 # 7 -> 8: B3.0.1 separates local muscle selection from systemic dose and
 # rejects the previous recovering-muscle recommendation semantics.
-PLAN_VERSION = 8
+# 8 -> 9: expose normalized session/rotation diagnostics and preserve
+# exercise-level progression evidence under low systemic recovery.
+PLAN_VERSION = 9
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"

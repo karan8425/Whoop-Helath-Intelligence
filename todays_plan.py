@@ -405,6 +405,9 @@ def _training_card(workout):
         "muscle_priority_diagnostics":
             session.get("muscle_priority_diagnostics") or [],
 
+        "session_template_scores":
+            session.get("session_template_scores") or [],
+
         "exercises":
             exercise_details,
 

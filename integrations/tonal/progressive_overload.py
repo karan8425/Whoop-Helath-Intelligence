@@ -81,7 +81,7 @@ def trajectory(sessions):
     return "STABLE"
 
 
-def prescribe(profile, readiness_band, set_count):
+def prescribe(profile, readiness_band, set_count, session_position=0):
     kind = exercise_type(profile)
     rep_low, rep_high = CONFIG["rep_range"][kind]
     sessions, confidence = comparable_history(profile)
@@ -99,17 +99,19 @@ def prescribe(profile, readiness_band, set_count):
         if trend == "DECLINING" and readiness_band in ("low", "moderate"):
             state = "REDUCE"
             set_count = max(2, set_count - 1)
-        elif reps_per_set >= rep_high and readiness_band in ("good", "high") and load is not None:
+        elif reps_per_set >= rep_high and readiness_band in ("low", "good", "high") and load is not None:
             state = "PROGRESS_LOAD"
             target_load = min(100.0, float(load) + CONFIG["resistance_increment_lb"])
             target_reps = rep_low
-        elif reps_per_set < rep_high and readiness_band in ("good", "high"):
+        elif reps_per_set < rep_high and readiness_band in ("low", "good", "high"):
             state = "PROGRESS_REPS"
             target_reps = min(rep_high, max(rep_low, reps_per_set + 1))
         else:
             state = "HOLD"
 
     rir = CONFIG["rir"].get(readiness_band, CONFIG["rir"]["moderate"])[kind]
+    if readiness_band == "low" and kind == "compound" and session_position == 0:
+        rir = (2, 3)
     rest = CONFIG["rest_seconds"][kind]
     label = {
         "PROGRESS_REPS": "ADD REPS", "PROGRESS_LOAD": "ADD LOAD",
