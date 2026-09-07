@@ -38,7 +38,8 @@ def _window_change(rows, days, end_date=None):
 
 
 def classify(goal_contract, hume_history, strength_trajectory="INSUFFICIENT_DATA"):
-    goal_type = (goal_contract or {}).get("goal_type")
+    # V2 goals carry goal_type; legacy active goals may carry only phase.
+    goal_type = (goal_contract or {}).get("goal_type") or (goal_contract or {}).get("phase")
     series = hume_history or {}
     keys = {
         "weight_lb": "weight", "body_fat_percentage": "body_fat_percentage",

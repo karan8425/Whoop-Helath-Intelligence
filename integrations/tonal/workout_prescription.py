@@ -2113,7 +2113,7 @@ def build_daily_workout_prescription(now=None):
                 "body_composition_strategy": body_strategy,
                 "goal_contract": {
                     "status": goal.get("status"),
-                    "goal_type": goal.get("goal_type"),
+                    "goal_type": goal.get("goal_type") or goal.get("phase"),
                     "compatibility": (goal.get("target") or {}).get("compatibility"),
                 },
                 "regional_fat_drives_muscle_selection": False,

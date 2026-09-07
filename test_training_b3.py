@@ -84,6 +84,13 @@ class BodyStrategyTests(unittest.TestCase):
         self.assertEqual(out["regional_fat"]["status"], "regional_history_not_available")
         self.assertNotIn("Core", str(out))
 
+    def test_legacy_goal_phase_drives_lean_cut_strategy(self):
+        out = classify({"phase": "lean_cut"}, {
+            "fat_mass": self.rows(40, 37), "lean_mass": self.rows(145, 145)
+        })
+        self.assertEqual(out["goal_type"], "lean_cut")
+        self.assertEqual(out["training_strategy_signal"], "PLAN_WORKING")
+
 
 class ApiPassThroughTests(unittest.TestCase):
     def test_today_card_preserves_b3_contract(self):
