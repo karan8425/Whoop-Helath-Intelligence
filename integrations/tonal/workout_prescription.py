@@ -2293,8 +2293,9 @@ def build_daily_workout_prescription(now=None):
 
             "low_readiness":
                 (
-                    "Reduce both load and total working "
-                    "volume and do not pursue overload."
+                    "Reduce total working volume and accessories, use "
+                    "more conservative RIR, and permit only progression "
+                    "already earned by movement-specific history."
                 ),
 
             "tonal_hardware":
