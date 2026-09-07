@@ -641,21 +641,21 @@ def muscle_budget(
     has_history = bool(session_share)
 
     if state == "RECOVERING":
-        budget = personal_baseline * 0.5 * whoop_multiplier
-        reason = "RECOVERING - reduced budget from personal baseline."
+        budget = personal_baseline * 0.5
+        reason = "RECOVERING - local budget reduced from personal baseline; WHOOP is applied once at session dose."
     elif state == "READY":
-        budget = personal_baseline * whoop_multiplier * recent_load_multiplier
-        reason = "READY - normal budget scaled by WHOOP capacity and recent load."
+        budget = personal_baseline
+        reason = "READY - normal local personal budget; systemic modifiers are applied once at session dose."
     elif state == "FRESH":
-        budget = personal_baseline * whoop_multiplier * recent_load_multiplier
-        if has_history and whoop_multiplier > 1.0:
+        budget = personal_baseline
+        if has_history:
             budget *= 1.1
-            reason = "FRESH - modestly increased budget; history and WHOOP both support it."
+            reason = "FRESH - modest local readiness allowance from personal history."
         else:
-            reason = "FRESH - normal budget; increase withheld without both history and WHOOP support."
+            reason = "FRESH - conservative local budget because personal muscle history is sparse."
     else:
-        budget = personal_baseline * whoop_multiplier
-        reason = f"Unrecognized readiness state '{state}' - using a conservative scaled budget."
+        budget = personal_baseline * 0.5
+        reason = f"Unrecognized readiness state '{state}' - using a conservative local budget."
 
     return {
         "muscle": muscle,
@@ -766,6 +766,15 @@ def compute_dose_target(
         baseline_exercises = max(len(target_muscles), 1)
 
     raw_target_sets = baseline_sets * combined_multiplier
+    personalized_low_floor_applied = False
+    if readiness_band == "low" and target_ready:
+        # Preserve a reduced but meaningful hypertrophy signal when useful
+        # muscles are locally ready. This floor scales from the user's own
+        # comparable productive dose, never from a generic number of sets.
+        personalized_floor = baseline_sets * 0.50
+        if raw_target_sets < personalized_floor:
+            raw_target_sets = personalized_floor
+            personalized_low_floor_applied = True
     # A session can never usefully exceed what its target muscles can
     # absorb today - the per-muscle budget is a hard, not advisory, cap.
     dose_limited_by = None
@@ -813,6 +822,8 @@ def compute_dose_target(
             "recent_load_reason": load["reason"],
             "recent_load_ratio": load["ratio"],
             "combined": round(combined_multiplier, 3),
+            "personalized_low_floor_applied": personalized_low_floor_applied,
+            "personalized_low_floor_fraction": 0.50 if personalized_low_floor_applied else None,
             "confidence": confidence,
         },
         "target": {

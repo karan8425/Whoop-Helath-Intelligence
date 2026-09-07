@@ -20,6 +20,10 @@ SESSION_TEMPLATES = {
         "muscles": ["Back", "Biceps"],
         "minimum_eligible": 2,
     },
+    "Chest + Biceps": {
+        "muscles": ["Chest", "Biceps"],
+        "minimum_eligible": 2,
+    },
     "Lower Body": {
         "muscles": ["Glutes", "Hamstrings", "Quads"],
         "minimum_eligible": 2,
@@ -40,6 +44,14 @@ SESSION_TEMPLATES = {
 YESTERDAY_FOCUS_PENALTY = 35.0
 REPEATED_FOCUS_PENALTY = 15.0
 RECOVERING_MUSCLE_PENALTY = 15.0
+
+READINESS_PRIORITY = {
+    "FRESH": 70.0,
+    "READY": 35.0,
+    "RECOVERING": -25.0,
+    "FATIGUED": -150.0,
+    "SUPPRESSED": -1000.0,
+}
 
 
 REGION_MUSCLES = {
@@ -450,12 +462,15 @@ def _score_session_templates(ranked, readiness, history):
             components = []
             for muscle in eligible:
                 item = readiness_by_muscle[muscle]
-                value = priority.get(muscle, 0.0) + item["readiness_score"] * 0.45
-                if item["readiness_state"] == "RECOVERING":
-                    value -= RECOVERING_MUSCLE_PENALTY
+                # `priority_score` already contains the explicit local
+                # readiness component. WHOOP is intentionally absent here.
+                value = priority.get(muscle, 0.0)
                 components.append(value)
             components.sort(reverse=True)
-            score = sum(components[: template["minimum_eligible"]])
+            selected_components = components[: template["minimum_eligible"]]
+            # Normalize across two- and three-muscle templates. Raw sums made
+            # larger templates win simply for having another contributor.
+            score = sum(selected_components) / len(selected_components)
             if yesterday_focus == name:
                 rotation_penalty += YESTERDAY_FOCUS_PENALTY
             rotation_penalty += repeated.count(name) * REPEATED_FOCUS_PENALTY
@@ -533,17 +548,27 @@ def build_training_priority(now=None) -> dict:
         )
     )
 
+    muscle_readiness = calculate_muscle_readiness(now=now)
+    readiness_by_name = {
+        item["muscle"]: item for item in muscle_readiness["muscles"]
+    }
+
     ranked = []
 
     for muscle, data in muscles.items():
 
-        priority_score = (
+        history_score = (
             _muscle_priority_score(
                 muscle,
                 data,
                 weakest_region,
             )
         )
+
+        readiness_entry = readiness_by_name.get(muscle, {})
+        readiness_state = readiness_entry.get("readiness_state")
+        readiness_component = READINESS_PRIORITY.get(readiness_state, -50.0)
+        priority_score = round(history_score + readiness_component, 1)
 
         ranked.append(
             {
@@ -552,6 +577,18 @@ def build_training_priority(now=None) -> dict:
 
                 "priority_score":
                     priority_score,
+
+                "history_stimulus_score": history_score,
+
+                "readiness_state": readiness_state,
+
+                "readiness_score": readiness_entry.get("readiness_score"),
+
+                "readiness_component": readiness_component,
+
+                "effective_sets_7d": readiness_entry.get("effective_sets_7d"),
+
+                "whoop_selection_modifier": 1.0,
 
                 "primary_sessions_7d":
                     data.get(
@@ -613,7 +650,6 @@ def build_training_priority(now=None) -> dict:
         ] >= TARGET_FREQUENCY_7D
     ]
 
-    muscle_readiness = calculate_muscle_readiness(now=now)
     try:
         recommendation_history = _recommendation_history(now)
     except Exception:

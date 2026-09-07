@@ -2125,6 +2125,25 @@ def build_daily_workout_prescription(now=None):
                 ),
             },
 
+            "muscle_priority_diagnostics": [
+                {
+                    **entry,
+                    "effective_sets_14d": (
+                        dose["muscle_baselines"]["muscles"].get(entry["muscle"], {})
+                        .get("windows", {}).get(14, {}).get("effective_sets")
+                    ),
+                    "personal_baseline_sets_per_week_30d": (
+                        dose["muscle_baselines"]["muscles"].get(entry["muscle"], {})
+                        .get("windows", {}).get(30, {}).get("effective_sets_per_week")
+                    ),
+                    "under_over_stimulation": (
+                        "UNDER" if (entry.get("primary_sessions_7d") or 0) < 2
+                        else "AT_OR_ABOVE_TARGET"
+                    ),
+                }
+                for entry in priorities.get("ranked_muscles", [])
+            ],
+
             # Training-B2: additive diagnostics. Existing fields above are
             # untouched in shape, so this is backward compatible with the
             # current iOS contract.
