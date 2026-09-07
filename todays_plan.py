@@ -979,7 +979,7 @@ def build_todays_plan():
 
     return {
         "status": "ok",
-        "version": "1.2",
+        "version": "1.3",
         "plan_date": _today(),
 
         "available_sections":

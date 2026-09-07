@@ -115,9 +115,10 @@ def calculate_step_target(context, goal, recovery_band, body_signal="INSUFFICIEN
     weekly_ceiling = baseline + CONFIG["maximum_weekly_increase"]
     target = int(round(max(CONFIG["minimum_target"], min(preferred, weekly_ceiling,
                        CONFIG["maximum_target"])) / 100.0) * 100)
+    supported_preferred = min(preferred, weekly_ceiling, CONFIG["maximum_target"])
     return {"recommended": target,
             "minimum": int(max(CONFIG["minimum_target"], round(baseline * .9 / 100) * 100)),
-            "preferred": int(round(preferred / 100) * 100),
+            "preferred": int(round(supported_preferred / 100) * 100),
             "upper": int(min(CONFIG["maximum_target"], round(weekly_ceiling / 100) * 100)),
             "baseline_used": baseline, "baselines": baselines}
 
