@@ -77,7 +77,10 @@ def _data_quality(context: ReplayContext) -> dict:
         SELECT
           EXISTS(SELECT 1 FROM whoop_daily_metrics
                  WHERE metric_date = %s AND has_recovery AND has_sleep
-                   AND source_updated_at <= %s) AS whoop,
+                   AND source_updated_at <= %s) AS whoop_current,
+          EXISTS(SELECT 1 FROM whoop_daily_metrics
+                 WHERE metric_date <= %s AND has_recovery AND has_sleep
+                   AND source_updated_at <= %s) AS whoop_history,
           EXISTS(SELECT 1 FROM tonal_workouts WHERE begin_time < %s) AS tonal,
           EXISTS(SELECT 1 FROM apple_health_daily_activity
                  WHERE activity_date < %s) AS apple,
@@ -88,16 +91,18 @@ def _data_quality(context: ReplayContext) -> dict:
         (
             context.replay_date,
             context.as_of,
+            context.replay_date,
+            context.as_of,
             context.as_of,
             context.replay_date,
             context.as_of,
         ),
     )
-    present = {name: bool(row.get(name)) for name in ("whoop", "tonal", "apple", "body")}
+    present = {name: bool(row.get(name)) for name in ("whoop_current", "whoop_history", "tonal", "apple", "body")}
     missing = [name for name, available in present.items() if not available]
-    if present["whoop"] and present["tonal"] and present["apple"]:
+    if present["whoop_current"] and present["tonal"] and present["apple"]:
         status = "COMPLETE" if present["body"] else "PARTIAL"
-    elif present["whoop"]:
+    elif present["whoop_history"]:
         status = "PARTIAL"
     else:
         status = "INSUFFICIENT"
