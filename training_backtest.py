@@ -16,9 +16,19 @@ def run(start: date, end: date, cutoff_hour=7, include_details=False):
     if end < start:
         raise ValueError("end date must not precede start date")
     days = []
+    recommendation_history = []
     current = start
     while current <= end:
-        days.append(replay_day(ReplayContext.morning(current, cutoff_hour), include_details))
+        result = replay_day(
+            ReplayContext.morning(current, cutoff_hour),
+            include_details,
+            recommendation_history=recommendation_history[:3],
+        )
+        days.append(result)
+        recommendation_history.insert(0, {
+            "plan_date": current,
+            "focus": result["recommendation"].get("session_type"),
+        })
         current += timedelta(days=1)
     return {"summary": aggregate(days), "days": days}
 

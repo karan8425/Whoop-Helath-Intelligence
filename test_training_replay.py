@@ -39,7 +39,7 @@ class ReplayIsolationTests(unittest.TestCase):
              patch.object(training_replay, "request_scoped_connection", return_value=nullcontext()), \
              patch.object(training_replay, "get_conn", return_value=_ReadOnlyConnection()), \
              patch.object(training_replay, "get_active_goal", side_effect=lambda as_of: [row for row in self.sources["goals"] if row["at"] <= as_of][-1]), \
-             patch.object(training_replay, "build_daily_workout_prescription", side_effect=lambda now: _training(now, self.sources)), \
+             patch.object(training_replay, "build_daily_workout_prescription", side_effect=lambda now, **_: _training(now, self.sources)), \
              patch.object(training_replay, "load_activity_context", side_effect=lambda now: {"today_row": True, "steps_today": 0, "avg_14": [row for row in self.sources["apple"] if row["at"] <= now.astimezone(timezone.utc)][-1]["steps"], "n_14": 14}), \
              patch.object(training_replay, "build_activity_plan", side_effect=lambda **kwargs: {"step_target": kwargs["goal"]["daily_step_target"]}), \
              patch.object(training_replay, "_actual_outcome", return_value={"workout_performed": False, "workouts": [], "actual_steps": 7000}):

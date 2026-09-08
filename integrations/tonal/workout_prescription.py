@@ -1656,7 +1656,7 @@ def _prescribe_exercise(
 # DAILY WORKOUT ENGINE
 # ============================================================
 
-def build_daily_workout_prescription(now=None):
+def build_daily_workout_prescription(now=None, recommendation_history=None):
 
     readiness = (
         _latest_readiness(now=now)
@@ -1741,7 +1741,10 @@ def build_daily_workout_prescription(now=None):
         }
 
     priorities = (
-        build_training_priority(now=now)
+        build_training_priority(
+            now=now,
+            recommendation_history=recommendation_history,
+        )
     )
 
     profiles_result = (

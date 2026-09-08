@@ -508,7 +508,7 @@ def _session_from_templates(scores, ranked):
     }
 
 
-def build_training_priority(now=None) -> dict:
+def build_training_priority(now=None, recommendation_history=None) -> dict:
 
     now = now or datetime.now(timezone.utc)
 
@@ -650,10 +650,11 @@ def build_training_priority(now=None) -> dict:
         ] >= TARGET_FREQUENCY_7D
     ]
 
-    try:
-        recommendation_history = _recommendation_history(now)
-    except Exception:
-        recommendation_history = []
+    if recommendation_history is None:
+        try:
+            recommendation_history = _recommendation_history(now)
+        except Exception:
+            recommendation_history = []
     template_scores = _score_session_templates(
         ranked,
         muscle_readiness,

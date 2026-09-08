@@ -213,19 +213,22 @@ def _progression_follow_up(session: dict, outcome: dict) -> list[dict]:
     return results
 
 
-def replay_day(context: ReplayContext, include_details: bool = True) -> dict:
+def replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None) -> dict:
     """Run B3/B4 under one read-only logical request to avoid TLS amplification."""
     with request_scoped_connection():
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
-        return _replay_day(context, include_details)
+        return _replay_day(context, include_details, recommendation_history)
 
 
-def _replay_day(context: ReplayContext, include_details: bool = True) -> dict:
+def _replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None) -> dict:
     quality = _data_quality(context)
     goal = get_active_goal(as_of=context.as_of)
-    training = build_daily_workout_prescription(now=context.as_of)
+    training = build_daily_workout_prescription(
+        now=context.as_of,
+        recommendation_history=recommendation_history,
+    )
     strength = _training_activity_shape(training)
     activity_context = load_activity_context(now=context.as_of.astimezone(EASTERN))
     activity = build_activity_plan(
