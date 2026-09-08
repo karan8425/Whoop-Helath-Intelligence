@@ -63,7 +63,8 @@ def aggregate(days):
     set_ratios = [float(day["comparison"]["recommended_set_ratio_vs_personal_median"])
                   for day in days if day.get("comparison", {}).get("recommended_set_ratio_vs_personal_median") is not None]
     return {
-        "coverage": {"requested_days": len(days), "evaluable_days": quality["COMPLETE"],
+        "coverage": {"requested_days": len(days), "evaluable_days": quality["COMPLETE"] + quality["PARTIAL"],
+                     "complete_days": quality["COMPLETE"],
                      "partial_days": quality["PARTIAL"], "insufficient_days": quality["INSUFFICIENT"]},
         "recommendation_distribution": dict(distribution),
         "template_distribution": dict(sessions),

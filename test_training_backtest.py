@@ -18,6 +18,7 @@ class AggregateMetricsTests(unittest.TestCase):
         }
         result = aggregate([day])
         self.assertEqual(1, result["coverage"]["evaluable_days"])
+        self.assertEqual(1, result["coverage"]["complete_days"])
         self.assertEqual({"READY": 1}, result["muscle_selection"]["readiness_state_distribution"])
         self.assertEqual({"HOLD": 1}, result["progression_state_distribution"])
         self.assertEqual(1.0, result["activity"]["target_attainment_rate"])
