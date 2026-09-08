@@ -1656,7 +1656,7 @@ def _prescribe_exercise(
 # DAILY WORKOUT ENGINE
 # ============================================================
 
-def build_daily_workout_prescription(now=None, recommendation_history=None):
+def build_daily_workout_prescription(now=None, recommendation_history=None, calibration="balanced"):
 
     readiness = (
         _latest_readiness(now=now)
@@ -1744,6 +1744,7 @@ def build_daily_workout_prescription(now=None, recommendation_history=None):
         build_training_priority(
             now=now,
             recommendation_history=recommendation_history,
+            calibration=calibration,
         )
     )
 

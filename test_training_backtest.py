@@ -9,7 +9,7 @@ from training_backtest_metrics import aggregate
 class AggregateMetricsTests(unittest.TestCase):
     def test_runner_feeds_prior_replay_sessions_into_rotation_history(self):
         seen = []
-        def fake_replay(context, include_details, recommendation_history):
+        def fake_replay(context, include_details, recommendation_history, calibration):
             seen.append(list(recommendation_history))
             return {"replay_date": context.replay_date.isoformat(),
                     "data_quality": {"status": "PARTIAL", "missing_sources": []},

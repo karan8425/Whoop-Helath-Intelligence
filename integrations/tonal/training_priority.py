@@ -1,5 +1,6 @@
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from statistics import median
 
 from db import get_conn
 
@@ -44,6 +45,18 @@ SESSION_TEMPLATES = {
 YESTERDAY_FOCUS_PENALTY = 35.0
 REPEATED_FOCUS_PENALTY = 15.0
 RECOVERING_MUSCLE_PENALTY = 15.0
+
+# B3.2 calibration profiles permit fixed-window candidate comparison without
+# duplicating the recommendation engine. ``balanced`` is the accepted live
+# default; baseline preserves the exact B3.1 scoring path.
+CALIBRATION_PROFILES = {
+    "baseline": {"coverage_max": 0.0, "overlap_weights": (), "stimulus_cap": None},
+    "coverage": {"coverage_max": 40.0, "overlap_weights": (), "stimulus_cap": None},
+    "coverage_rotation": {"coverage_max": 40.0, "overlap_weights": (35.0, 20.0, 10.0), "stimulus_cap": None},
+    "balanced": {"coverage_max": 40.0, "overlap_weights": (35.0, 20.0, 10.0), "stimulus_cap": 105.0},
+}
+COVERAGE_GRACE_DAYS = 4.0
+COVERAGE_RAMP_DAYS = 10.0
 
 READINESS_PRIORITY = {
     "FRESH": 70.0,
@@ -422,7 +435,10 @@ def _recommendation_history(now):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT plan_date, plan_payload #>> '{training,session_type}' AS focus
+                SELECT plan_date, plan_payload #>> '{training,session_type}' AS focus,
+                       COALESCE(plan_payload #> '{training,primary_focus}', '[]'::jsonb)
+                       || COALESCE(plan_payload #> '{training,secondary_focus}', '[]'::jsonb)
+                       AS selected_muscles
                 FROM todays_plan_cache
                 WHERE plan_date < %s
                   AND plan_payload #>> '{training,session_type}' IS NOT NULL
@@ -434,7 +450,8 @@ def _recommendation_history(now):
             return cur.fetchall()
 
 
-def _score_session_templates(ranked, readiness, history):
+def _score_session_templates(ranked, readiness, history, config=None):
+    config = config or CALIBRATION_PROFILES["baseline"]
     priority = {row["muscle"]: float(row["priority_score"]) for row in ranked}
     readiness_by_muscle = {row["muscle"]: row for row in readiness["muscles"]}
     yesterday_focus = history[0].get("focus") if history else None
@@ -458,6 +475,7 @@ def _score_session_templates(ranked, readiness, history):
 
         score = -999.0
         rotation_penalty = 0.0
+        overlap_penalty = 0.0
         if valid:
             components = []
             for muscle in eligible:
@@ -476,6 +494,14 @@ def _score_session_templates(ranked, readiness, history):
             rotation_penalty += repeated.count(name) * REPEATED_FOCUS_PENALTY
             if readiness["selection_confidence"] != "high" and name in repeated:
                 rotation_penalty += 20.0
+            for index, weight in enumerate(config["overlap_weights"]):
+                if index >= len(history):
+                    break
+                previous = set(history[index].get("selected_muscles") or [])
+                current = set(eligible)
+                if previous and current:
+                    overlap_penalty += weight * len(previous & current) / min(len(previous), len(current))
+            rotation_penalty += overlap_penalty
             score -= rotation_penalty
 
         scored.append({
@@ -484,6 +510,7 @@ def _score_session_templates(ranked, readiness, history):
             "eligible_muscles": eligible,
             "score": round(score, 1),
             "rotation_penalty": rotation_penalty,
+            "overlap_penalty": round(overlap_penalty, 1),
         })
 
     scored.sort(key=lambda row: row["score"], reverse=True)
@@ -508,9 +535,10 @@ def _session_from_templates(scores, ranked):
     }
 
 
-def build_training_priority(now=None, recommendation_history=None) -> dict:
+def build_training_priority(now=None, recommendation_history=None, calibration="balanced") -> dict:
 
     now = now or datetime.now(timezone.utc)
+    config = CALIBRATION_PROFILES[calibration]
 
     analytics = (
         strength_analytics(now=now)
@@ -553,6 +581,31 @@ def build_training_priority(now=None, recommendation_history=None) -> dict:
         item["muscle"]: item for item in muscle_readiness["muscles"]
     }
 
+    if recommendation_history is None:
+        try:
+            recommendation_history = _recommendation_history(now)
+        except Exception:
+            recommendation_history = []
+
+    actual_gaps = {
+        muscle: muscles[muscle].get("days_since_primary_training")
+        for muscle in muscles
+    }
+    coverage_gaps = {}
+    for muscle, actual_gap in actual_gaps.items():
+        recommendation_gap = None
+        for entry in recommendation_history:
+            if muscle in (entry.get("selected_muscles") or []):
+                raw_day = entry.get("plan_date")
+                if isinstance(raw_day, str):
+                    raw_day = date.fromisoformat(raw_day)
+                if raw_day:
+                    recommendation_gap = max(0.0, (now.date() - raw_day).days)
+                break
+        available_gaps = [float(value) for value in (actual_gap, recommendation_gap) if value is not None]
+        coverage_gaps[muscle] = min(available_gaps) if available_gaps else 30.0
+    relative_floor = median(coverage_gaps.values()) if coverage_gaps else 0.0
+
     ranked = []
 
     for muscle, data in muscles.items():
@@ -568,7 +621,13 @@ def build_training_priority(now=None, recommendation_history=None) -> dict:
         readiness_entry = readiness_by_name.get(muscle, {})
         readiness_state = readiness_entry.get("readiness_state")
         readiness_component = READINESS_PRIORITY.get(readiness_state, -50.0)
-        priority_score = round(history_score + readiness_component, 1)
+        excess_gap = max(0.0, coverage_gaps[muscle] - relative_floor - COVERAGE_GRACE_DAYS)
+        coverage_component = (
+            config["coverage_max"] * excess_gap / (COVERAGE_RAMP_DAYS + excess_gap)
+            if excess_gap else 0.0
+        )
+        bounded_history = min(history_score, config["stimulus_cap"]) if config["stimulus_cap"] is not None else history_score
+        priority_score = round(bounded_history + readiness_component + coverage_component, 1)
 
         ranked.append(
             {
@@ -579,6 +638,10 @@ def build_training_priority(now=None, recommendation_history=None) -> dict:
                     priority_score,
 
                 "history_stimulus_score": history_score,
+                "bounded_stimulus_score": bounded_history,
+                "program_coverage_score": round(coverage_component, 1),
+                "program_coverage_gap_days": round(coverage_gaps[muscle], 1),
+                "program_coverage_relative_floor_days": round(relative_floor, 1),
 
                 "readiness_state": readiness_state,
 
@@ -650,15 +713,11 @@ def build_training_priority(now=None, recommendation_history=None) -> dict:
         ] >= TARGET_FREQUENCY_7D
     ]
 
-    if recommendation_history is None:
-        try:
-            recommendation_history = _recommendation_history(now)
-        except Exception:
-            recommendation_history = []
     template_scores = _score_session_templates(
         ranked,
         muscle_readiness,
         recommendation_history,
+        config,
     )
     session_focus = _session_from_templates(template_scores, ranked)
 
@@ -761,6 +820,8 @@ def build_training_priority(now=None, recommendation_history=None) -> dict:
     return {
         "status":
             "ok",
+
+        "calibration": calibration,
 
         "calculated_at":
             now.isoformat(),

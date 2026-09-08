@@ -20,6 +20,10 @@ def aggregate(days):
     suspicious = []
     previous = None
     repeats = 0
+    recovering_with_viable = 0
+    fatigued_selected = 0
+    suppressed_selected = 0
+    overlap_ratios = []
 
     for day in days:
         recommendation = day["recommendation"]
@@ -30,6 +34,12 @@ def aggregate(days):
         input_muscles = (day["inputs"].get("training") or {}).get("ranked_muscles") or []
         state = {row.get("muscle"): row.get("readiness_state") for row in input_muscles}
         readiness_selected.update(state.get(muscle, "UNKNOWN") for muscle in muscles)
+        viable_unselected = any(value in ("READY", "FRESH") and muscle not in muscles
+                                for muscle, value in state.items())
+        recovering_with_viable += sum(1 for muscle in muscles
+                                      if state.get(muscle) == "RECOVERING" and viable_unselected)
+        fatigued_selected += sum(1 for muscle in muscles if state.get(muscle) == "FATIGUED")
+        suppressed_selected += sum(1 for muscle in muscles if state.get(muscle) == "SUPPRESSED")
         progression.update(
             exercise.get("progression_state") or "UNKNOWN"
             for exercise in recommendation.get("exercises") or []
@@ -45,6 +55,8 @@ def aggregate(days):
         if previous and muscles and set(muscles) == set(previous):
             repeats += 1
             suspicious.append({"date": day["replay_date"], "reason": "same selected muscle set as prior replay day"})
+        if previous and muscles:
+            overlap_ratios.append(len(set(muscles) & set(previous)) / min(len(set(muscles)), len(set(previous))))
         previous = muscles
         if any(state.get(muscle) in ("RECOVERING", "FATIGUED", "SUPPRESSED") for muscle in muscles):
             suspicious.append({"date": day["replay_date"], "reason": "selected muscle had recovering/fatigued/suppressed state"})
@@ -68,9 +80,15 @@ def aggregate(days):
                      "partial_days": quality["PARTIAL"], "insufficient_days": quality["INSUFFICIENT"]},
         "recommendation_distribution": dict(distribution),
         "template_distribution": dict(sessions),
+        "template_concentration": round(max(sessions.values()) / sum(sessions.values()), 3) if sessions else None,
         "muscle_selection": {"recommended_frequency": dict(selected), "actual_frequency": dict(actual),
                              "readiness_state_distribution": dict(readiness_selected),
-                             "consecutive_repeated_selections": repeats, "longest_gap_days": gaps},
+                             "recovering_with_viable_ready_fresh_alternative": recovering_with_viable,
+                             "fatigued_selected": fatigued_selected,
+                             "suppressed_selected": suppressed_selected,
+                             "consecutive_repeated_selections": repeats,
+                             "average_consecutive_region_overlap": _mean(overlap_ratios),
+                             "longest_gap_days": gaps},
         "dose": {"average_recommended_sets": _mean(target_sets),
                  "average_recommended_set_ratio_vs_personal_median": _mean(set_ratios),
                  "average_sets_by_recovery": {key: _mean(values) for key, values in dose_by_recovery.items()}},

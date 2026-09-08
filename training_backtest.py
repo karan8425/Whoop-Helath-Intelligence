@@ -12,7 +12,7 @@ from training_backtest_metrics import aggregate
 from training_replay import ReplayContext, replay_day
 
 
-def run(start: date, end: date, cutoff_hour=7, include_details=False):
+def run(start: date, end: date, cutoff_hour=7, include_details=False, calibration="balanced"):
     if end < start:
         raise ValueError("end date must not precede start date")
     days = []
@@ -23,6 +23,7 @@ def run(start: date, end: date, cutoff_hour=7, include_details=False):
             ReplayContext.morning(current, cutoff_hour),
             include_details,
             recommendation_history=recommendation_history[:3],
+            calibration=calibration,
         )
         days.append(result)
         recommendation_history.insert(0, {
@@ -77,6 +78,7 @@ def main(argv=None):
     parser.add_argument("--format", choices=("json", "csv"), default="json")
     parser.add_argument("--include-details", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--calibration", choices=("baseline", "coverage", "coverage_rotation", "balanced"), default="balanced")
     args = parser.parse_args(argv)
     start = args.date or args.start_date
     end = args.date or args.end_date
@@ -84,7 +86,7 @@ def main(argv=None):
         parser.error("--end-date is required with --start-date")
     if not 0 <= args.cutoff_hour <= 23:
         parser.error("--cutoff-hour must be between 0 and 23")
-    result = run(start, end, args.cutoff_hour, args.include_details or args.verbose)
+    result = run(start, end, args.cutoff_hour, args.include_details or args.verbose, args.calibration)
     (_write_csv if args.format == "csv" else _write_json)(result, args.output)
 
 

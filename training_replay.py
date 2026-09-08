@@ -213,21 +213,22 @@ def _progression_follow_up(session: dict, outcome: dict) -> list[dict]:
     return results
 
 
-def replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None) -> dict:
+def replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None, calibration="balanced") -> dict:
     """Run B3/B4 under one read-only logical request to avoid TLS amplification."""
     with request_scoped_connection():
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
-        return _replay_day(context, include_details, recommendation_history)
+        return _replay_day(context, include_details, recommendation_history, calibration)
 
 
-def _replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None) -> dict:
+def _replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None, calibration="balanced") -> dict:
     quality = _data_quality(context)
     goal = get_active_goal(as_of=context.as_of)
     training = build_daily_workout_prescription(
         now=context.as_of,
         recommendation_history=recommendation_history,
+        calibration=calibration,
     )
     strength = _training_activity_shape(training)
     activity_context = load_activity_context(now=context.as_of.astimezone(EASTERN))
@@ -245,6 +246,7 @@ def _replay_day(context: ReplayContext, include_details: bool = True, recommenda
         "engine_version": ENGINE_VERSION,
         "plan_version": PLAN_VERSION,
         "backtest_version": BACKTEST_VERSION,
+        "calibration": calibration,
         "data_quality": quality,
         "inputs": _input_snapshot(training, activity, goal),
         "recommendation": _recommendation_shape(training, activity),
