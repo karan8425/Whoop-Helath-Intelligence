@@ -119,19 +119,29 @@ def _serialize(row):
     return result
 
 
-def get_active_goal():
-    init_goal_profiles()
+def get_active_goal(as_of=None):
+    # Replay is strictly read-only. Historical goal rows are selected by the
+    # best timestamp the current schema retains; in-place edits cannot be
+    # reconstructed and are reported as a replay limitation.
+    if as_of is None:
+        init_goal_profiles()
 
     with get_conn() as conn:
         with conn.cursor() as cur:
 
-            cur.execute("""
-                SELECT *
-                FROM health_goal_profiles
-                WHERE is_active = TRUE
-                ORDER BY id DESC
-                LIMIT 1
-            """)
+            if as_of is None:
+                cur.execute("""
+                    SELECT * FROM health_goal_profiles
+                    WHERE is_active = TRUE
+                    ORDER BY id DESC LIMIT 1
+                """)
+            else:
+                cur.execute("""
+                    SELECT * FROM health_goal_profiles
+                    WHERE created_at <= %s
+                      AND phase_start_date <= %s
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                """, (as_of, as_of.date()))
 
             return _serialize(
                 cur.fetchone()

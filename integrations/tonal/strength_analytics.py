@@ -27,12 +27,11 @@ BASELINE_WINDOWS = [
 
 def _window_start(
     days: int,
+    now: datetime | None = None,
 ) -> datetime:
 
     return (
-        datetime.now(
-            timezone.utc
-        )
+        (now or datetime.now(timezone.utc))
         - timedelta(
             days=days
         )
@@ -60,10 +59,12 @@ def _normalize_muscle(
 
 def _load_training_rows(
     days: int,
+    now: datetime | None = None,
 ) -> list:
 
     start = _window_start(
-        days
+        days,
+        now,
     )
 
     with get_conn() as conn:
@@ -98,6 +99,7 @@ def _load_training_rows(
                     ON m.movement_id = s.movement_id
 
                 WHERE w.begin_time >= %s
+                  AND w.begin_time <= %s
 
                   AND COALESCE(
                         o.include_in_training_analysis,
@@ -110,6 +112,7 @@ def _load_training_rows(
                 """,
                 (
                     start,
+                    now or datetime.now(timezone.utc),
                 ),
             )
 
@@ -118,10 +121,12 @@ def _load_training_rows(
 
 def _load_strength_history(
     days: int,
+    now: datetime | None = None,
 ) -> list:
 
     start = _window_start(
-        days
+        days,
+        now,
     )
 
     with get_conn() as conn:
@@ -138,10 +143,12 @@ def _load_strength_history(
                     core_score
                 FROM tonal_strength_scores
                 WHERE observed_at >= %s
+                  AND observed_at <= %s
                 ORDER BY observed_at ASC
                 """,
                 (
                     start,
+                    now or datetime.now(timezone.utc),
                 ),
             )
 
@@ -269,10 +276,12 @@ def _strength_summary(
 
 def calculate_window(
     days: int,
+    now: datetime | None = None,
 ) -> dict:
 
     rows = _load_training_rows(
-        days
+        days,
+        now,
     )
 
     muscle_data = {}
@@ -554,9 +563,7 @@ def calculate_window(
                 "volume"
             ] += volume
 
-    now = datetime.now(
-        timezone.utc
-    )
+    now = now or datetime.now(timezone.utc)
 
     muscles = {}
 
@@ -752,7 +759,8 @@ def calculate_window(
 
     strength_rows = (
         _load_strength_history(
-            days
+        days,
+        now,
         )
     )
 
@@ -791,7 +799,7 @@ def calculate_window(
     }
 
 
-def strength_analytics() -> dict:
+def strength_analytics(now=None) -> dict:
 
     windows = {}
 
@@ -802,7 +810,8 @@ def strength_analytics() -> dict:
                 days
             )
         ] = calculate_window(
-            days
+            days,
+            now,
         )
 
     latest = (

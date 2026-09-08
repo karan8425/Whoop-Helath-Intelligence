@@ -204,7 +204,7 @@ def _goal_status(
 # DATABASE
 # ============================================================
 
-def _load_daily_body_history():
+def _load_daily_body_history(as_of=None):
     """
     One aggregated database query.
 
@@ -251,6 +251,8 @@ def _load_daily_body_history():
                     'body_fat_percentage'
                 )
 
+                  AND (%s IS NULL OR observed_at <= %s)
+
                 GROUP BY
                     measurement_date,
                     source_bundle_id,
@@ -264,6 +266,8 @@ def _load_daily_body_history():
                 (
                     FITDAYS_BUNDLE_ID,
                     HUME_BUNDLE_ID,
+                    as_of,
+                    as_of,
                 ),
             )
 
@@ -1080,7 +1084,7 @@ def _metric_payload(
 # PUBLIC API
 # ============================================================
 
-def body_composition_progress():
+def body_composition_progress(as_of=None, active_goal=None):
     """
     Lightweight body-composition analytics specifically for
     the mobile progress dashboard.
@@ -1095,7 +1099,7 @@ def body_composition_progress():
     """
 
     rows = (
-        _load_daily_body_history()
+        _load_daily_body_history(as_of=as_of)
     )
 
     hume = (
@@ -1112,9 +1116,7 @@ def body_composition_progress():
         )
     )
 
-    active_goal = (
-        get_active_goal()
-    )
+    active_goal = active_goal or get_active_goal(as_of=as_of)
 
     if not active_goal:
 
@@ -1161,7 +1163,7 @@ def body_composition_progress():
         if isinstance(phase_start_date, str)
         else phase_start_date
     )
-    today = datetime.now(timezone.utc).astimezone(
+    today = (as_of or datetime.now(timezone.utc)).astimezone(
         EASTERN
     ).date()
     phase_age_days = (
@@ -1295,9 +1297,7 @@ def body_composition_progress():
             "ok",
 
         "generated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            (as_of or datetime.now(timezone.utc)).isoformat(),
 
         "phase": {
             "goal_id":

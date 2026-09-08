@@ -85,11 +85,13 @@ def load_activity_context(now=None):
                     WHERE LOWER(COALESCE(sport_name,'')) ~ 'walk|hike|run|jog|cycl|elliptical|rowing'
                 ), phys AS (
                     SELECT (SELECT resting_heart_rate FROM whoop_recoveries
-                            WHERE resting_heart_rate IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS resting_hr,
+                            WHERE resting_heart_rate IS NOT NULL
+                              AND (created_at AT TIME ZONE 'America/New_York')::date <= %s
+                            ORDER BY created_at DESC LIMIT 1) AS resting_hr,
                            (SELECT max_heart_rate FROM whoop_body_measurements WHERE id=1) AS profile_max_hr
                 )
                 SELECT stats.*, cardio.*, phys.* FROM stats CROSS JOIN cardio CROSS JOIN phys
-            """, tuple([today] * 24))
+            """, tuple([today] * 25))
             row = dict(cur.fetchone() or {})
     return row
 

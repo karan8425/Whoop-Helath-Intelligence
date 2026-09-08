@@ -513,7 +513,7 @@ def build_training_priority(now=None) -> dict:
     now = now or datetime.now(timezone.utc)
 
     analytics = (
-        strength_analytics()
+        strength_analytics(now=now)
     )
 
     window_7 = (
@@ -762,9 +762,7 @@ def build_training_priority(now=None) -> dict:
             "ok",
 
         "calculated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            now.isoformat(),
 
         "target_frequency_7d":
             TARGET_FREQUENCY_7D,

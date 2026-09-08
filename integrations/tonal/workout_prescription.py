@@ -200,8 +200,8 @@ def _latest_readiness(now=None):
             date_filter = ""
             params = ()
             if now is not None:
-                date_filter = "AND metric_date <= %s"
-                params = (now.date(),)
+                date_filter = "AND metric_date <= %s AND source_updated_at <= %s"
+                params = (now.date(), now)
             cur.execute(
                 f"""
                 SELECT
@@ -1697,9 +1697,7 @@ def build_daily_workout_prescription(now=None):
                 "ok",
 
             "generated_at":
-                datetime.now(
-                    timezone.utc
-                ).isoformat(),
+                (now or datetime.now(timezone.utc)).isoformat(),
 
             "readiness":
                 readiness,
@@ -1747,7 +1745,7 @@ def build_daily_workout_prescription(now=None):
     )
 
     profiles_result = (
-        build_movement_performance_profiles()
+        build_movement_performance_profiles(now=now)
     )
 
     recommended_session = (
@@ -1984,8 +1982,8 @@ def build_daily_workout_prescription(now=None):
     )
 
     try:
-        goal = get_goal_contract()
-        body_progress = body_composition_progress()
+        goal = get_goal_contract(as_of=now)
+        body_progress = body_composition_progress(as_of=now)
         hume_history = (body_progress.get("historical_context") or {}).get("hume") or {}
         body_strategy = classify_body_strategy(goal, hume_history)
     except Exception:
@@ -2018,9 +2016,7 @@ def build_daily_workout_prescription(now=None):
             "ok",
 
         "generated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            (now or datetime.now(timezone.utc)).isoformat(),
 
         "readiness":
             readiness,

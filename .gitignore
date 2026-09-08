@@ -33,3 +33,6 @@ ENV/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Local replay output may contain personal health history.
+backtest-output/

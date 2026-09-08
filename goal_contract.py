@@ -16,8 +16,8 @@ from goals import get_active_goal
 import goal_pace_config as pace_cfg
 
 
-def get_goal_contract():
-    goal = get_active_goal()
+def get_goal_contract(as_of=None):
+    goal = get_active_goal(as_of=as_of)
     if not goal:
         return {"status": "no_active_goal"}
 
