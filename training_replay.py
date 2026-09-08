@@ -14,7 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from activity_plan import build_activity_plan, load_activity_context
-from db import get_conn
+from db import get_conn, request_scoped_connection
 from goals import get_active_goal
 from integrations.tonal.workout_prescription import build_daily_workout_prescription
 
@@ -209,7 +209,15 @@ def _progression_follow_up(session: dict, outcome: dict) -> list[dict]:
 
 
 def replay_day(context: ReplayContext, include_details: bool = True) -> dict:
-    """Run today's real B3/B4 engines with a historical clock and bounded reads."""
+    """Run B3/B4 under one read-only logical request to avoid TLS amplification."""
+    with request_scoped_connection():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+        return _replay_day(context, include_details)
+
+
+def _replay_day(context: ReplayContext, include_details: bool = True) -> dict:
     quality = _data_quality(context)
     goal = get_active_goal(as_of=context.as_of)
     training = build_daily_workout_prescription(now=context.as_of)

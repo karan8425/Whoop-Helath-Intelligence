@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
@@ -35,6 +36,8 @@ class ReplayIsolationTests(unittest.TestCase):
 
     def run_replay(self):
         with patch.object(training_replay, "_data_quality", return_value={"status": "COMPLETE", "sources": {}, "missing_sources": []}), \
+             patch.object(training_replay, "request_scoped_connection", return_value=nullcontext()), \
+             patch.object(training_replay, "get_conn", return_value=_ReadOnlyConnection()), \
              patch.object(training_replay, "get_active_goal", side_effect=lambda as_of: [row for row in self.sources["goals"] if row["at"] <= as_of][-1]), \
              patch.object(training_replay, "build_daily_workout_prescription", side_effect=lambda now: _training(now, self.sources)), \
              patch.object(training_replay, "load_activity_context", side_effect=lambda now: {"today_row": True, "steps_today": 0, "avg_14": [row for row in self.sources["apple"] if row["at"] <= now.astimezone(timezone.utc)][-1]["steps"], "n_14": 14}), \
@@ -90,3 +93,15 @@ class QueryBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _ReadOnlyCursor:
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def execute(self, sql, params=None): return None
+
+
+class _ReadOnlyConnection:
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
+    def cursor(self): return _ReadOnlyCursor()
