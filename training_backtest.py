@@ -29,6 +29,7 @@ def run(start: date, end: date, cutoff_hour=7, include_details=False, calibratio
         recommendation_history.insert(0, {
             "plan_date": current,
             "focus": result["recommendation"].get("session_type"),
+            "selected_muscles": result["recommendation"].get("selected_muscles") or [],
         })
         current += timedelta(days=1)
     return {"summary": aggregate(days), "days": days}

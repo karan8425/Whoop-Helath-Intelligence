@@ -24,6 +24,7 @@ class AggregateMetricsTests(unittest.TestCase):
             training_backtest.run(date(2026, 7, 15), date(2026, 7, 16))
         self.assertEqual([], seen[0])
         self.assertEqual("Upper Pull", seen[1][0]["focus"])
+        self.assertEqual([], seen[1][0]["selected_muscles"])
 
     def test_aggregate_keeps_observational_metrics_structured(self):
         day = {
