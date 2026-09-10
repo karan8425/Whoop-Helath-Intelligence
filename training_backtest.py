@@ -8,11 +8,13 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
+from integrations.tonal.program_balance import DEFAULT_CALIBRATION, PROFILES
+
 from training_backtest_metrics import aggregate
 from training_replay import ReplayContext, replay_day
 
 
-def run(start: date, end: date, cutoff_hour=7, include_details=False, calibration="balanced"):
+def run(start: date, end: date, cutoff_hour=7, include_details=False, calibration=DEFAULT_CALIBRATION):
     if end < start:
         raise ValueError("end date must not precede start date")
     days = []
@@ -22,7 +24,7 @@ def run(start: date, end: date, cutoff_hour=7, include_details=False, calibratio
         result = replay_day(
             ReplayContext.morning(current, cutoff_hour),
             include_details,
-            recommendation_history=recommendation_history[:3],
+            recommendation_history=recommendation_history[:3 if calibration == "baseline" else 30],
             calibration=calibration,
         )
         days.append(result)
@@ -30,6 +32,8 @@ def run(start: date, end: date, cutoff_hour=7, include_details=False, calibratio
             "plan_date": current,
             "focus": result["recommendation"].get("session_type"),
             "selected_muscles": result["recommendation"].get("selected_muscles") or [],
+            "primary_focus": result["recommendation"].get("primary_focus"),
+            "secondary_focus": result["recommendation"].get("secondary_focus") or [],
         })
         current += timedelta(days=1)
     return {"summary": aggregate(days), "days": days}
@@ -79,7 +83,7 @@ def main(argv=None):
     parser.add_argument("--format", choices=("json", "csv"), default="json")
     parser.add_argument("--include-details", action="store_true")
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--calibration", choices=("baseline", "coverage", "coverage_rotation", "balanced"), default="balanced")
+    parser.add_argument("--calibration", choices=tuple(PROFILES), default=DEFAULT_CALIBRATION)
     args = parser.parse_args(argv)
     start = args.date or args.start_date
     end = args.date or args.end_date

@@ -449,11 +449,13 @@ def _movement_eligibility(profile, target_muscles, suppressed_muscles):
     return True, "Primary muscle matches an eligible selected target."
 
 
-def _selection_family(profile):
-    return (
-        _family_for_movement(profile.get("name"))
-        or f"movement:{profile.get('movement_id') or profile.get('name')}"
-    )
+def _selection_family(profile, legacy_unknown_family=False):
+    family = _family_for_movement(profile.get("name"))
+    # "other" is a classification fallback, not one interchangeable exercise
+    # family. Keep distinct upper-body movements available for target coverage.
+    if family != "other" or legacy_unknown_family:
+        return family
+    return f"movement:{profile.get('movement_id') or profile.get('name')}"
 
 
 def _select_movements(
@@ -462,6 +464,7 @@ def _select_movements(
     secondary_focus,
     suppressed_muscles=None,
     max_exercises=5,
+    legacy_unknown_family=False,
 ):
     target_muscles = list(dict.fromkeys(primary_focus + secondary_focus))
     suppressed_names = {
@@ -495,7 +498,7 @@ def _select_movements(
             profile = candidate["profile"]
             if profile in selected or _normalized_muscles(profile)[0] != target:
                 continue
-            family = _selection_family(profile)
+            family = _selection_family(profile, legacy_unknown_family)
             if family in used_families:
                 continue
             selected.append(profile)
@@ -509,7 +512,7 @@ def _select_movements(
         if len(selected) >= max_exercises:
             break
         profile = candidate["profile"]
-        family = _selection_family(profile)
+        family = _selection_family(profile, legacy_unknown_family)
         if profile in selected or family in used_families:
             continue
         selected.append(profile)
@@ -1656,7 +1659,10 @@ def _prescribe_exercise(
 # DAILY WORKOUT ENGINE
 # ============================================================
 
-def build_daily_workout_prescription(now=None, recommendation_history=None, calibration="balanced"):
+from integrations.tonal.program_balance import DEFAULT_CALIBRATION
+
+
+def build_daily_workout_prescription(now=None, recommendation_history=None, calibration=DEFAULT_CALIBRATION, selection_diagnostics=False):
 
     readiness = (
         _latest_readiness(now=now)
@@ -1784,6 +1790,7 @@ def build_daily_workout_prescription(now=None, recommendation_history=None, cali
             secondary,
             suppressed_muscles=suppressed,
             max_exercises=max_exercises,
+            legacy_unknown_family=(calibration == "baseline"),
         )
 
     selected = select_for_focus(primary_focus, secondary_focus)
@@ -1805,6 +1812,25 @@ def build_daily_workout_prescription(now=None, recommendation_history=None, cali
         if session_type == "Core + Accessories":
             return "Core" in covered and bool(covered - {"Core"})
         return True
+
+    if selection_diagnostics:
+        rank_map = {row['muscle']: row for row in priorities.get('ranked_muscles', [])}
+        for template in priorities.get('session_template_scores', []):
+            if not template.get('eligible'):
+                template['movement_eligible'] = False
+                continue
+            focus = _session_from_templates([template], priorities.get('ranked_muscles', []))
+            primary = focus['primary_focus']; secondary = focus['secondary_focus']
+            movements = select_for_focus(primary, secondary)
+            names = primary + secondary
+            template.update(
+                candidate_primary=primary, candidate_secondary=secondary,
+                movement_eligible=sufficient(movements, names, template['session_type']),
+                candidate_readiness={m: rank_map[m]['readiness_state'] for m in names},
+                program_need_score=round(sum(rank_map[m].get('bounded_stimulus_score', 0.)
+                    + rank_map[m].get('program_coverage_score', 0.) for m in names)/max(1,len(names)), 2),
+                movement_primary_muscles=sorted({_normalized_muscles(p)[0] for p in movements if _normalized_muscles(p)}),
+            )
 
     if not sufficient(
         selected,

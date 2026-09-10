@@ -74,7 +74,10 @@ def aggregate(days):
     target_sets = [float(day["recommendation"]["target_sets"]) for day in days if day["recommendation"].get("target_sets") is not None]
     set_ratios = [float(day["comparison"]["recommended_set_ratio_vs_personal_median"])
                   for day in days if day.get("comparison", {}).get("recommended_set_ratio_vs_personal_median") is not None]
+    from training_calibration_metrics import calibration_metrics
+    calibrated = calibration_metrics(days)
     return {
+        "calibration_diagnostics": calibrated,
         "coverage": {"requested_days": len(days), "evaluable_days": quality["COMPLETE"] + quality["PARTIAL"],
                      "complete_days": quality["COMPLETE"],
                      "partial_days": quality["PARTIAL"], "insufficient_days": quality["INSUFFICIENT"]},
@@ -83,7 +86,8 @@ def aggregate(days):
         "template_concentration": round(max(sessions.values()) / sum(sessions.values()), 3) if sessions else None,
         "muscle_selection": {"recommended_frequency": dict(selected), "actual_frequency": dict(actual),
                              "readiness_state_distribution": dict(readiness_selected),
-                             "recovering_with_viable_ready_fresh_alternative": recovering_with_viable,
+                             "legacy_recovering_with_unselected_ready_fresh_muscle": recovering_with_viable,
+                             "recovering_with_viable_ready_fresh_alternative": calibrated["recovering_audit"]["selections_with_viable_alternative"],
                              "fatigued_selected": fatigued_selected,
                              "suppressed_selected": suppressed_selected,
                              "consecutive_repeated_selections": repeats,

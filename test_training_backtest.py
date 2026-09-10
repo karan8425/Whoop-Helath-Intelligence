@@ -26,6 +26,21 @@ class AggregateMetricsTests(unittest.TestCase):
         self.assertEqual("Upper Pull", seen[1][0]["focus"])
         self.assertEqual([], seen[1][0]["selected_muscles"])
 
+    def test_sequential_history_keeps_roles_and_thirty_prior_days(self):
+        seen = []
+        def fake_replay(context, include_details, recommendation_history, calibration):
+            seen.append(list(recommendation_history))
+            return {"recommendation": {"session_type": "Upper Pull", "selected_muscles": ["Back", "Biceps"],
+                                      "primary_focus": ["Back"], "secondary_focus": ["Biceps"]}}
+        with patch.object(training_backtest, "replay_day", side_effect=fake_replay), \
+             patch.object(training_backtest, "aggregate", return_value={}):
+            training_backtest.run(date(2026, 6, 10), date(2026, 7, 15), calibration="correlation")
+        self.assertEqual(len(seen[-1]), 30)
+        self.assertEqual(seen[-1][0]["plan_date"], date(2026, 7, 14))
+        self.assertTrue(all(row["plan_date"] < date(2026, 7, 15) for row in seen[-1]))
+        self.assertEqual(seen[-1][0]["primary_focus"], ["Back"])
+        self.assertEqual(seen[-1][0]["secondary_focus"], ["Biceps"])
+
     def test_aggregate_keeps_observational_metrics_structured(self):
         day = {
             "replay_date": "2026-07-15",

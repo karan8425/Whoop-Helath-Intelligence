@@ -34,7 +34,7 @@ class ReplayIsolationTests(unittest.TestCase):
             "goals": [{"at": before, "daily_step_target": 7000}],
         }
 
-    def run_replay(self):
+    def run_replay(self, actual_outcome=None):
         with patch.object(training_replay, "_data_quality", return_value={"status": "COMPLETE", "sources": {}, "missing_sources": []}), \
              patch.object(training_replay, "request_scoped_connection", return_value=nullcontext()), \
              patch.object(training_replay, "get_conn", return_value=_ReadOnlyConnection()), \
@@ -42,7 +42,7 @@ class ReplayIsolationTests(unittest.TestCase):
              patch.object(training_replay, "build_daily_workout_prescription", side_effect=lambda now, **_: _training(now, self.sources)), \
              patch.object(training_replay, "load_activity_context", side_effect=lambda now: {"today_row": True, "steps_today": 0, "avg_14": [row for row in self.sources["apple"] if row["at"] <= now.astimezone(timezone.utc)][-1]["steps"], "n_14": 14}), \
              patch.object(training_replay, "build_activity_plan", side_effect=lambda **kwargs: {"step_target": kwargs["goal"]["daily_step_target"]}), \
-             patch.object(training_replay, "_actual_outcome", return_value={"workout_performed": False, "workouts": [], "actual_steps": 7000}):
+             patch.object(training_replay, "_actual_outcome", return_value=actual_outcome or {"workout_performed": False, "workouts": [], "actual_steps": 7000}):
             return replay_day(self.context, include_details=False)
 
     def test_future_tonal_whoop_body_and_apple_data_do_not_change_recommendation(self):
@@ -59,11 +59,10 @@ class ReplayIsolationTests(unittest.TestCase):
         self.assertEqual(self.run_replay()["recommendation"], self.run_replay()["recommendation"])
 
     def test_outcome_is_not_passed_to_recommendation_engine(self):
-        with patch.object(training_replay, "_actual_outcome") as outcome:
-            outcome.return_value = {"workout_performed": True, "workouts": [], "actual_steps": 1}
-            with patch.object(self, "run_replay", wraps=self.run_replay):
-                pass
-        self.assertEqual(self.context.as_of.hour, 11)  # 07:00 EDT expressed in UTC.
+        first = self.run_replay()
+        changed = self.run_replay({"workout_performed": True, "workouts": [], "actual_steps": 99999})
+        self.assertNotEqual(first["actual_outcome"], changed["actual_outcome"])
+        self.assertEqual(first["recommendation"], changed["recommendation"])
 
     def test_context_uses_new_york_morning_cutoff(self):
         self.assertEqual("2026-07-15T11:00:00+00:00", self.context.as_of.isoformat())

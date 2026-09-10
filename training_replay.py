@@ -10,8 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from uuid import UUID
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from integrations.tonal.program_balance import DEFAULT_CALIBRATION
 
 from activity_plan import build_activity_plan, load_activity_context
 from db import get_conn, request_scoped_connection
@@ -20,7 +23,7 @@ from integrations.tonal.workout_prescription import build_daily_workout_prescrip
 
 
 EASTERN = ZoneInfo("America/New_York")
-ENGINE_VERSION = "training-b3.0.1+b4"
+ENGINE_VERSION = "training-b3.2+b4"
 PLAN_VERSION = "1.3"
 BACKTEST_VERSION = "b3.1-v1"
 
@@ -48,6 +51,8 @@ class ReplayContext:
 def _json_safe(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, dict):
@@ -213,7 +218,7 @@ def _progression_follow_up(session: dict, outcome: dict) -> list[dict]:
     return results
 
 
-def replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None, calibration="balanced") -> dict:
+def replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None, calibration=DEFAULT_CALIBRATION) -> dict:
     """Run B3/B4 under one read-only logical request to avoid TLS amplification."""
     with request_scoped_connection():
         with get_conn() as conn:
@@ -222,13 +227,14 @@ def replay_day(context: ReplayContext, include_details: bool = True, recommendat
         return _replay_day(context, include_details, recommendation_history, calibration)
 
 
-def _replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None, calibration="balanced") -> dict:
+def _replay_day(context: ReplayContext, include_details: bool = True, recommendation_history=None, calibration=DEFAULT_CALIBRATION) -> dict:
     quality = _data_quality(context)
     goal = get_active_goal(as_of=context.as_of)
     training = build_daily_workout_prescription(
         now=context.as_of,
         recommendation_history=recommendation_history,
         calibration=calibration,
+        selection_diagnostics=True,  # Metrics require movement viability even in compact reports.
     )
     strength = _training_activity_shape(training)
     activity_context = load_activity_context(now=context.as_of.astimezone(EASTERN))
@@ -307,6 +313,8 @@ def _recommendation_shape(training: dict, activity: dict) -> dict:
     dose = session.get("dose_diagnostics") or {}
     return {
         "training_status": readiness.get("training_category") or training.get("status"),
+        "primary_focus": session.get("primary_focus") or [],
+        "secondary_focus": session.get("secondary_focus") or [],
         "selected_muscles": list(dict.fromkeys((session.get("primary_focus") or []) + (session.get("secondary_focus") or []))),
         "session_type": session.get("session_type"),
         "exercise_count": session.get("exercise_count"),
