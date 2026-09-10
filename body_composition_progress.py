@@ -251,7 +251,7 @@ def _load_daily_body_history(as_of=None):
                     'body_fat_percentage'
                 )
 
-                  AND (%s IS NULL OR observed_at <= %s)
+                  AND (%s::timestamptz IS NULL OR observed_at <= %s)
 
                 GROUP BY
                     measurement_date,
