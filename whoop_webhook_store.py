@@ -444,6 +444,39 @@ def mark_pipeline_failed(
             ))
 
 
+def take_superseded_skips(
+    within_minutes=10,
+):
+
+    # Atomically claim events that were skipped because a pipeline run was
+    # already in flight. Related WHOOP events (sleep.updated then
+    # recovery.updated) share a lock window: when one skips the other, a
+    # single follow-up pipeline run must still cover it so the coaching day
+    # converges without waiting for the reconciliation cron.
+    #
+    # Claiming (flipping the status) makes this idempotent: a subsequent
+    # completed run will not re-drive the same skip again.
+
+    with get_conn() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute("""
+                UPDATE whoop_webhook_events
+                SET pipeline_status = 'skipped_superseded'
+                WHERE pipeline_status = 'skipped_pipeline_busy'
+                  AND received_at >=
+                      NOW() - (%s || ' minutes')::interval
+                RETURNING id
+            """, (
+                str(int(within_minutes)),
+            ))
+
+            claimed = cur.fetchall()
+
+    return len(claimed)
+
+
 # ============================================================
 # DISTRIBUTED PIPELINE LOCK
 # ============================================================

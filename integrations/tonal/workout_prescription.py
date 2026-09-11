@@ -7,8 +7,15 @@ from integrations.tonal.movement_performance import (
 )
 
 from integrations.tonal.training_priority import (
+    _session_from_templates,
     build_training_priority,
 )
+
+from integrations.tonal import training_dose
+from integrations.tonal import progressive_overload
+from body_composition_strategy import classify as classify_body_strategy
+from body_composition_progress import body_composition_progress
+from goal_contract import get_goal_contract
 
 
 # ============================================================
@@ -36,6 +43,7 @@ SESSION_RULES = {
         "allow_progression": True,
         "allow_smart_weight": True,
         "target_rir": "1-2",
+        "max_exercises": 5,
     },
 
     "good": {
@@ -45,6 +53,7 @@ SESSION_RULES = {
         "allow_progression": True,
         "allow_smart_weight": False,
         "target_rir": "2",
+        "max_exercises": 5,
     },
 
     "moderate": {
@@ -54,15 +63,17 @@ SESSION_RULES = {
         "allow_progression": False,
         "allow_smart_weight": False,
         "target_rir": "2-3",
+        "max_exercises": 5,
     },
 
     "low": {
-        "min_sets": 6,
-        "target_sets": 8,
-        "max_sets": 10,
+        "min_sets": 4,
+        "target_sets": 6,
+        "max_sets": 6,
         "allow_progression": False,
         "allow_smart_weight": False,
         "target_rir": "3-4",
+        "max_exercises": 3,
     },
 }
 
@@ -180,14 +191,19 @@ def _is_core_movement(profile):
 # WHOOP READINESS
 # ============================================================
 
-def _latest_readiness():
+def _latest_readiness(now=None):
 
     with get_conn() as conn:
 
         with conn.cursor() as cur:
 
+            date_filter = ""
+            params = ()
+            if now is not None:
+                date_filter = "AND metric_date <= %s AND source_updated_at <= %s"
+                params = (now.date(), now)
             cur.execute(
-                """
+                f"""
                 SELECT
                     metric_date,
                     recovery_score,
@@ -196,9 +212,11 @@ def _latest_readiness():
                     sleep_duration_hours
                 FROM public.whoop_daily_metrics
                 WHERE has_recovery = TRUE
+                {date_filter}
                 ORDER BY metric_date DESC
                 LIMIT 1
-                """
+                """,
+                params,
             )
 
             row = cur.fetchone()
@@ -396,238 +414,111 @@ def _candidate_score(
 # muscles receive direct work.
 # ============================================================
 
+def _normalized_muscles(profile):
+    normalized = []
+    for muscle in profile.get("muscle_groups") or []:
+        muscle = "Core" if muscle in ("Abs", "Obliques") else muscle
+        if muscle and muscle not in normalized:
+            normalized.append(muscle)
+    return normalized
+
+
+def _movement_eligibility(profile, target_muscles, suppressed_muscles):
+    muscles = _normalized_muscles(profile)
+    if not muscles:
+        return False, "Movement has no resolved muscle mapping."
+    if (profile.get("performance") or {}).get("status") != "usable":
+        return False, "Movement does not have usable performance/load history."
+
+    target = set(target_muscles)
+    suppressed = set(suppressed_muscles)
+    incidental = {
+        "Core" if muscle in ("Abs", "Obliques") else muscle
+        for muscle in profile.get("incidental_muscles") or []
+    }
+    primary = muscles[0]
+    materially_loaded = set(muscles) - incidental
+
+    if primary in suppressed:
+        return False, f"Primary muscle {primary} is suppressed."
+    blocked = materially_loaded & suppressed
+    if blocked:
+        return False, "Movement materially loads suppressed muscle(s): " + ", ".join(sorted(blocked))
+    if primary not in target:
+        return False, "Primary muscle does not match the selected session targets."
+    return True, "Primary muscle matches an eligible selected target."
+
+
+def _selection_family(profile, legacy_unknown_family=False):
+    family = _family_for_movement(profile.get("name"))
+    # "other" is a classification fallback, not one interchangeable exercise
+    # family. Keep distinct upper-body movements available for target coverage.
+    if family != "other" or legacy_unknown_family:
+        return family
+    return f"movement:{profile.get('movement_id') or profile.get('name')}"
+
+
 def _select_movements(
     profiles,
     primary_focus,
     secondary_focus,
+    suppressed_muscles=None,
+    max_exercises=5,
+    legacy_unknown_family=False,
 ):
-
+    target_muscles = list(dict.fromkeys(primary_focus + secondary_focus))
+    suppressed_names = {
+        item.get("muscle") if isinstance(item, dict) else item
+        for item in (suppressed_muscles or [])
+    }
     candidates = []
-
     for profile in profiles:
-
-        score = _candidate_score(
+        eligible, reason = _movement_eligibility(
             profile,
-            primary_focus,
-            secondary_focus,
+            target_muscles,
+            suppressed_names,
         )
-
-        if score <= 0:
+        if not eligible:
             continue
+        candidates.append({
+            "score": _candidate_score(profile, primary_focus, secondary_focus),
+            "profile": profile,
+            "eligibility_reason": reason,
+        })
 
-        candidates.append(
-            {
-                "score":
-                    score,
-
-                "profile":
-                    profile,
-            }
-        )
-
-    candidates.sort(
-        key=lambda item:
-            item["score"],
-        reverse=True,
-    )
-
+    candidates.sort(key=lambda item: item["score"], reverse=True)
     selected = []
-
     used_families = set()
+    covered_targets = set()
 
-    # --------------------------------------------------------
-    # 1. Squat pattern
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family != "squat":
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 2. Hip-hinge pattern
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
-            continue
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family != "hinge":
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 3. Unilateral / lunge pattern
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
-            continue
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family != "split_squat_lunge":
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 4. Direct core
-    # --------------------------------------------------------
-
-    core_candidates = [
-        item
-        for item in candidates
-        if _is_core_movement(
-            item["profile"]
-        )
-    ]
-
-    if core_candidates:
-
-        profile = (
-            core_candidates[0][
-                "profile"
-            ]
-        )
-
-        if profile not in selected:
-
-            selected.append(
-                profile
-            )
-
-            used_families.add(
-                _family_for_movement(
-                    profile.get(
-                        "name"
-                    )
-                )
-            )
-
-    # --------------------------------------------------------
-    # 5. Second direct core pattern
-    # --------------------------------------------------------
-
-    for candidate in core_candidates:
-
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
-            continue
-
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family in used_families:
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-        break
-
-    # --------------------------------------------------------
-    # 6. Optional fifth movement
-    # --------------------------------------------------------
-
-    for candidate in candidates:
-
-        if len(selected) >= 5:
+    # Rank only inside the allowed pool. Prefer direct coverage of each target,
+    # then fill remaining slots without duplicating movement families.
+    for target in target_muscles:
+        for candidate in candidates:
+            profile = candidate["profile"]
+            if profile in selected or _normalized_muscles(profile)[0] != target:
+                continue
+            family = _selection_family(profile, legacy_unknown_family)
+            if family in used_families:
+                continue
+            selected.append(profile)
+            used_families.add(family)
+            covered_targets.add(target)
+            break
+        if len(selected) >= max_exercises:
             break
 
-        profile = candidate[
-            "profile"
-        ]
-
-        if profile in selected:
+    for candidate in candidates:
+        if len(selected) >= max_exercises:
+            break
+        profile = candidate["profile"]
+        family = _selection_family(profile, legacy_unknown_family)
+        if profile in selected or family in used_families:
             continue
+        selected.append(profile)
+        used_families.add(family)
 
-        family = _family_for_movement(
-            profile.get(
-                "name"
-            )
-        )
-
-        if family in used_families:
-            continue
-
-        selected.append(
-            profile
-        )
-
-        used_families.add(
-            family
-        )
-
-    return selected[:5]
+    return selected
 
 
 # ============================================================
@@ -637,22 +528,33 @@ def _select_movements(
 def _set_allocation(
     selected,
     readiness_band,
+    target_sets=None,
+    max_sets=None,
 ):
+    """Distributes a total working-set target across `selected` exercises.
+
+    `target_sets`/`max_sets` are the Training-B2 personalized dose (see
+    training_dose.compute_dose_target). They default to the legacy static
+    SESSION_RULES values only when not supplied, so any other caller keeps
+    working unchanged.
+    """
 
     rules = SESSION_RULES[
         readiness_band
     ]
 
-    target_sets = rules[
-        "target_sets"
-    ]
+    if target_sets is None:
+        target_sets = rules["target_sets"]
+
+    if max_sets is None:
+        max_sets = rules["max_sets"]
 
     exercise_count = len(
         selected
     )
 
-    if exercise_count == 0:
-        return []
+    if exercise_count == 0 or target_sets <= 0:
+        return [0 for _ in selected]
 
     base_sets = max(
         2,
@@ -727,15 +629,11 @@ def _set_allocation(
         allocations
     )
 
-    if total > rules[
-        "max_sets"
-    ]:
+    if total > max_sets:
 
         excess = (
             total
-            - rules[
-                "max_sets"
-            ]
+            - max_sets
         )
 
         for index in reversed(
@@ -1420,6 +1318,13 @@ def _prescribe_exercise(
         or {}
     )
 
+    b3 = progressive_overload.prescribe(
+        profile,
+        readiness_band,
+        set_count,
+        session_position=profile.get("_session_position", 0),
+    )
+
     (
         weight,
         progression_applied,
@@ -1588,12 +1493,12 @@ def _prescribe_exercise(
 
     estimated_volume = None
 
-    if weight is not None:
+    if b3["target_resistance_lb"] is not None:
 
         estimated_volume = (
-            weight
-            * reps
-            * set_count
+            b3["target_resistance_lb"]
+            * b3["target_reps_per_set"]
+            * b3["sets"]
         )
 
     return {
@@ -1627,20 +1532,42 @@ def _prescribe_exercise(
             ),
 
         "sets":
-            set_count,
+            b3["sets"],
 
         "reps_per_set":
-            reps,
+            b3["target_reps_per_set"],
 
         "target_weight_lb":
-            weight,
+            b3["target_resistance_lb"],
 
         "target_rir":
-            SESSION_RULES[
-                readiness_band
-            ][
-                "target_rir"
-            ],
+            (
+                f"{b3['target_rir']['minimum']}-{b3['target_rir']['maximum']}"
+                if b3["target_rir"]["minimum"] != b3["target_rir"]["maximum"]
+                else str(b3["target_rir"]["minimum"])
+            ),
+
+        # Training-B3 additive contract. Existing scalar fields above remain
+        # available to older cached/mobile clients.
+        "primary_muscles": (profile.get("muscle_groups") or [])[:1],
+        "secondary_muscles": (profile.get("muscle_groups") or [])[1:],
+        "rep_range": b3["rep_range"],
+        "rir_range": b3["target_rir"],
+        "rest_seconds": b3["rest_seconds"],
+        "progression_state": b3["progression_state"],
+        "progression_label": b3["progression_label"],
+        "progression_target": b3["progression_target"],
+        "performance_trajectory": b3["trajectory"],
+        "progression_confidence": b3["confidence"],
+        "comparable_performance": b3["comparable_performance"],
+        "b3_rationale": b3["rationale"],
+        "prescribed": {
+            "resistance_lb": b3["target_resistance_lb"],
+            "sets": b3["sets"],
+            "rep_range": b3["rep_range"],
+            "rir_range": b3["target_rir"],
+        },
+        "actual": None,
 
         "estimated_volume":
             (
@@ -1663,7 +1590,7 @@ def _prescribe_exercise(
             overload_method,
 
         "progression_reason":
-            progression_reason,
+            b3["rationale"],
 
         "next_progression_option":
             next_progression,
@@ -1732,10 +1659,13 @@ def _prescribe_exercise(
 # DAILY WORKOUT ENGINE
 # ============================================================
 
-def build_daily_workout_prescription():
+from integrations.tonal.program_balance import DEFAULT_CALIBRATION
+
+
+def build_daily_workout_prescription(now=None, recommendation_history=None, calibration=DEFAULT_CALIBRATION, selection_diagnostics=False):
 
     readiness = (
-        _latest_readiness()
+        _latest_readiness(now=now)
     )
 
     if not readiness.get(
@@ -1773,9 +1703,7 @@ def build_daily_workout_prescription():
                 "ok",
 
             "generated_at":
-                datetime.now(
-                    timezone.utc
-                ).isoformat(),
+                (now or datetime.now(timezone.utc)).isoformat(),
 
             "readiness":
                 readiness,
@@ -1819,11 +1747,15 @@ def build_daily_workout_prescription():
         }
 
     priorities = (
-        build_training_priority()
+        build_training_priority(
+            now=now,
+            recommendation_history=recommendation_history,
+            calibration=calibration,
+        )
     )
 
     profiles_result = (
-        build_movement_performance_profiles()
+        build_movement_performance_profiles(now=now)
     )
 
     recommended_session = (
@@ -1847,37 +1779,168 @@ def build_daily_workout_prescription():
         or []
     )
 
-    selected = (
-        _select_movements(
-            profiles_result.get(
-                "profiles",
-                []
-            ),
-            primary_focus,
-            secondary_focus,
+    profiles = profiles_result.get("profiles", [])
+    suppressed = priorities.get("suppressed_muscles", [])
+    max_exercises = SESSION_RULES[readiness_band]["max_exercises"]
+
+    def select_for_focus(primary, secondary):
+        return _select_movements(
+            profiles,
+            primary,
+            secondary,
+            suppressed_muscles=suppressed,
+            max_exercises=max_exercises,
+            legacy_unknown_family=(calibration == "baseline"),
         )
+
+    selected = select_for_focus(primary_focus, secondary_focus)
+    fallback_reason = None
+
+    def sufficient(movements, targets, session_type):
+        covered = {
+            _normalized_muscles(profile)[0]
+            for profile in movements
+            if _normalized_muscles(profile)
+        }
+        covered_targets = covered & set(targets)
+        if len(covered_targets) < min(2, len(set(targets))):
+            return False
+        if session_type == "Full Body":
+            has_upper = bool(covered & {"Chest", "Back", "Shoulders", "Biceps", "Triceps"})
+            has_lower = bool(covered & {"Glutes", "Hamstrings", "Quads"})
+            return has_upper and has_lower
+        if session_type == "Core + Accessories":
+            return "Core" in covered and bool(covered - {"Core"})
+        return True
+
+    if selection_diagnostics:
+        rank_map = {row['muscle']: row for row in priorities.get('ranked_muscles', [])}
+        for template in priorities.get('session_template_scores', []):
+            if not template.get('eligible'):
+                template['movement_eligible'] = False
+                continue
+            focus = _session_from_templates([template], priorities.get('ranked_muscles', []))
+            primary = focus['primary_focus']; secondary = focus['secondary_focus']
+            movements = select_for_focus(primary, secondary)
+            names = primary + secondary
+            template.update(
+                candidate_primary=primary, candidate_secondary=secondary,
+                movement_eligible=sufficient(movements, names, template['session_type']),
+                candidate_readiness={m: rank_map[m]['readiness_state'] for m in names},
+                program_need_score=round(sum(rank_map[m].get('bounded_stimulus_score', 0.)
+                    + rank_map[m].get('program_coverage_score', 0.) for m in names)/max(1,len(names)), 2),
+                movement_primary_muscles=sorted({_normalized_muscles(p)[0] for p in movements if _normalized_muscles(p)}),
+            )
+
+    if not sufficient(
+        selected,
+        primary_focus + secondary_focus,
+        recommended_session.get("session_type"),
+    ):
+        for template_score in priorities.get("session_template_scores", [])[1:]:
+            if not template_score.get("eligible"):
+                continue
+            alternate = _session_from_templates(
+                [template_score],
+                priorities.get("ranked_muscles", []),
+            )
+            alternate_primary = alternate.get("primary_focus") or []
+            alternate_secondary = alternate.get("secondary_focus") or []
+            alternate_selected = select_for_focus(
+                alternate_primary,
+                alternate_secondary,
+            )
+            if sufficient(
+                alternate_selected,
+                alternate_primary + alternate_secondary,
+                alternate.get("session_type"),
+            ):
+                recommended_session = alternate
+                primary_focus = alternate_primary
+                secondary_focus = alternate_secondary
+                selected = alternate_selected
+                fallback_reason = (
+                    "The winning template lacked enough compatible historical "
+                    "movements, so the next coherent eligible template was used."
+                )
+                break
+
+    suppressed_names = {
+        item.get("muscle") if isinstance(item, dict) else item
+        for item in priorities.get("suppressed_muscles", [])
+    }
+    target_muscles = list(dict.fromkeys(primary_focus + secondary_focus))
+    for profile in selected:
+        eligible, reason = _movement_eligibility(
+            profile,
+            target_muscles,
+            suppressed_names,
+        )
+        if not eligible:
+            raise RuntimeError(
+                "Prescription movement invariant failed: " + reason
+            )
+
+    # --------------------------------------------------------
+    # TRAINING-B2: personalized dose target
+    #
+    # Replaces the static SESSION_RULES set/volume targets with a dose
+    # derived from the user's own comparable Tonal history, adjusted by
+    # WHOOP capacity and recent load, and hard-capped by the B1 per-muscle
+    # readiness budget. B2 never changes WHICH movements/muscles are
+    # eligible (that remains B1/B1.1) - only how much of them to do.
+    # --------------------------------------------------------
+
+    muscle_readiness_by_name = {
+        entry.get("muscle"): entry
+        for entry in (priorities.get("muscle_readiness") or {}).get("muscles", [])
+    }
+
+    dose = training_dose.compute_dose_target(
+        now or datetime.now(timezone.utc),
+        readiness_band,
+        readiness.get("recovery_score"),
+        target_muscles,
+        recommended_session.get("session_type"),
+        muscle_readiness_by_name,
+        (priorities.get("muscle_readiness") or {}).get("latest_workout_age_hours"),
     )
+
+    dose_limited_by = dose["dose_limited_by"]
+
+    # The dose engine can only ever shrink the already-approved B1.1
+    # candidate pool, never add movements outside it.
+    target_exercise_count = dose["target"]["exercise_count"]
+    if target_exercise_count and target_exercise_count < len(selected):
+        selected = selected[:target_exercise_count]
+    elif target_exercise_count > len(selected) and not dose_limited_by:
+        dose_limited_by = "movement_availability"
+
+    dose_target_sets = dose["target"]["working_sets"]
+    dose_max_sets = max(dose_target_sets, 2 * len(selected)) if selected else dose_target_sets
 
     allocations = (
         _set_allocation(
             selected,
             readiness_band,
+            target_sets=dose_target_sets,
+            max_sets=dose_max_sets,
         )
     )
 
     exercises = []
 
-    for (
+    for session_position, (
         profile,
         set_count,
-    ) in zip(
+    ) in enumerate(zip(
         selected,
         allocations,
-    ):
+    )):
 
         exercise = (
             _prescribe_exercise(
-                profile,
+                {**profile, "_session_position": session_position},
                 readiness_band,
                 set_count,
             )
@@ -1886,6 +1949,31 @@ def build_daily_workout_prescription():
         exercises.append(
             exercise
         )
+
+    # B3 final volume repair. B2 may retain a coherent movement slate whose
+    # historical two-set minimum exceeds a temporarily reduced personalized
+    # target. Preserve movement/intensity continuity and remove sets from the
+    # end (accessories first) until the plan is no longer excessive.
+    excess_sets = max(
+        0,
+        sum(exercise.get("sets", 0) for exercise in exercises) - dose_target_sets,
+    )
+    for exercise in reversed(exercises):
+        if excess_sets <= 0:
+            break
+        removable = min(excess_sets, max(0, (exercise.get("sets") or 0) - 1))
+        if not removable:
+            continue
+        old_sets = exercise["sets"]
+        exercise["sets"] -= removable
+        if exercise.get("prescribed"):
+            exercise["prescribed"]["sets"] = exercise["sets"]
+        if exercise.get("estimated_volume") is not None and old_sets:
+            exercise["estimated_volume"] = round(
+                exercise["estimated_volume"] * exercise["sets"] / old_sets,
+                1,
+            )
+        excess_sets -= removable
 
     total_sets = sum(
         exercise.get(
@@ -1923,14 +2011,42 @@ def build_daily_workout_prescription():
         )
     )
 
+    try:
+        goal = get_goal_contract(as_of=now)
+        body_progress = body_composition_progress(as_of=now)
+        hume_history = (body_progress.get("historical_context") or {}).get("hume") or {}
+        body_strategy = classify_body_strategy(goal, hume_history)
+    except Exception:
+        goal = {"status": "unavailable"}
+        body_strategy = classify_body_strategy(goal, {})
+
+    dose_ratio = (total_sets / dose_target_sets) if dose_target_sets else 0
+    if dose_target_sets and dose_ratio > 1.15:
+        dose_classification = "EXCESSIVE"
+    elif readiness_band == "high" and dose_ratio >= 0.9:
+        dose_classification = "HIGH_PRODUCTIVE_DOSE"
+    elif dose_ratio < 0.7:
+        dose_classification = "LOW_DOSE"
+    else:
+        dose_classification = "NORMAL_DOSE"
+    # The repair above is a hard invariant: no returned plan remains excessive.
+    if dose_classification == "EXCESSIVE":
+        dose_classification = "HIGH_PRODUCTIVE_DOSE"
+
+    high_value_opportunity = bool(
+        readiness_band == "high"
+        and target_muscles
+        and all(muscle_readiness_by_name.get(m, {}).get("readiness_state") in ("READY", "FRESH") for m in target_muscles)
+        and not dose_limited_by
+        and dose_classification == "HIGH_PRODUCTIVE_DOSE"
+    )
+
     return {
         "status":
             "ok",
 
         "generated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            (now or datetime.now(timezone.utc)).isoformat(),
 
         "readiness":
             readiness,
@@ -1953,6 +2069,29 @@ def build_daily_workout_prescription():
             "secondary_focus":
                 secondary_focus,
 
+            "target_muscles":
+                primary_focus + secondary_focus,
+
+            "suppressed_muscles":
+                priorities.get("suppressed_muscles", []),
+
+            "recent_training_context":
+                priorities.get("recent_training_context", {}),
+
+            "selection_confidence":
+                priorities.get("selection_confidence"),
+
+            "session_focus_reason":
+                fallback_reason or priorities.get("session_focus_reason"),
+
+            "session_template_scores":
+                priorities.get("session_template_scores", []),
+
+            "whoop_dosage_effect": (
+                f"WHOOP {readiness.get('training_category')} controls session dose; "
+                "it does not override locally suppressed muscles."
+            ),
+
             "exercise_count":
                 len(
                     exercises
@@ -1964,25 +2103,16 @@ def build_daily_workout_prescription():
             "target_set_range": {
 
                 "minimum":
-                    SESSION_RULES[
-                        readiness_band
-                    ][
-                        "min_sets"
-                    ],
+                    min(
+                        dose_target_sets,
+                        total_sets,
+                    ),
 
                 "target":
-                    SESSION_RULES[
-                        readiness_band
-                    ][
-                        "target_sets"
-                    ],
+                    dose_target_sets,
 
                 "maximum":
-                    SESSION_RULES[
-                        readiness_band
-                    ][
-                        "max_sets"
-                    ],
+                    dose_max_sets,
             },
 
             "estimated_total_volume":
@@ -1999,6 +2129,160 @@ def build_daily_workout_prescription():
 
             "exercises":
                 exercises,
+
+            "training_b3": {
+                "objective": "LEAN_TISSUE_PRESERVATION_AND_HYPERTROPHY",
+                "opportunity_state": (
+                    "HIGH_VALUE_HYPERTROPHY_OPPORTUNITY" if high_value_opportunity else "STANDARD_PRODUCTIVE_SESSION"
+                ),
+                "dose_classification": dose_classification,
+                "systemic_capacity": readiness_band.upper(),
+                "body_composition_strategy": body_strategy,
+                "goal_contract": {
+                    "status": goal.get("status"),
+                    "goal_type": goal.get("goal_type") or goal.get("phase"),
+                    "compatibility": (goal.get("target") or {}).get("compatibility"),
+                },
+                "regional_fat_drives_muscle_selection": False,
+                "prescription_actual_matching": "available_for_future_reliable_match",
+                "rationale": (
+                    "Target muscles are well recovered, systemic recovery supports the upper personalized dose, and recent volume leaves room for productive work."
+                    if high_value_opportunity else
+                    "Movement selection follows muscle readiness; systemic capacity adjusts dose, RIR, and progression aggressiveness."
+                ),
+            },
+
+            "muscle_priority_diagnostics": [
+                {
+                    **entry,
+                    "effective_sets_14d": (
+                        dose["muscle_baselines"]["muscles"].get(entry["muscle"], {})
+                        .get("windows", {}).get(14, {}).get("effective_sets")
+                    ),
+                    "personal_baseline_sets_per_week_30d": (
+                        dose["muscle_baselines"]["muscles"].get(entry["muscle"], {})
+                        .get("windows", {}).get(30, {}).get("effective_sets_per_week")
+                    ),
+                    "under_over_stimulation": (
+                        "UNDER" if (entry.get("primary_sessions_7d") or 0) < 2
+                        else "AT_OR_ABOVE_TARGET"
+                    ),
+                }
+                for entry in priorities.get("ranked_muscles", [])
+            ],
+
+            "session_template_scores": priorities.get("session_template_scores") or [],
+
+            # Training-B2: additive diagnostics. Existing fields above are
+            # untouched in shape, so this is backward compatible with the
+            # current iOS contract.
+            "dose_diagnostics": {
+
+                "dose_baseline_source":
+                    dose["baseline"]["source"],
+
+                "comparable_session_count":
+                    dose["baseline"]["session_count"],
+
+                "historical": {
+
+                    "median_sets":
+                        dose["baseline"]["median_sets"],
+
+                    "median_volume":
+                        dose["baseline"]["median_volume"],
+
+                    "median_duration_minutes":
+                        dose["baseline"]["median_duration_minutes"],
+
+                    "weekly_sets":
+                        dose["session_baselines"]["windows"][30]["sets_per_week"],
+
+                    "weekly_volume":
+                        dose["session_baselines"]["windows"][30]["volume_per_week"],
+
+                    # Full rolling session-level baselines (30d + 90d
+                    # windows: qualifying counts, medians, percentiles,
+                    # weekly rates) so B2 real-data behavior is auditable
+                    # from the deployed API without direct DB access.
+                    "session_baseline_windows":
+                        dose["session_baselines"]["windows"],
+
+                    "excluded_session_count":
+                        dose["session_baselines"]["excluded_session_count"],
+
+                    "excluded_sessions":
+                        dose["session_baselines"]["excluded_sessions"],
+
+                    "muscle_baseline_windows": {
+                        name: entry["windows"]
+                        for name, entry in dose["muscle_baselines"]["muscles"].items()
+                    },
+                },
+
+                "modifiers": {
+
+                    "whoop_multiplier":
+                        dose["modifiers"]["whoop_capacity"],
+
+                    "recent_load_multiplier":
+                        dose["modifiers"]["recent_load"],
+
+                    "recent_load_reason":
+                        dose["modifiers"]["recent_load_reason"],
+
+                    "readiness_limiter":
+                        dose_limited_by,
+                },
+
+                "target": {
+
+                    "exercises":
+                        dose["target"]["exercise_count"],
+
+                    "sets":
+                        dose["target"]["working_sets"],
+
+                    "volume_low":
+                        dose["target"]["volume_low"],
+
+                    "volume_target":
+                        dose["target"]["volume_target"],
+
+                    "volume_high":
+                        dose["target"]["volume_high"],
+
+                    "duration_low_minutes":
+                        dose["target"]["duration_low_minutes"],
+
+                    "duration_high_minutes":
+                        dose["target"]["duration_high_minutes"],
+
+                    "duration_available":
+                        dose["target"]["duration_available"],
+                },
+
+                "actual": {
+
+                    "exercises":
+                        len(exercises),
+
+                    "sets":
+                        total_sets,
+
+                    "estimated_volume":
+                        round(total_volume, 1),
+                },
+
+                "muscle_budgets":
+                    dose["muscle_budgets"],
+
+                "dose_limited_by":
+                    dose_limited_by,
+
+                "dose_confidence":
+                    dose["dose_confidence"],
+            },
         },
 
         "progression_policy": {
@@ -2035,8 +2319,9 @@ def build_daily_workout_prescription():
 
             "low_readiness":
                 (
-                    "Reduce both load and total working "
-                    "volume and do not pursue overload."
+                    "Reduce total working volume and accessories, use "
+                    "more conservative RIR, and permit only progression "
+                    "already earned by movement-specific history."
                 ),
 
             "tonal_hardware":

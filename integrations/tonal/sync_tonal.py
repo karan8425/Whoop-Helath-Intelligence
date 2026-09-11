@@ -5,6 +5,10 @@ from datetime import datetime
 import requests
 
 from db import get_conn
+from integrations.tonal.client import (
+    authenticate as shared_authenticate,
+    tonal_get as shared_tonal_get,
+)
 
 
 # ============================================================
@@ -25,37 +29,7 @@ def authenticate(
     password: str,
 ) -> dict:
 
-    response = requests.post(
-        f"https://{AUTH0_DOMAIN}/oauth/token",
-        json={
-            "grant_type": "password",
-            "client_id": CLIENT_ID,
-            "username": email,
-            "password": password,
-            "scope":
-                "openid profile email offline_access",
-        },
-        timeout=30,
-    )
-
-    if response.status_code == 401:
-        raise RuntimeError(
-            "Tonal rejected the email or password."
-        )
-
-    if response.status_code == 403:
-        raise RuntimeError(
-            "Tonal denied access."
-        )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            "Tonal authentication failed with "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
-        )
-
-    return response.json()
+    return shared_authenticate(email, password)
 
 
 # ============================================================
@@ -69,23 +43,7 @@ def tonal_get(
     headers=None,
 ) -> requests.Response:
 
-    request_headers = {
-        "Authorization":
-            f"Bearer {id_token}",
-    }
-
-    if headers:
-        request_headers.update(
-            headers
-        )
-
-    response = requests.get(
-        API_BASE + path,
-        headers=request_headers,
-        timeout=60,
-    )
-
-    return response
+    return shared_tonal_get(id_token, path, headers=headers)
 
 
 def get_user_info(
@@ -100,8 +58,7 @@ def get_user_info(
     if response.status_code != 200:
         raise RuntimeError(
             "Could not retrieve Tonal user info. "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
+            f"HTTP {response.status_code}."
         )
 
     return response.json()
@@ -119,8 +76,7 @@ def get_movements(
     if response.status_code != 200:
         raise RuntimeError(
             "Could not retrieve Tonal movements. "
-            f"HTTP {response.status_code}: "
-            f"{response.text[:300]}"
+            f"HTTP {response.status_code}."
         )
 
     data = response.json()
@@ -167,8 +123,7 @@ def get_all_workouts(
         if response.status_code != 200:
             raise RuntimeError(
                 "Could not retrieve Tonal workouts. "
-                f"HTTP {response.status_code}: "
-                f"{response.text[:300]}"
+                f"HTTP {response.status_code}."
             )
 
         page = response.json()

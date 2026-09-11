@@ -1,12 +1,53 @@
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from statistics import median
+
+from db import get_conn
 
 from integrations.tonal.strength_analytics import (
     strength_analytics,
 )
+from integrations.tonal.muscle_readiness import calculate_muscle_readiness
 
 
 TARGET_FREQUENCY_7D = 2
+
+SESSION_TEMPLATES = {
+    "Upper Push": {
+        "muscles": ["Chest", "Shoulders", "Triceps"],
+        "minimum_eligible": 2,
+    },
+    "Upper Pull": {
+        "muscles": ["Back", "Biceps"],
+        "minimum_eligible": 2,
+    },
+    "Chest + Biceps": {
+        "muscles": ["Chest", "Biceps"],
+        "minimum_eligible": 2,
+    },
+    "Lower Body": {
+        "muscles": ["Glutes", "Hamstrings", "Quads"],
+        "minimum_eligible": 2,
+    },
+    "Upper Mixed": {
+        "muscles": ["Chest", "Back", "Shoulders", "Biceps", "Triceps"],
+        "minimum_eligible": 3,
+    },
+    "Core + Accessories": {
+        "muscles": ["Core", "Biceps", "Triceps", "Shoulders"],
+        "minimum_eligible": 2,
+    },
+    "Full Body": {
+        "muscles": ["Chest", "Back", "Shoulders", "Glutes", "Hamstrings", "Quads", "Core"],
+        "minimum_eligible": 3,
+    },
+}
+from integrations.tonal.program_balance import (
+    PROFILES as CALIBRATION_PROFILES, READINESS_PRIORITY, DEFAULT_CALIBRATION,
+    YESTERDAY_FOCUS_PENALTY, REPEATED_FOCUS_PENALTY,
+    LOW_CONFIDENCE_REPEAT_PENALTY, REGION_BONUS, ANCHOR_WEIGHT,
+    bounded_history, coverage_state, overlap_rotation, EASTERN,
+)
 
 
 REGION_MUSCLES = {
@@ -229,7 +270,7 @@ def _muscle_priority_score(
             weakest_region,
             [],
         ):
-            score += 20
+            score += REGION_BONUS
 
     return round(
         score,
@@ -371,10 +412,141 @@ def _build_session_focus(
     }
 
 
-def build_training_priority() -> dict:
+def _recommendation_history(now):
+    target_date = now.astimezone(EASTERN).date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT plan_date, plan_payload #>> '{training,session_type}' AS focus,
+                       COALESCE(plan_payload #> '{training,primary_focus}', '[]'::jsonb)
+                       || COALESCE(plan_payload #> '{training,secondary_focus}', '[]'::jsonb)
+                       AS selected_muscles,
+                       plan_payload #> '{training,primary_focus}' AS primary_focus,
+                       plan_payload #> '{training,secondary_focus}' AS secondary_focus
+                FROM todays_plan_cache
+                WHERE plan_date < %s
+                  AND plan_payload #>> '{training,session_type}' IS NOT NULL
+                ORDER BY plan_date DESC
+                LIMIT 30
+                """,
+                (target_date,),
+            )
+            return cur.fetchall()
+
+
+def _score_session_templates(ranked, readiness, history, config=None, actual=None, now=None):
+    config = config or CALIBRATION_PROFILES["baseline"]
+    priority = {row["muscle"]: float(row["priority_score"]) for row in ranked}
+    readiness_by_muscle = {row["muscle"]: row for row in readiness["muscles"]}
+    history = history[:3]
+    yesterday_focus = history[0].get("focus") if history else None
+    repeated = [row.get("focus") for row in history]
+    scored = []
+
+    for name, template in SESSION_TEMPLATES.items():
+        eligible = []
+        for muscle in template["muscles"]:
+            state = readiness_by_muscle[muscle]["readiness_state"]
+            if state not in ("SUPPRESSED", "FATIGUED"):
+                eligible.append(muscle)
+
+        valid = len(eligible) >= template["minimum_eligible"]
+        if name == "Full Body":
+            upper = any(m in eligible for m in ("Chest", "Back", "Shoulders"))
+            lower = any(m in eligible for m in ("Glutes", "Hamstrings", "Quads"))
+            valid = valid and upper and lower
+        if name == "Core + Accessories":
+            valid = valid and "Core" in eligible
+
+        score = -999.0
+        rotation_penalty = 0.0
+        overlap_penalty = 0.0
+        overlap_parts = []
+        selected_components = []
+        scored_focus = None
+        if valid:
+            ordered = sorted(eligible, key=lambda m: priority.get(m, 0.), reverse=True)
+            selected_components = sorted((priority.get(m, 0.) for m in eligible), reverse=True)[:template['minimum_eligible']]
+            scored_focus = None
+            if config.get('aggregation') == 'anchor_support':
+                # Score the muscles that will actually be emitted. Coherent
+                # anchors prevent a Full Body score made only from Lower/Core.
+                required = []
+                if name == 'Full Body':
+                    required = [next(m for m in ordered if m in REGION_MUSCLES['upper']),
+                                next(m for m in ordered if m in REGION_MUSCLES['lower'])]
+                elif name == 'Core + Accessories':
+                    required = ['Core']
+                focus_count = min(3, len(ordered))
+                chosen = required + [m for m in ordered if m not in required][:focus_count-len(required)]
+                scored_focus = [m for m in ordered if m in chosen]
+                selected_components = [priority[m] for m in scored_focus]
+                anchor = max(selected_components)
+                support = (sum(selected_components)-anchor)/(len(selected_components)-1)
+                score = ANCHOR_WEIGHT*anchor + (1.-ANCHOR_WEIGHT)*support
+            else:
+                score = sum(selected_components)/len(selected_components)
+            if yesterday_focus == name:
+                rotation_penalty += YESTERDAY_FOCUS_PENALTY
+            rotation_penalty += repeated.count(name) * REPEATED_FOCUS_PENALTY
+            if readiness["selection_confidence"] != "high" and name in repeated:
+                rotation_penalty += LOW_CONFIDENCE_REPEAT_PENALTY
+            overlap_penalty, overlap_parts = overlap_rotation(
+                scored_focus or eligible, history, actual or {}, now, config['overlap_weights'])
+            # Once overlap-aware rotation is enabled it replaces the name
+            # heuristic. Adding both double-penalized a fulfilled recommendation.
+            rotation_penalty = overlap_penalty if config['overlap_weights'] else rotation_penalty
+            score -= rotation_penalty
+
+        scored.append({
+            "session_type": name,
+            "eligible": valid,
+            "eligible_muscles": eligible,
+            "score": round(score, 1),
+            "rotation_penalty": rotation_penalty,
+            "overlap_penalty": round(overlap_penalty, 1),
+            "overlap_components": overlap_parts,
+            "aggregation_method": "anchor plus normalized support" if scored_focus else "mean of top minimum_eligible scores",
+            "scored_focus": scored_focus,
+            "muscle_scores": {m: priority.get(m, 0.) for m in eligible},
+            "aggregated_components": selected_components,
+            "aggregated_muscles": (scored_focus or ordered[:template["minimum_eligible"]]) if valid else [],
+            "readiness_exclusions": {m: readiness_by_muscle[m]['readiness_state']
+                                      for m in template['muscles'] if m not in eligible},
+        })
+
+    scored.sort(key=lambda row: row["score"], reverse=True)
+    return scored
+
+
+def _session_from_templates(scores, ranked):
+    winner = next((row for row in scores if row["eligible"]), None)
+    if not winner:
+        return {"session_type": "Active Recovery", "primary_focus": [], "secondary_focus": []}
+
+    if winner.get('scored_focus'):
+        return {'session_type': winner['session_type'], 'primary_focus': winner['scored_focus'], 'secondary_focus': []}
+    rank_order = [row["muscle"] for row in ranked]
+    eligible = set(winner["eligible_muscles"])
+    ordered = [muscle for muscle in rank_order if muscle in eligible]
+    primary_count = min(3, len(ordered))
+    primary = ordered[:primary_count]
+    secondary = ordered[primary_count:4]
+    return {
+        "session_type": winner["session_type"],
+        "primary_focus": primary,
+        "secondary_focus": secondary,
+    }
+
+
+def build_training_priority(now=None, recommendation_history=None, calibration=DEFAULT_CALIBRATION) -> dict:
+
+    now = now or datetime.now(timezone.utc)
+    config = CALIBRATION_PROFILES[calibration]
 
     analytics = (
-        strength_analytics()
+        strength_analytics(now=now)
     )
 
     window_7 = (
@@ -409,17 +581,42 @@ def build_training_priority() -> dict:
         )
     )
 
+    muscle_readiness = calculate_muscle_readiness(now=now)
+    readiness_by_name = {
+        item["muscle"]: item for item in muscle_readiness["muscles"]
+    }
+
+    if recommendation_history is None:
+        try:
+            recommendation_history = _recommendation_history(now)
+        except Exception:
+            recommendation_history = []
+
+    if calibration != 'baseline':
+        recommendation_history = bounded_history(recommendation_history, now)
+    coverage_rows = coverage_state(
+        analytics['windows'].get('30', window_7)['muscles'],
+        readiness_by_name, recommendation_history, now, config['coverage_max'])
+
     ranked = []
 
     for muscle, data in muscles.items():
 
-        priority_score = (
+        history_score = (
             _muscle_priority_score(
                 muscle,
                 data,
                 weakest_region,
             )
         )
+
+        readiness_entry = readiness_by_name.get(muscle, {})
+        readiness_state = readiness_entry.get("readiness_state")
+        readiness_component = READINESS_PRIORITY.get(readiness_state, -50.0)
+        coverage_component = coverage_rows[muscle]['coverage_score']
+        bounded_history_score = min(history_score, config["stimulus_cap"]) if config["stimulus_cap"] is not None else history_score
+        region_score = REGION_BONUS if muscle in REGION_MUSCLES.get(weakest_region, []) else 0.
+        priority_score = round(bounded_history_score + readiness_component + coverage_component, 1)
 
         ranked.append(
             {
@@ -428,6 +625,29 @@ def build_training_priority() -> dict:
 
                 "priority_score":
                     priority_score,
+
+                "history_stimulus_score": history_score,
+                "bounded_stimulus_score": bounded_history_score,
+                "stimulus_score": bounded_history_score - region_score,
+                "program_balance_score": region_score,
+                "coverage_score": coverage_component,
+                "final_priority_score": priority_score,
+                "rotation_penalty": 0.,  # Session-level overlap; never double-counted per muscle.
+                "coverage_diagnostics": coverage_rows[muscle],
+                "program_coverage_score": round(coverage_component, 1),
+                "program_coverage_gap_days": round(coverage_rows[muscle]["effective_gap_days"], 1),
+                "program_coverage_relative_floor_days": round(median(r["effective_gap_days"] for r in coverage_rows.values()), 1),
+                "program_coverage_reference_effective_sets": round(coverage_rows[muscle]["relative_exposure_reference"], 1),
+
+                "readiness_state": readiness_state,
+
+                "readiness_score": readiness_entry.get("readiness_score"),
+
+                "readiness_component": readiness_component,
+
+                "effective_sets_7d": readiness_entry.get("effective_sets_7d"),
+
+                "whoop_selection_modifier": 1.0,
 
                 "primary_sessions_7d":
                     data.get(
@@ -489,11 +709,15 @@ def build_training_priority() -> dict:
         ] >= TARGET_FREQUENCY_7D
     ]
 
-    session_focus = (
-        _build_session_focus(
-            priority_muscles
-        )
+    template_scores = _score_session_templates(
+        ranked,
+        muscle_readiness,
+        recommendation_history,
+        config,
+        actual=coverage_rows,
+        now=now,
     )
+    session_focus = _session_from_templates(template_scores, ranked)
 
     rationale = []
 
@@ -595,10 +819,10 @@ def build_training_priority() -> dict:
         "status":
             "ok",
 
+        "calibration": calibration,
+
         "calculated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            now.isoformat(),
 
         "target_frequency_7d":
             TARGET_FREQUENCY_7D,
@@ -611,6 +835,39 @@ def build_training_priority() -> dict:
 
         "recommended_session":
             session_focus,
+
+        "muscle_readiness":
+            muscle_readiness,
+
+        "target_muscles":
+            session_focus["primary_focus"] + session_focus["secondary_focus"],
+
+        "suppressed_muscles": [
+            item for item in muscle_readiness["muscles"]
+            if item["readiness_state"] == "SUPPRESSED"
+        ],
+
+        "eligible_muscles": [
+            item for item in muscle_readiness["muscles"]
+            if item["readiness_state"] not in ("SUPPRESSED", "FATIGUED")
+        ],
+
+        "session_template_scores":
+            template_scores,
+
+        "recent_training_context": {
+            "latest_tonal_workout_at": muscle_readiness["latest_tonal_workout_at"],
+            "latest_workout_age_hours": muscle_readiness["latest_workout_age_hours"],
+            "recommendation_history": recommendation_history,
+        },
+
+        "selection_confidence":
+            muscle_readiness["selection_confidence"],
+
+        "session_focus_reason": (
+            "Highest-scoring coherent template after local muscle suppression, "
+            "program-balance priority and recommendation-rotation penalties."
+        ),
 
         "training_focus":
             session_focus[

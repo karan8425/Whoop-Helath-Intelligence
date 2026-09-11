@@ -22,6 +22,10 @@ from goal_progress import (
     goal_progress,
 )
 
+from goal_progress_v2 import (
+    goal_progress_v2,
+)
+
 from config import (
     SESSION_SECRET,
     ADMIN_PASSWORD,
@@ -89,6 +93,9 @@ from goals import (
     get_goal_history,
     save_goal_profile,
     backfill_active_goal_start_snapshot,
+    current_body_state,
+    preview_goal,
+    activate_goal,
 )
 
 from daily_coaching_service import (
@@ -106,6 +113,11 @@ from today_experience import build_today_experience
 
 from whoop_webhook import (
     router as whoop_webhook_router,
+)
+
+from whoop import (
+    authorization_url,
+    exchange_code,
 )
 
 
@@ -334,6 +346,104 @@ async def health():
 # ============================================================
 # WHOOP
 # ============================================================
+
+@app.get(
+    "/whoop/login"
+)
+async def whoop_login(
+    request: Request,
+):
+
+    require_admin(
+        request
+    )
+
+    state = secrets.token_urlsafe(6)[:8]
+
+    request.session[
+        "oauth_state"
+    ] = state
+
+    return RedirectResponse(
+        authorization_url(
+            state
+        )
+    )
+
+
+@app.get(
+    "/whoop/callback"
+)
+async def whoop_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+
+    require_admin(
+        request
+    )
+
+    expected_state = request.session.pop(
+        "oauth_state",
+        None,
+    )
+
+    if (
+        not state
+        or not expected_state
+        or not secrets.compare_digest(
+            state,
+            expected_state,
+        )
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OAuth state.",
+        )
+
+    if error:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "WHOOP authorization was not completed."
+            ),
+        )
+
+    if not code:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Missing authorization code.",
+        )
+
+    try:
+
+        await exchange_code(
+            code
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail="WHOOP token exchange failed.",
+        ) from exc
+
+    return HTMLResponse(
+        """
+        <html>
+            <body>
+                <h2>WHOOP connected successfully.</h2>
+                <p>Token stored securely.</p>
+                <a href="/">Return</a>
+            </body>
+        </html>
+        """
+    )
 
 @app.get(
     "/freshness"
@@ -577,24 +687,21 @@ async def mobile_goal_progress(
 
     def _compute_goal_progress():
 
-        # goal_progress() calls get_conn() dozens of
-        # times across apple_health_trends(),
-        # body_composition_progress(), and Tonal
-        # strength adherence. Each call normally opens
-        # its own physical DB connection; sharing one
-        # connection for the whole request removes that
-        # repeated TCP/TLS/auth handshake cost without
-        # touching any calculation, query, or the
-        # response shape.
+        # goal_progress_v2() composes goal_progress(),
+        # apple_health_trends(), body_composition_progress(),
+        # Tonal strength adherence and a whoop_daily_metrics
+        # read - each opens get_conn() many times. Sharing one
+        # physical connection for the whole request removes the
+        # repeated TCP/TLS/auth handshake cost without touching
+        # any calculation, query, or the response shape. The V2
+        # response preserves every V1 key and adds the
+        # longitudinal sections alongside them.
         with request_scoped_connection():
-            return goal_progress()
+            return goal_progress_v2()
 
-    # goal_progress() is a synchronous, DB-heavy call
-    # (apple_health_trends, body_composition_progress,
-    # Tonal strength adherence). Run it in the worker
-    # thread pool so it cannot block the asyncio event
-    # loop and stall unrelated concurrent requests on
-    # this Uvicorn worker.
+    # Synchronous, DB-heavy call. Run it in the worker thread
+    # pool so it cannot block the asyncio event loop and stall
+    # unrelated concurrent requests on this Uvicorn worker.
     return await anyio.to_thread.run_sync(
         _compute_goal_progress
     )
@@ -752,6 +859,41 @@ async def mobile_goals_save(
         ) from exc
 
 
+# ============================================================
+# GOAL SETTING V2 - current state / deterministic preview / activation
+# ============================================================
+
+@app.get("/api/v1/goals/current-state")
+async def mobile_goal_current_state(request: Request):
+    require_ingest_key(request)
+    with request_scoped_connection():
+        return {"status": "ok", "current": current_body_state()}
+
+
+@app.post("/api/v1/goals/preview")
+async def mobile_goal_preview(request: Request):
+    """Deterministic timeline + compatibility preview. Never persists."""
+    require_ingest_key(request)
+    try:
+        payload = await request.json()
+        with request_scoped_connection():
+            return preview_goal(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/goals/activate")
+async def mobile_goal_activate(request: Request):
+    """Persist the full V2 goal contract and start the phase."""
+    require_ingest_key(request)
+    try:
+        payload = await request.json()
+        with request_scoped_connection():
+            return activate_goal(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get(
     "/goals/progress"
 )
@@ -763,9 +905,8 @@ async def goals_progress(
         request
     )
 
-    return (
-        goal_progress()
-    )
+    with request_scoped_connection():
+        return goal_progress_v2()
 
 
 # ============================================================

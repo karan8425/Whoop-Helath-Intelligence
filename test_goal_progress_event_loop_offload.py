@@ -1,13 +1,13 @@
 """GET /api/v1/goals/progress must not block the asyncio event loop.
 
-goal_progress() is a synchronous, DB-heavy call (apple_health_trends,
+goal_progress_v2() is a synchronous, DB-heavy call (apple_health_trends,
 body_composition_progress, Tonal strength adherence). The route offloads
 it to the anyio worker thread pool so it cannot stall unrelated concurrent
 requests on the same Uvicorn worker. These tests pin:
 
   CASE A  the response shape/result is unchanged
-  CASE B  goal_progress() actually executes off the event-loop thread
-  CASE C  an exception from goal_progress() propagates unchanged
+  CASE B  goal_progress_v2() actually executes off the event-loop thread
+  CASE C  an exception from goal_progress_v2() propagates unchanged
 """
 
 import os
@@ -56,7 +56,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
         # These tests are about thread-offload / response-shape /
         # error-propagation behavior, not the DB connection-sharing
         # plumbing (that has its own dedicated tests in
-        # test_goal_progress_connection_reuse.py). goal_progress is
+        # test_goal_progress_connection_reuse.py). goal_progress_v2 is
         # mocked in every test here, so it never actually needs a
         # database - replace request_scoped_connection with a no-op
         # so opening one doesn't require a real DATABASE_URL.
@@ -81,7 +81,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
 
         with patch.object(
             main,
-            "goal_progress",
+            "goal_progress_v2",
             return_value=fake_result,
         ):
             response = self.client.get(
@@ -95,7 +95,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
     def test_auth_behavior_unchanged(self):
         with patch.object(
             main,
-            "goal_progress",
+            "goal_progress_v2",
             return_value={"status": "ok"},
         ):
             unauthenticated = self.client.get(
@@ -111,7 +111,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
         self.assertEqual(wrong_key.status_code, 401)
 
     # ------------------------------------------------------------
-    # CASE B - goal_progress() runs off the event-loop thread
+    # CASE B - goal_progress_v2() runs off the event-loop thread
     # ------------------------------------------------------------
 
     def test_goal_progress_executes_off_the_event_loop_thread(self):
@@ -146,7 +146,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
 
         with patch.object(
             main,
-            "goal_progress",
+            "goal_progress_v2",
             side_effect=_record_thread_and_return,
         ):
             result = asyncio.run(
@@ -166,7 +166,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
         # Direct wiring check: the coroutine itself must hand the
         # goal-progress computation to anyio.to_thread.run_sync
         # rather than calling it inline. It no longer passes
-        # goal_progress directly (it passes a small closure that
+        # goal_progress_v2 directly (it passes a small closure that
         # also opens the shared request-scoped connection), so
         # assert on behavior: run_sync must be awaited exactly once
         # with a zero-argument callable that, when invoked, calls
@@ -203,7 +203,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
 
         with patch.object(
             main,
-            "goal_progress",
+            "goal_progress_v2",
             return_value={"status": "ok", "marker": "delegated"},
         ):
             self.assertEqual(
@@ -220,7 +220,7 @@ class GoalProgressEventLoopOffloadTests(unittest.TestCase):
     def test_goal_progress_exception_propagates_unchanged(self):
         with patch.object(
             main,
-            "goal_progress",
+            "goal_progress_v2",
             side_effect=RuntimeError("boom"),
         ):
             with self.assertRaises(RuntimeError) as ctx:

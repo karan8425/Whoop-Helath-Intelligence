@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from db import get_conn
 from freshness import freshness_status
 from todays_plan import build_todays_plan
+from activity_plan import build_activity_plan
 
 
 # ============================================================
@@ -12,7 +13,20 @@ from todays_plan import build_todays_plan
 # ============================================================
 
 TABLE_NAME = "todays_plan_cache"
-PLAN_VERSION = 1
+# 3 -> 4: the B2 training card now carries the dose_diagnostics payload,
+# which a v3 row cached between the engine deploy and the pass-through
+# deploy would lack. Bumping forces a clean rebuild of the full B2 shape.
+# 4 -> 5: B3 adds exercise-level rep/load/RIR/rest/progression semantics and
+# body-composition strategy; cached v4 plans must be rebuilt to expose them.
+# 5 -> 6: discard the transient B3 guardrail-error payload cached before the
+# deterministic set-repair path was deployed.
+# 6 -> 7: rebuild B3 strategy with legacy phase-to-goal compatibility.
+# 7 -> 8: B3.0.1 separates local muscle selection from systemic dose and
+# rejects the previous recovering-muscle recommendation semantics.
+# 8 -> 9: expose normalized session/rotation diagnostics and preserve
+# exercise-level progression evidence under low systemic recovery.
+# 9 -> 10: reject the cached legacy low-readiness policy description.
+PLAN_VERSION = 12
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
@@ -405,9 +419,29 @@ def get_or_build_todays_plan(
                 flush=True,
             )
 
-            return cached.get(
-                "plan_payload"
-            )
+            payload = cached.get("plan_payload") or {}
+            training = payload.get("training") or {}
+            previous_activity = training.get("activity_plan") or {}
+            goal_context = previous_activity.get("goal_context") or {}
+            # Strength and the expensive plan remain cached. Current Apple
+            # activity is intentionally recomputed on every endpoint refresh.
+            try:
+                activity = build_activity_plan(
+                    goal=goal_context,
+                    strength=training,
+                )
+                training["activity_plan"] = activity
+                training["overall_training_summary"] = activity.get(
+                    "overall_training_summary"
+                )
+            except Exception as exc:
+                print(
+                    "TODAYS_ACTIVITY_REFRESH "
+                    f"status=degraded error_type={type(exc).__name__}",
+                    flush=True,
+                )
+            payload["training"] = training
+            return payload
 
     print(
         "TODAYS_PLAN_CACHE "

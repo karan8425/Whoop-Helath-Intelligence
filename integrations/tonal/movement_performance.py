@@ -119,10 +119,10 @@ def _mode_name(row):
 # DATABASE QUERY
 # ============================================================
 
-def _load_recent_sets():
+def _load_recent_sets(now=None):
 
     cutoff = (
-        datetime.now(timezone.utc)
+        (now or datetime.now(timezone.utc))
         - timedelta(days=LOOKBACK_DAYS)
     )
 
@@ -182,6 +182,7 @@ def _load_recent_sets():
 
                 WHERE
                     w.begin_time >= %s
+                    AND w.begin_time <= %s
 
                     AND COALESCE(
                         o.include_in_training_analysis,
@@ -203,7 +204,7 @@ def _load_recent_sets():
                     s.movement_id,
                     s.set_index
                 """,
-                (cutoff,),
+                (cutoff, now or datetime.now(timezone.utc)),
             )
 
             return cur.fetchall()
@@ -813,10 +814,10 @@ def _progression_analysis(
 # PUBLIC PROFILE ENGINE
 # ============================================================
 
-def build_movement_performance_profiles():
+def build_movement_performance_profiles(now=None):
 
     rows = (
-        _load_recent_sets()
+        _load_recent_sets(now=now)
     )
 
     movement_sessions = defaultdict(
@@ -1030,6 +1031,10 @@ def build_movement_performance_profiles():
         profile = {
             **meta,
 
+            # Request-scoped, already-batched comparable history for B3.  It is
+            # intentionally capped and contains aggregate performance only.
+            "recent_sessions": sessions[:MAX_RECENT_SESSIONS],
+
             "history": {
                 "sessions_in_lookback":
                     len(
@@ -1083,9 +1088,7 @@ def build_movement_performance_profiles():
             "ok",
 
         "calculated_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            (now or datetime.now(timezone.utc)).isoformat(),
 
         "lookback_days":
             LOOKBACK_DAYS,

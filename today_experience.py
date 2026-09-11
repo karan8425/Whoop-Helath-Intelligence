@@ -58,6 +58,24 @@ def _training_card(plan, coaching):
     if instruction is None and source.get("category"):
         instruction = f"Follow the prescribed {source['category']} session."
 
+    dose = source.get("dose_diagnostics") or {}
+    dose_summary = None
+    if dose:
+        target = dose.get("target") or {}
+        actual = dose.get("actual") or {}
+        dose_summary = {
+            "dose_confidence": dose.get("dose_confidence"),
+            "baseline_source": dose.get("dose_baseline_source"),
+            "comparable_session_count": dose.get("comparable_session_count"),
+            "target_sets": target.get("sets"),
+            "target_volume_low": target.get("volume_low"),
+            "target_volume": target.get("volume_target"),
+            "target_volume_high": target.get("volume_high"),
+            "actual_sets": actual.get("sets"),
+            "actual_volume": actual.get("estimated_volume"),
+            "dose_limited_by": dose.get("dose_limited_by"),
+        }
+
     return {
         "status": source.get("status", "unknown"),
         "category": source.get("category"),
@@ -66,6 +84,7 @@ def _training_card(plan, coaching):
         "total_sets": source.get("total_sets"),
         "exercise_count": source.get("exercise_count"),
         "instruction": instruction,
+        "dose": dose_summary,
         "action": _action("View Workout", "training"),
     }
 

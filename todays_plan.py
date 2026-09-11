@@ -9,6 +9,7 @@ from apple_health_trends import apple_health_trends
 from nutrition_prescription import build_nutrition_prescription
 from sleep_prescription import build_sleep_prescription
 from hydration_prescription import build_hydration_prescription
+from activity_plan import build_activity_plan
 
 from integrations.tonal.workout_prescription import (
     build_daily_workout_prescription,
@@ -167,6 +168,22 @@ def _training_card(workout):
                     exercise.get(
                         "target_rir"
                     ),
+
+                # Training-B3 additive exercise contract.
+                "primary_muscles": exercise.get("primary_muscles") or [],
+                "secondary_muscles": exercise.get("secondary_muscles") or [],
+                "rep_range": exercise.get("rep_range") or {},
+                "rir_range": exercise.get("rir_range") or {},
+                "rest_seconds": exercise.get("rest_seconds") or {},
+                "progression_state": exercise.get("progression_state"),
+                "progression_label": exercise.get("progression_label"),
+                "progression_target": exercise.get("progression_target"),
+                "performance_trajectory": exercise.get("performance_trajectory"),
+                "progression_confidence": exercise.get("progression_confidence"),
+                "comparable_performance": exercise.get("comparable_performance") or {},
+                "b3_rationale": exercise.get("b3_rationale"),
+                "prescribed": exercise.get("prescribed") or {},
+                "actual": exercise.get("actual"),
 
                 "estimated_volume":
                     exercise.get(
@@ -337,6 +354,60 @@ def _training_card(workout):
                 "target_set_range"
             )
             or {},
+
+        "target_muscles":
+            session.get(
+                "target_muscles"
+            )
+            or [],
+
+        "suppressed_muscles":
+            session.get(
+                "suppressed_muscles"
+            )
+            or [],
+
+        "recent_training_context":
+            session.get(
+                "recent_training_context"
+            )
+            or {},
+
+        "selection_confidence":
+            session.get(
+                "selection_confidence"
+            ),
+
+        "session_focus_reason":
+            session.get(
+                "session_focus_reason"
+            ),
+
+        "whoop_dosage_effect":
+            session.get(
+                "whoop_dosage_effect"
+            )
+            or {},
+
+        # Training-B2: additive personalized-dose diagnostics passed
+        # straight through from build_daily_workout_prescription().
+        "dose_diagnostics":
+            session.get(
+                "dose_diagnostics"
+            )
+            or {},
+
+        "training_b3":
+            session.get(
+                "training_b3"
+            )
+            or {},
+
+        "muscle_priority_diagnostics":
+            session.get("muscle_priority_diagnostics") or [],
+
+        "session_template_scores":
+            session.get("session_template_scores") or [],
 
         "exercises":
             exercise_details,
@@ -832,6 +903,25 @@ def build_todays_plan():
         )
     )
 
+    activity_plan = _safe_engine(
+        lambda: build_activity_plan(
+            goal=active_goal,
+            strength=training_card,
+        ),
+        "activity_plan",
+    )
+
+    training_card["activity_plan"] = activity_plan
+    training_card["overall_training_summary"] = activity_plan.get(
+        "overall_training_summary"
+    )
+    training_card["strength_plan"] = {
+        "status": training_card.get("status"),
+        "session_type": training_card.get("session_type"),
+        "total_sets": training_card.get("total_sets"),
+        "exercise_count": training_card.get("exercise_count"),
+    }
+
     nutrition_card = (
         _nutrition_card(
             nutrition
@@ -889,7 +979,7 @@ def build_todays_plan():
 
     return {
         "status": "ok",
-        "version": "1.2",
+        "version": "1.3",
         "plan_date": _today(),
 
         "available_sections":

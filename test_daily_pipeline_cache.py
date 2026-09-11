@@ -79,6 +79,7 @@ _module(
     mark_pipeline_skipped=Mock(),
     mark_pipeline_failed=Mock(),
     pipeline_lock=Mock(),
+    take_superseded_skips=Mock(return_value=0),
 )
 
 import daily_job
@@ -172,7 +173,7 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
             ),
         }
 
-    def test_success_invalidates_after_refresh_and_completed_audit(self):
+    def test_success_invalidates_after_refresh_and_before_audit(self):
         events = []
         patches = self._successful_pipeline_patches(events)
 
@@ -184,7 +185,11 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
         self.assertLess(events.index("sync"), events.index("invalidate"))
         self.assertLess(events.index("daily_metrics"), events.index("invalidate"))
         self.assertLess(events.index("intelligence"), events.index("invalidate"))
-        self.assertLess(events.index("finish"), events.index("invalidate"))
+        self.assertLess(events.index("store"), events.index("invalidate"))
+        # Freshness-critical cache invalidation runs BEFORE the non-critical
+        # automation audit write, so an audit failure cannot strand a stale
+        # Today plan in cache.
+        self.assertLess(events.index("invalidate"), events.index("finish"))
         mocks["invalidate_todays_plan"].assert_called_once_with()
         mocks["fail_run"].assert_not_called()
 
@@ -248,6 +253,25 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
         self.assertEqual(second["status"], "completed")
         mocks["get_daily_health_intelligence"].assert_called_once()
         mocks["invalidate_todays_plan"].assert_called_once()
+
+    def test_repeated_successful_runs_are_idempotent(self):
+        # Reconciliation cron may fire twice on the same physiology (e.g. the
+        # 09:10 and 09:30 UTC Development schedule). Each run must reach the
+        # same terminal state, invalidate exactly once, and never crash.
+        for _ in range(2):
+            events = []
+            patches = self._successful_pipeline_patches(events)
+            with ExitStack() as stack:
+                mocks = {
+                    name: stack.enter_context(item)
+                    for name, item in patches.items()
+                }
+                result = daily_job.run_daily_pipeline()
+
+            self.assertEqual(result["status"], "completed")
+            mocks["invalidate_todays_plan"].assert_called_once_with()
+            mocks["finish_run"].assert_called_once()
+            mocks["fail_run"].assert_not_called()
 
     def test_failed_pipeline_does_not_invalidate(self):
         with (
@@ -315,7 +339,7 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
         mocks["invalidate_todays_plan"].assert_not_called()
         mocks["fail_run"].assert_called_once()
 
-    def test_sleep_webhook_only_schedules_delayed_pipeline(self):
+    def test_sleep_webhook_schedules_immediate_pipeline_without_delay(self):
         payload = {
             "type": "sleep.updated",
             "trace_id": "trace-1",
@@ -341,13 +365,17 @@ class DailyPipelineCacheInvalidationTests(unittest.TestCase):
                 whoop_webhook.receive_whoop_webhook(request, background_tasks)
             )
 
-        self.assertEqual(result["trigger_mode"], "wait_for_recovery")
+        # No artificial "wait for recovery" delay: sleep.updated now runs the
+        # same immediate pipeline as recovery.updated / workout.updated.
+        self.assertEqual(result["trigger_mode"], "immediate")
         background_tasks.add_task.assert_called_once_with(
-            whoop_webhook._run_sleep_pipeline,
+            whoop_webhook._run_immediate_pipeline,
             21,
             "trace-1",
             "sleep.updated",
         )
+        self.assertFalse(hasattr(whoop_webhook, "_run_sleep_pipeline"))
+        self.assertFalse(hasattr(whoop_webhook, "SLEEP_EVENT_DELAY_SECONDS"))
         invalidate.assert_not_called()
 
 
