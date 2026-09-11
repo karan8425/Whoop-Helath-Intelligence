@@ -1694,7 +1694,6 @@ def _activity_period(
                     COUNT(*) FILTER (
                         WHERE
                             steps IS NOT NULL
-                            AND %s IS NOT NULL
                             AND steps >= %s
                     )::int
                         AS days_target_met
@@ -1705,7 +1704,6 @@ def _activity_period(
                     BETWEEN %s AND %s
                 """,
                 (
-                    step_target,
                     step_target,
                     start_date,
                     end_date,

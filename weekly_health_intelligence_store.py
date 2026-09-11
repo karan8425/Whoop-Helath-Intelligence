@@ -1,5 +1,8 @@
 import hashlib
 import json
+import logging
+import time
+import traceback
 from datetime import datetime, timezone
 
 from db import get_conn
@@ -21,6 +24,8 @@ TABLE_NAME = (
 )
 
 INTELLIGENCE_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -468,12 +473,33 @@ def get_weekly_health_intelligence(
     force_refresh=False,
 ):
 
-    return get_or_create_intelligence(
-        generator=
-            generate_weekly_health_intelligence,
-        force_refresh=
-            force_refresh,
+    started = time.perf_counter()
+    try:
+        result = get_or_create_intelligence(
+            generator=generate_weekly_health_intelligence,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:
+        # Exception messages can contain model output or connection details.
+        # Record stack locations only, never source lines, locals or payloads.
+        frames = traceback.extract_tb(exc.__traceback__)
+        locations = ";".join(
+            f"{frame.filename.rsplit('/', 1)[-1]}:{frame.name}:{frame.lineno}"
+            for frame in frames
+        )
+        logger.error(
+            "WEEKLY_INTELLIGENCE weekly_status=error exception_type=%s "
+            "failure_stage=%s stack_locations=%s duration_seconds=%.3f",
+            type(exc).__name__, frames[-1].name if frames else "unknown",
+            locations, time.perf_counter() - started,
+        )
+        raise
+    logger.info(
+        "WEEKLY_INTELLIGENCE weekly_status=%s metric_date=%s duration_seconds=%.3f",
+        result.get("status"), result.get("period_end_date"),
+        time.perf_counter() - started,
     )
+    return result
 
 
 # ============================================================
