@@ -25,7 +25,7 @@ from integrations.tonal.workout_prescription import build_daily_workout_prescrip
 EASTERN = ZoneInfo("America/New_York")
 ENGINE_VERSION = "training-b3.2+b4"
 PLAN_VERSION = "1.3"
-BACKTEST_VERSION = "b3.1-v1"
+BACKTEST_VERSION = "b3.1-v2-temporal"
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,20 @@ class ReplayContext:
     as_of: datetime
     timezone_name: str = "America/New_York"
     mode: str = "replay"
+
+    def __post_init__(self):
+        if self.as_of.tzinfo is None or self.as_of.utcoffset() is None:
+            raise ValueError("Replay cutoff must be timezone-aware")
+        if self.local_date != self.replay_date:
+            raise ValueError("Replay date must match the cutoff's local date")
+
+    @property
+    def as_of_utc(self) -> datetime:
+        return self.as_of.astimezone(timezone.utc)
+
+    @property
+    def local_date(self) -> date:
+        return self.as_of.astimezone(ZoneInfo(self.timezone_name)).date()
 
     @classmethod
     def morning(cls, replay_date: date, cutoff_hour: int = 7) -> "ReplayContext":
@@ -237,12 +251,12 @@ def _replay_day(context: ReplayContext, include_details: bool = True, recommenda
         selection_diagnostics=True,  # Metrics require movement viability even in compact reports.
     )
     strength = _training_activity_shape(training)
-    activity_context = load_activity_context(now=context.as_of.astimezone(EASTERN))
+    activity_context = load_activity_context(as_of=context.as_of_utc)
     activity = build_activity_plan(
         goal=goal,
         strength=strength,
         context=activity_context,
-        now=context.as_of.astimezone(EASTERN),
+        as_of=context.as_of_utc,
     )
     outcome = _actual_outcome(context)
     result = {

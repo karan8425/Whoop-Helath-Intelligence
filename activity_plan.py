@@ -1,6 +1,6 @@
 """Deterministic, personalized daily movement prescription (Training-B4)."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from math import ceil
 from zoneinfo import ZoneInfo
 
@@ -45,54 +45,91 @@ def _recovery_band(strength):
     return "high"
 
 
-def load_activity_context(now=None):
-    """One round trip for Apple steps, Tonal-day split, WHOOP cardio and HR."""
-    now = now or datetime.now(EASTERN)
+def _activity_clock(now, as_of):
+    if as_of is not None:
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("Historical activity cutoff must be timezone-aware")
+        return as_of.astimezone(EASTERN)
+    return now or datetime.now(EASTERN)
+
+
+def load_activity_context(now=None, *, as_of=None):
+    """Live totals by default; explicit replay excludes unknowable same-day totals.
+
+    Apple activity is one overwritten aggregate per day, not a snapshot history.
+    Prior complete days remain useful; the replay day's steps are unavailable.
+    WHOOP profile HR is usable only when its retained observation predates cutoff.
+    """
+    now = _activity_clock(now, as_of)
     today = now.astimezone(EASTERN).date()
+    historical = as_of is not None
+    day_operator = "<" if historical else "<="
+    tonal_boundary = "AND t.begin_time <= %(as_of)s" if historical else ""
+    cardio_boundary = (
+        "AND start_time <= %(as_of)s "
+        "AND COALESCE(end_time, start_time) <= %(as_of)s "
+        "AND COALESCE(updated_at, created_at, start_time) <= %(as_of)s"
+        if historical else ""
+    )
+    recovery_boundary = (
+        "AND created_at <= %(as_of)s "
+        "AND COALESCE(updated_at, created_at) <= %(as_of)s"
+        if historical else "AND (created_at AT TIME ZONE 'America/New_York')::date <= %(today)s"
+    )
+    profile_boundary = "AND observed_at <= %(as_of)s" if historical else ""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 WITH days AS (
                     SELECT a.activity_date, a.steps,
                            EXISTS (SELECT 1 FROM tonal_workouts t
-                                   WHERE (t.begin_time AT TIME ZONE 'America/New_York')::date = a.activity_date)
+                                   WHERE (t.begin_time AT TIME ZONE 'America/New_York')::date = a.activity_date
+                                     {tonal_boundary})
                                AS strength_day
                     FROM apple_health_daily_activity a
-                    WHERE a.activity_date >= %s - INTERVAL '90 days'
-                      AND a.activity_date <= %s
+                    WHERE a.activity_date >= %(today)s - INTERVAL '90 days'
+                      AND a.activity_date {day_operator} %(today)s
                 ), stats AS (
                     SELECT
-                      MAX(steps) FILTER (WHERE activity_date = %s) AS steps_today,
-                      MAX(activity_date) FILTER (WHERE activity_date = %s) AS today_row,
-                      AVG(steps) FILTER (WHERE activity_date >= %s - INTERVAL '7 days' AND activity_date < %s) AS avg_7,
-                      AVG(steps) FILTER (WHERE activity_date >= %s - INTERVAL '14 days' AND activity_date < %s) AS avg_14,
-                      AVG(steps) FILTER (WHERE activity_date >= %s - INTERVAL '30 days' AND activity_date < %s) AS avg_30,
-                      AVG(steps) FILTER (WHERE activity_date < %s) AS avg_90,
-                      COUNT(steps) FILTER (WHERE activity_date >= %s - INTERVAL '7 days' AND activity_date < %s) AS n_7,
-                      COUNT(steps) FILTER (WHERE activity_date >= %s - INTERVAL '14 days' AND activity_date < %s) AS n_14,
-                      COUNT(steps) FILTER (WHERE activity_date >= %s - INTERVAL '30 days' AND activity_date < %s) AS n_30,
-                      COUNT(steps) FILTER (WHERE activity_date < %s) AS n_90,
-                      AVG(steps) FILTER (WHERE strength_day AND activity_date < %s) AS strength_avg,
-                      AVG(steps) FILTER (WHERE NOT strength_day AND activity_date < %s) AS non_strength_avg
+                      MAX(steps) FILTER (WHERE activity_date = %(today)s) AS steps_today,
+                      MAX(activity_date) FILTER (WHERE activity_date = %(today)s) AS today_row,
+                      AVG(steps) FILTER (WHERE activity_date >= %(today)s - INTERVAL '7 days' AND activity_date < %(today)s) AS avg_7,
+                      AVG(steps) FILTER (WHERE activity_date >= %(today)s - INTERVAL '14 days' AND activity_date < %(today)s) AS avg_14,
+                      AVG(steps) FILTER (WHERE activity_date >= %(today)s - INTERVAL '30 days' AND activity_date < %(today)s) AS avg_30,
+                      AVG(steps) FILTER (WHERE activity_date < %(today)s) AS avg_90,
+                      COUNT(steps) FILTER (WHERE activity_date >= %(today)s - INTERVAL '7 days' AND activity_date < %(today)s) AS n_7,
+                      COUNT(steps) FILTER (WHERE activity_date >= %(today)s - INTERVAL '14 days' AND activity_date < %(today)s) AS n_14,
+                      COUNT(steps) FILTER (WHERE activity_date >= %(today)s - INTERVAL '30 days' AND activity_date < %(today)s) AS n_30,
+                      COUNT(steps) FILTER (WHERE activity_date < %(today)s) AS n_90,
+                      AVG(steps) FILTER (WHERE strength_day AND activity_date < %(today)s) AS strength_avg,
+                      AVG(steps) FILTER (WHERE NOT strength_day AND activity_date < %(today)s) AS non_strength_avg
                     FROM days
                 ), cardio AS (
-                    SELECT COUNT(*) FILTER (WHERE start_time >= %s - INTERVAL '30 days') AS aerobic_30,
-                           COUNT(*) FILTER (WHERE start_time >= %s - INTERVAL '30 days'
+                    SELECT COUNT(*) FILTER (WHERE start_time >= %(today)s - INTERVAL '30 days') AS aerobic_30,
+                           COUNT(*) FILTER (WHERE start_time >= %(today)s - INTERVAL '30 days'
                              AND LOWER(COALESCE(sport_name,'')) ~ 'run|jog') AS runs_30,
-                           AVG(average_heart_rate) FILTER (WHERE start_time >= %s - INTERVAL '90 days') AS aerobic_hr,
-                           MAX(max_heart_rate) FILTER (WHERE start_time >= %s - INTERVAL '90 days') AS observed_max_hr
+                           AVG(average_heart_rate) FILTER (WHERE start_time >= %(today)s - INTERVAL '90 days') AS aerobic_hr,
+                           MAX(max_heart_rate) FILTER (WHERE start_time >= %(today)s - INTERVAL '90 days') AS observed_max_hr
                     FROM whoop_workouts
                     WHERE LOWER(COALESCE(sport_name,'')) ~ 'walk|hike|run|jog|cycl|elliptical|rowing'
+                      {cardio_boundary}
                 ), phys AS (
                     SELECT (SELECT resting_heart_rate FROM whoop_recoveries
                             WHERE resting_heart_rate IS NOT NULL
-                              AND (created_at AT TIME ZONE 'America/New_York')::date <= %s
+                              {recovery_boundary}
                             ORDER BY created_at DESC LIMIT 1) AS resting_hr,
-                           (SELECT max_heart_rate FROM whoop_body_measurements WHERE id=1) AS profile_max_hr
+                           (SELECT max_heart_rate FROM whoop_body_measurements WHERE id=1 {profile_boundary}) AS profile_max_hr
                 )
                 SELECT stats.*, cardio.*, phys.* FROM stats CROSS JOIN cardio CROSS JOIN phys
-            """, tuple([today] * 25))
+            """, {"today": today, "as_of": as_of.astimezone(timezone.utc) if historical else None})
             row = dict(cur.fetchone() or {})
+    if historical:
+        row["replay_input_boundary"] = {
+            "as_of": as_of.astimezone(timezone.utc).isoformat(),
+            "same_day_final_excluded": True,
+            "current_day_steps": "unavailable_intraday",
+            "prior_days_policy": "completed_local_days",
+        }
     return row
 
 
@@ -179,15 +216,15 @@ def _sessions(gap, hour, recovery, strength, running_supported, zone2, body_sign
             for i, minutes in enumerate(blocks)]
 
 
-def build_activity_plan(goal=None, strength=None, context=None, now=None):
-    now = now or datetime.now(EASTERN)
-    context = context or load_activity_context(now)
+def build_activity_plan(goal=None, strength=None, context=None, now=None, *, as_of=None):
+    now = _activity_clock(now, as_of)
+    context = context or load_activity_context(now, as_of=as_of)
     strength = strength or {}
     body = ((strength.get("training_b3") or {}).get("body_composition_strategy") or {})
     body_signal = body.get("training_strategy_signal", "INSUFFICIENT_DATA")
     recovery = _recovery_band(strength)
     target = calculate_step_target(context, goal, recovery, body_signal)
-    steps = int(round(_number(context.get("steps_today"))))
+    steps = 0 if as_of is not None else int(round(_number(context.get("steps_today"))))
     remaining = max(0, target["recommended"] - steps)
     projected = _project(steps, target["baseline_used"], now.hour)
     projected_gap = max(0, target["recommended"] - projected)
@@ -212,7 +249,7 @@ def build_activity_plan(goal=None, strength=None, context=None, now=None):
     summary = (f"Complete today's {strength_name} plan and " if strength.get("available") else "")
     summary += ("no extra conditioning is needed." if not sessions else
                 f"add {len(sessions)} manageable walking session{'s' if len(sessions) != 1 else ''} totaling {sum(s['duration_minutes'] for s in sessions)} minutes.")
-    return {"status": "ok" if context.get("today_row") else "partial_data",
+    result = {"status": "ok" if context.get("today_row") else "partial_data",
             "steps_so_far": steps, "step_target": target["recommended"],
             "steps_remaining": remaining, "percent_complete": pct,
             "projected_steps_without_intervention": projected, "projected_gap": projected_gap,
@@ -233,3 +270,12 @@ def build_activity_plan(goal=None, strength=None, context=None, now=None):
             "overall_training_summary": summary,
             "activity_updated_at": now.isoformat(),
             "methodology": "Apple Health steps; personalized historical baseline; goal and WHOOP bounded adjustments; no nutrition-intake assumption; no regional-fat modality input."}
+
+    if as_of is not None:
+        # Zero above is a conservative planning input, never an observed count.
+        # Projection uses prior-day baseline patterns, not a prorated final total.
+        result.update(
+            steps_so_far=None, steps_remaining=None, percent_complete=None,
+            replay_input_boundary=context.get("replay_input_boundary"),
+        )
+    return result

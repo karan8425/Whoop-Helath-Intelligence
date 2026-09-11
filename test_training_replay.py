@@ -40,7 +40,7 @@ class ReplayIsolationTests(unittest.TestCase):
              patch.object(training_replay, "get_conn", return_value=_ReadOnlyConnection()), \
              patch.object(training_replay, "get_active_goal", side_effect=lambda as_of: [row for row in self.sources["goals"] if row["at"] <= as_of][-1]), \
              patch.object(training_replay, "build_daily_workout_prescription", side_effect=lambda now, **_: _training(now, self.sources)), \
-             patch.object(training_replay, "load_activity_context", side_effect=lambda now: {"today_row": True, "steps_today": 0, "avg_14": [row for row in self.sources["apple"] if row["at"] <= now.astimezone(timezone.utc)][-1]["steps"], "n_14": 14}), \
+             patch.object(training_replay, "load_activity_context", side_effect=lambda as_of: {"today_row": True, "steps_today": 0, "avg_14": [row for row in self.sources["apple"] if row["at"] <= as_of.astimezone(timezone.utc)][-1]["steps"], "n_14": 14}), \
              patch.object(training_replay, "build_activity_plan", side_effect=lambda **kwargs: {"step_target": kwargs["goal"]["daily_step_target"]}), \
              patch.object(training_replay, "_actual_outcome", return_value=actual_outcome or {"workout_performed": False, "workouts": [], "actual_steps": 7000}):
             return replay_day(self.context, include_details=False)
@@ -90,10 +90,6 @@ class QueryBoundaryTests(unittest.TestCase):
         self.assertEqual((cutoff.date(), cutoff), executed[0][1])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class _ReadOnlyCursor:
     def __enter__(self): return self
     def __exit__(self, *args): return False
@@ -104,3 +100,22 @@ class _ReadOnlyConnection:
     def __enter__(self): return self
     def __exit__(self, *args): return False
     def cursor(self): return _ReadOnlyCursor()
+
+
+class ReplayContextBoundaryTests(unittest.TestCase):
+    def test_naive_cutoff_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayContext(date(2026, 6, 10), datetime(2026, 6, 10, 7))
+
+    def test_mismatched_local_date_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayContext(date(2026, 6, 11), datetime(2026, 6, 10, 11, tzinfo=timezone.utc))
+
+    def test_local_date_differs_from_utc_near_midnight(self):
+        context = ReplayContext(date(2026, 6, 10), datetime(2026, 6, 11, 2, tzinfo=timezone.utc))
+        self.assertEqual(context.local_date, date(2026, 6, 10))
+        self.assertEqual(context.as_of_utc.hour, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -8,7 +8,7 @@ historical source-code version.
 
 `ReplayContext` owns the replay date, UTC cutoff, timezone, and mode. The default
 cutoff is 07:00 America/New_York. Tonal sessions and sets are bounded by workout
-time, WHOOP metrics by their source update time, Apple activity by local date,
+time, WHOOP metrics by their source update time, Apple activity by completed prior local dates,
 body samples by observation time, strength scores by observation time, and
 goals by the best creation timestamp retained in the current schema.
 
@@ -51,9 +51,24 @@ Versions recorded in every day: `engine_version`, `plan_version`, and
 | Movement/progression history | Wall-clock 180-day lookup | Injected clock plus upper timestamp bound |
 | Comparable dose history | Already accepted `now` | Existing lower/upper bounded queries preserved |
 | Recommendation rotation | Previous cached plan dates | Dates strictly before replay day |
-| Apple activity/B4 | Local-day bounded, but resting HR was latest | All activity bounded by replay day; resting HR also bounded |
+| Apple activity/B4 | Same-day final totals and unbounded cardio history | Explicit replay as-of: prior complete days only; exact workout/recovery/profile cutoffs |
 | Hume/body composition | Entire sample history | `observed_at <= as_of` |
 | Goals | Current active row | Creation/phase dates bounded; in-place-edit limitation disclosed |
 | Engine configuration | Current source constants | Explicitly interpreted as today's engine on historical data |
 
 No replay path calls cache save/invalidation functions or historical ingest.
+
+
+## Temporal leakage correction
+
+Historical B4 now uses an explicit `as_of`, distinct from its unchanged live
+`now` path. Same-day steps are unavailable because the daily table overwrites
+one aggregate per date without retaining intraday snapshots. Replay reports
+unknown steps and plans from prior-day baseline patterns; it never prorates a
+final daily total. WHOOP workout, recovery, and profile observations use exact
+cutoffs. `BACKTEST_VERSION` is `b3.1-v2-temporal`.
+
+See [REPLAY_TEMPORAL_P0.md](REPLAY_TEMPORAL_P0.md) for the complete input audit,
+actual-SQL test instructions, schema limitations, probes and corrected 90-day
+Candidate D/baseline results. The previous claim of Apple intraday availability
+was invalid; the corrected replay changes B4 sessions but preserves B3.2 choices.
