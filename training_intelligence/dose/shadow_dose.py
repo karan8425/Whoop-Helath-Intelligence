@@ -1,0 +1,295 @@
+"""TKI-3: personalized training dose - SHADOW MODE ONLY.
+
+This module does NOT compute a dose from scratch. Training-B2
+(integrations.tonal.training_dose.compute_dose_target) is already the
+live, production personalized-dose engine feeding B3
+(integrations.tonal.workout_prescription, called at its line ~1899) -
+it already derives personal historical baselines, a WHOOP systemic-
+capacity multiplier, a recent-load modifier, and a hard per-muscle
+readiness budget (never resurrecting a B1-suppressed/fatigued muscle),
+with a tiered comparable-session fallback hierarchy and a confidence
+score. Reimplementing any of that here would be exactly the "parallel
+definition" this milestone is told not to create.
+
+integrations.tonal.progressive_overload.trajectory() already classifies
+recent comparable-session performance as IMPROVING/STABLE/DECLINING/
+INSUFFICIENT_DATA from volume trend - also reused as-is.
+
+What TKI-3 actually adds, additively, in shadow mode only:
+
+  1. A descriptive PERSONAL TOLERANCE BAND for today's B2-computed
+     working-set target (tolerance_bands.classify_band), something B2
+     itself does not label.
+  2. A DOSE_CLASSIFICATION (reduced/normal/upper_normal) derived
+     directly from B2's own already-computed combined multiplier -
+     a threshold label, not a new number.
+  3. A cross-check against the TKI-2 canonical (10-muscle, Calves-
+     aware) stimulus ledger for the same target muscles, alongside
+     (not instead of) B2's own 9-muscle baselines.
+  4. Goal-context framing (lean_cut -> preserve_or_gain_lean_mass),
+     read-only, exactly as TKI-2's shadow_state already does.
+  5. One unified, provenance-rich shadow object tying all of the above
+     together for inspection.
+
+Nothing here is called by workout_prescription.py's live B2/B3 call
+site. `session_family` must be supplied by the caller (e.g. for the
+Sep-12 diagnostic, "Upper Pull") - TKI-3 evaluates HOW MUCH for a given
+session family; it does not select WHICH session family (that is TKI-4,
+explicitly out of scope here).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from goals import get_active_goal
+from integrations.tonal.muscle_readiness import calculate_muscle_readiness
+from integrations.tonal.progressive_overload import trajectory as performance_trajectory
+from integrations.tonal.training_priority import SESSION_TEMPLATES
+from integrations.tonal.training_dose import (
+    compute_dose_target,
+    load_session_history,
+    select_comparable_sessions,
+    _percentile,
+)
+from integrations.tonal.workout_prescription import _latest_readiness
+from training_intelligence.dose.tolerance_bands import classify_band
+from training_intelligence.knowledge.loader import KNOWLEDGE_VERSION
+from training_intelligence.stimulus.ledger import build_ledger_windows, load_rows
+from training_intelligence.stimulus.policy import STIMULUS_POLICY_VERSION
+from training_intelligence.stimulus.taxonomy import to_canonical
+
+DOSE_MODEL_VERSION = 1
+
+# Product-policy thresholds on B2's own combined multiplier
+# (whoop_capacity x recent_load). Not a new dose computation - purely a
+# descriptive label over a value B2 already produces.
+DOSE_CLASSIFICATION_REDUCED_CEILING = 0.85
+DOSE_CLASSIFICATION_UPPER_NORMAL_FLOOR = 1.05
+
+_PHASE_TRAINING_OBJECTIVE = {
+    "lean_cut": "preserve_or_gain_lean_mass",
+}
+
+
+def _classify_dose(combined_multiplier: float) -> str:
+    if combined_multiplier is None:
+        return "normal"
+    if combined_multiplier < DOSE_CLASSIFICATION_REDUCED_CEILING:
+        return "reduced"
+    if combined_multiplier > DOSE_CLASSIFICATION_UPPER_NORMAL_FLOOR:
+        return "upper_normal"
+    return "normal"
+
+
+def _goal_context(as_of):
+    goal = get_active_goal(as_of=as_of) or {}
+    phase = goal.get("phase")
+    return {
+        "phase": phase,
+        "goal_type": goal.get("goal_type"),
+        "training_objective": _PHASE_TRAINING_OBJECTIVE.get(phase),
+        # Section 8: a single body-composition reading must not change
+        # today's dose. Nothing in this pipeline (B2 or this module)
+        # reads a point-in-time body-composition value at all, so this
+        # invariant is trivially satisfied by construction, not by a
+        # runtime check - documented here for auditability.
+        "body_composition_single_reading_influence": "none (not consumed by this pipeline)",
+    }
+
+
+def build_shadow_dose(
+    as_of: datetime,
+    session_family: str,
+    sessions=None,
+    muscle_rows=None,
+    ledger_rows=None,
+) -> dict:
+    """The full TKI-3 shadow dose object for one session family, as of a
+    given moment. Read-only; calls nothing that writes to the database
+    and is not on any live request path."""
+
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be a timezone-aware datetime")
+    if session_family not in SESSION_TEMPLATES:
+        raise ValueError(f"Unknown session_family: {session_family!r}")
+
+    # Defensive as_of bound, independent of B2's own assumptions: B2's
+    # load_session_history/_load_muscle_set_rows already bound
+    # begin_time <= now in SQL on the live path, but its in-memory
+    # window functions (_session_window_stats, _muscle_exposures/_hours)
+    # only enforce a LOWER window bound once rows are in hand - _hours()
+    # even clamps a future timestamp to 0 (max(0.0, negative)), which
+    # would make a future row look like it "just happened" if it were
+    # ever fed in directly. Rather than touch training_dose.py (a live
+    # B3-serving file, out of TKI-3's scope), this shadow-only layer
+    # filters any explicitly-injected sessions/rows to <= as_of itself,
+    # so it is temporally safe by construction regardless of caller
+    # input or B2's internal assumptions.
+    if sessions is not None:
+        sessions = [s for s in sessions if s.get("begin_time") and s["begin_time"] <= as_of]
+    if muscle_rows is not None:
+        muscle_rows = [r for r in muscle_rows if r.get("begin_time") and r["begin_time"] <= as_of]
+
+    target_muscles = SESSION_TEMPLATES[session_family]["muscles"]
+
+    readiness = _latest_readiness(now=as_of)
+    readiness_band = readiness.get("readiness_band")
+    recovery_score = readiness.get("recovery_score")
+
+    muscle_readiness_result = calculate_muscle_readiness(now=as_of)
+    muscle_readiness_by_name = {
+        entry["muscle"]: entry for entry in muscle_readiness_result.get("muscles", [])
+    }
+    tonal_freshness_hours = muscle_readiness_result.get("latest_workout_age_hours")
+
+    if sessions is None:
+        sessions = load_session_history(as_of)
+
+    # B2's real, unmodified dose computation - the actual recommended dose.
+    dose = compute_dose_target(
+        as_of,
+        readiness_band,
+        recovery_score,
+        target_muscles,
+        session_family,
+        muscle_readiness_by_name,
+        tonal_freshness_hours,
+        sessions=sessions,
+        muscle_rows=muscle_rows,
+    )
+
+    # The same comparable-session set B2 selected internally, retrieved
+    # again through its own public selector (not recomputed) so we can
+    # additionally classify a working-set BAND and a performance
+    # TRAJECTORY - two descriptive views B2 itself doesn't produce.
+    comparable_sessions, comparable_source, comparable_confidence = select_comparable_sessions(
+        sessions, target_muscles, session_family, as_of
+    )
+    comparable_set_counts = [float(s.get("set_count") or 0) for s in comparable_sessions]
+    band_p25 = _percentile(comparable_set_counts, 25)
+    band_p50 = _percentile(comparable_set_counts, 50)
+    band_p75 = _percentile(comparable_set_counts, 75)
+    working_sets_band = classify_band(
+        dose["target"]["working_sets"], len(comparable_sessions), band_p25, band_p50, band_p75
+    )
+
+    trend = performance_trajectory(comparable_sessions)
+
+    dose_classification = _classify_dose(dose["modifiers"]["combined"])
+
+    # Cross-check against the TKI-2 canonical (Calves-aware) ledger for
+    # the same target muscles - additive provenance, not a replacement
+    # for B2's own muscle_baselines (which remain the authoritative input
+    # to B2's actual muscle budgets above).
+    if ledger_rows is None:
+        ledger_rows = load_rows(as_of, 30)
+    ledger_windows = build_ledger_windows(as_of, (7, 14, 30), rows=ledger_rows)
+    canonical_targets = [to_canonical(m) for m in target_muscles]
+    muscle_stimulus_ranges = {
+        muscle: {
+            "stimulus_sets_7d": ledger_windows[7]["muscles"][canonical]["total_stimulus_sets"],
+            "stimulus_sets_14d": ledger_windows[14]["muscles"][canonical]["total_stimulus_sets"],
+            "stimulus_sets_30d": ledger_windows[30]["muscles"][canonical]["total_stimulus_sets"],
+        }
+        for muscle, canonical in zip(target_muscles, canonical_targets)
+        if canonical is not None
+    }
+
+    explanation_factors = [
+        f"WHOOP recovery {recovery_score} ({readiness_band}) -> systemic capacity multiplier {dose['modifiers']['whoop_capacity']}",
+        dose["modifiers"]["recent_load_reason"],
+        f"Comparable-session baseline source: {dose['baseline']['source']} (similarity confidence: {dose['baseline']['similarity_confidence']})",
+        f"Performance trend over {len(comparable_sessions)} comparable session(s): {trend}",
+    ]
+    for muscle, budget in dose["muscle_budgets"].items():
+        explanation_factors.append(f"{muscle}: {budget['reason']}")
+    if dose["dose_limited_by"]:
+        explanation_factors.append(f"Dose capped by: {dose['dose_limited_by']}")
+
+    fallbacks_used = []
+    if dose["baseline"]["source"] != "comparable_sessions_30_90d":
+        fallbacks_used.append(f"session_baseline_fallback:{dose['baseline']['source']}")
+    for muscle, entry in dose["muscle_baselines"]["muscles"].items():
+        if muscle in target_muscles:
+            has_history = bool((entry.get("windows", {}).get(14, {}) or {}).get("effective_sets"))
+            if not has_history:
+                fallbacks_used.append(f"muscle_baseline_fallback:{muscle}:conservative_configured_baseline")
+    if working_sets_band == "insufficient_evidence":
+        fallbacks_used.append("tolerance_band:insufficient_evidence")
+
+    return {
+        "status": "ok",
+        "mode": "shadow",
+        "dose_model_version": DOSE_MODEL_VERSION,
+        "knowledge_version": KNOWLEDGE_VERSION,
+        "stimulus_policy_version": STIMULUS_POLICY_VERSION,
+        "as_of": as_of.isoformat(),
+
+        "session_family": session_family,
+        "target_muscles": target_muscles,
+
+        "systemic_capacity": {
+            "recovery_score": recovery_score,
+            "readiness_band": readiness_band,
+            "whoop_capacity_multiplier": dose["modifiers"]["whoop_capacity"],
+        },
+
+        "local_readiness": {
+            muscle: {
+                "readiness_state": (muscle_readiness_by_name.get(muscle) or {}).get("readiness_state", "UNKNOWN"),
+                "budget_effective_sets": dose["muscle_budgets"].get(muscle, {}).get("budget_effective_sets"),
+            }
+            for muscle in target_muscles
+        },
+
+        "historical_dose_reference": {
+            "source": dose["baseline"]["source"],
+            "similarity_confidence": dose["baseline"]["similarity_confidence"],
+            "comparable_session_count": len(comparable_sessions),
+            "median_working_sets": band_p50,
+            "p25_working_sets": band_p25,
+            "p75_working_sets": band_p75,
+            "median_volume": dose["baseline"]["median_volume"],
+            "median_duration_minutes": dose["baseline"]["median_duration_minutes"],
+        },
+
+        "goal_context": _goal_context(as_of),
+
+        "performance_state": {
+            "trajectory": trend,
+            "comparable_session_count": len(comparable_sessions),
+        },
+
+        "recommended_dose": {
+            "working_sets": dose["target"]["working_sets"],
+            "exercise_count": dose["target"]["exercise_count"],
+            "muscle_stimulus_ranges": muscle_stimulus_ranges,
+            "target_rir_guidance": "See B3/progressive_overload per-exercise RIR - not recomputed here.",
+            "progression_posture": trend,
+            "working_sets_personal_band": working_sets_band,
+        },
+
+        "dose_classification": dose_classification,
+
+        "explanation_factors": explanation_factors,
+        "fallbacks_used": fallbacks_used,
+        "confidence": dose["dose_confidence"],
+        "data_quality": {
+            "excluded_session_count": dose["session_baselines"]["excluded_session_count"],
+            "unmapped_sets_ignored": dose["muscle_baselines"]["unmapped_sets_ignored"],
+            "tonal_freshness_hours": tonal_freshness_hours,
+        },
+
+        # Preserves the TKI-2 distinction explicitly (section 11): this
+        # object answers HOW MUCH for the given session_family. It says
+        # nothing about whether session_family was the right choice -
+        # that remains TKI-2's own QUESTIONABLE/SUPPORTED/CONTRADICTED
+        # verdict (see TRAINING_INTELLIGENCE_TKI12_REPORT.md), not
+        # reproduced or overridden here.
+        "session_selection_note": (
+            "This object does not evaluate whether "
+            f"'{session_family}' was the correct session to train - "
+            "see TKI-2's session-selection verdict for that question."
+        ),
+    }
