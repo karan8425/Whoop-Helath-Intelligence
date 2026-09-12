@@ -8,6 +8,14 @@ prescription, or any B3/B4 production recommendation. Reference specification:
 sections 9-12 blocked on database access; that access was subsequently granted via a
 single named Keychain entry and this report now reflects real data).
 
+**TKI-2.1 update**: the two HIGH-priority mapping gaps found during calibration were
+investigated and resolved-or-bounded. See section 20 below for the full writeup; headline:
+Calves is now fixed and mapping-coverage-verified (used-movement coverage 96.3% -> 97.0%);
+Handle Move was forensically confirmed to be Tonal's own generic/freeform placeholder
+collapsing genuinely different real exercises with no recoverable identifier, and correctly
+remains explicitly unmapped (444 real working sets, ~4.8% of history, quantified and
+excluded, not guessed).
+
 ## 1. Tonal data model audit (`TONAL_DATA_AUDIT`)
 
 ```
@@ -279,8 +287,10 @@ from readable labels via `uuid.uuid5()` - no real Tonal history was touched.
 
 ## 14. Unit test results
 
-Unchanged: `test_training_intelligence_knowledge.py` + `test_muscle_stimulus_ledger.py` -
-**61 passed, 0 failed.** Full backend suite: **497 passed, 44 skipped, 0 failed.**
+`test_training_intelligence_knowledge.py` + `test_muscle_stimulus_ledger.py`:
+**74 passed, 0 failed** (was 61; +13 from TKI-2.1's `CalvesFixTests`,
+`PlaceholderMovementTests`, and `TemporalLeakageNotIntroducedByCalvesFixTests`). Full
+backend suite: **510 passed, 44 skipped, 0 failed** (was 497).
 
 ## 15. Postgres opt-in test status
 
@@ -340,65 +350,214 @@ implementation requirement. **No code change made** - this is a documentation-al
 question for whoever owns `TRAINING_INTELLIGENCE_KNOWLEDGE_BASE_V1.md`, not something to
 silently resolve in either direction.
 
-## 18. Calibration concerns carried forward
+## 18. Calibration concerns from the first calibration run (superseded below)
 
-1. **HIGH priority**: "Handle Move" placeholder (422 real working sets, ~4.6% of all
-   completed working sets) is completely unmapped and invisible to every muscle total.
-2. **HIGH priority**: Calves is a real, actively-trained canonical group (75 real "Resisted
-   Calf Raise" occurrences) that reads zero in every window because the reused
-   `_normalize_muscle` doesn't recognize `"Calves"` - a narrower, more fixable version of
-   what the previous report speculated.
-3. Two smaller "Bar Move"/"Handle Move" placeholders (11 and 10 occurrences) - same root
-   cause as #1, lower individual impact.
-4. Warmup/non-working-set ambiguity remains fundamentally undecidable with this schema.
-5. WHOOP recovery-band scheme disagreement between spec and shipped code (documentation
-   question, not a code defect - see section 17).
+The two HIGH-priority items below were investigated and resolved-or-bounded in TKI-2.1
+(section 20). Kept here for the historical record of what the first calibration pass found:
 
-None of these were fixed in this run, per "do not guess mappings during this calibration
-run" and "if calibration is needed, report it rather than editing policy automatically."
+1. "Handle Move" placeholder (422 real working sets) completely unmapped.
+2. Calves reading zero everywhere despite real "Resisted Calf Raise" history.
+3. Two smaller "Bar Move"/"Handle Move" placeholders (11 and 10 occurrences).
+4. Warmup/non-working-set ambiguity - **still unresolved**, fundamentally undecidable with
+   this schema (not addressed by TKI-2.1, out of its scope).
+5. WHOOP recovery-band scheme disagreement - **still unresolved** (documentation question,
+   not a code defect - see section 17; not addressed by TKI-2.1, out of its scope).
+
+## 20. TKI-2.1 - Tonal mapping hardening (Calves fix + Handle Move forensics)
+
+### 20.1 Calves - root cause, fix, and validation
+
+**Root cause** (live-data confirmed, correcting the earlier speculation in this same
+report): Tonal's API *does* provide `"Calves"` as a raw `muscle_groups` label - 14 real
+movements carry it in the catalog, 2 of them ("Resisted Calf Raise", "Racked Reverse Lunge")
+with real working-set history. The gap was narrower and more precise than first assumed:
+`integrations.tonal.muscle_readiness._normalize_muscle` (reused for the B3/B4-taxonomy
+mapping step) only recognizes labels present in `PROGRAMMING_MUSCLES`, which has no Calves
+entry by B3/B4's own design - so it correctly, for B3/B4's purposes, returns `None` for
+`"Calves"`, and this milestone's mapping treated that identically to a genuinely unknown
+label.
+
+**Fix** (`training_intelligence/stimulus/taxonomy.py` +
+`training_intelligence/stimulus/mapping.py`): a new, TKI-owned, exact-match-only table,
+`DIRECT_TONAL_LABEL_TO_CANONICAL = {"Calves": "calves"}`, consulted as a fallback in
+`classify_muscle_groups` only when the existing B3/B4-taxonomy path (`_normalize_muscle` +
+`to_canonical`) does not recognize a label. **Zero lines of
+`integrations.tonal.muscle_readiness.py` changed** - `PROGRAMMING_MUSCLES` and
+`_normalize_muscle` are untouched, so B3/B4 cannot regress from this change by construction,
+not merely by test coverage (also directly asserted by
+`test_b3_b4_muscle_readiness_module_untouched_by_the_fix`).
+
+**Disclosed side effect**: `"Racked Reverse Lunge"` lists
+`["Calves","Glutes","Hamstrings","Quads","Abs","Shoulders"]` with Calves listed *first*.
+Before the fix, `_normalize_muscle` silently skipped the unrecognized "Calves" and "Glutes"
+became primary. After the fix, "Calves" (now recognized, still first in Tonal's own order)
+becomes primary and Glutes moves to secondary. This is a real reclassification for this one
+specific movement (16 real working sets), disclosed and tested
+(`test_real_racked_reverse_lunge_shape_now_primary_calves`), not a silent regression. The
+alternative (always treat Calves as secondary-only regardless of Tonal's listed order) was
+considered and rejected as inconsistent with how every other muscle already works in this
+mapping.
+
+**All movements/sets affected** (live-queried, all 14 catalog movements carrying
+`"Calves"`, only 2 with real working-set history):
+
+| movement | muscle_groups | real working sets |
+|---|---|---|
+| Resisted Calf Raise | `["Calves"]` | 75 |
+| Racked Reverse Lunge | `["Calves","Glutes","Hamstrings","Quads","Abs","Shoulders"]` | 16 |
+| (12 other Calves-tagged movements: Jump Lunge, Butt Kicker, High Knee, Jumping Jack, Heisman Shuffle, Single-Leg Bench Step Over, 180 Jump Squat, Lateral Lunge to Hop, Bent Knee Calf Raise, Reverse Lunge with Hop, Bodyweight Squat to Bench with Calf Raise, Bodyweight Squat to Calf Raise) | various | 0 (never actually performed by this user) |
+
+**Validation**: 7 new unit tests (`CalvesFixTests`) plus 2 temporal tests
+(`TemporalLeakageNotIntroducedByCalvesFixTests`) - all passing. Live-data validation:
+used-movement mapping coverage rose from 96.3% to **97.0%** (129 -> 130 of 134 mapped);
+`"Resisted Calf Raise"` dropped out of the unmapped list. End-to-end proof against real
+data over a 400-day window (wider than 30d, since the user's last real calf work predates
+the 30-day window): `calves` -> 22 working sets, 5 sessions, last trained 2026-08-08
+(35 days before this run) - confirming the fix genuinely attributes real historical calf
+stimulus, not just synthetic fixtures.
+
+### 20.2 Handle Move - forensic result
+
+**Audited, live data, all avenues in the resolution standard**: `tonal_movements.raw_data`,
+`on_machine_info`, `feature_group_ids`, `related_generic_movement_ids`,
+`compatibility_status`, `is_generic`/`custom_movement`, per-set `raw_data` on `tonal_sets`,
+the parent workout's own `raw_data`, `workout_type`/`workout_title`, workout-level
+`tonal_workout_overrides`, and (inspection only, never for resolution) neighboring
+movements in the same workout.
+
+**Finding**: all three "Handle Move" ids (`...0002`, `...0008`, `...0009`) have
+`is_generic: true` and `description_how: "Use this move to create an original movement..."`
+- this is **Tonal's own official freeform/generic movement slot**, used whenever a set is
+logged with a "Handles" attachment but not matched to a named catalog exercise.
+`related_generic_movement_ids` links the three ids together as siblings differing only by
+machine/arm configuration (`on_machine_info.armAngle`, `armPositions`), not by exercise.
+`muscle_groups: []` on all three - Tonal itself never assigns a muscle group to a generic
+slot, because it doesn't know what the user actually did. Per-set `raw_data` (checked on a
+random sample) carries only the same generic `movementId` and machine telemetry (weight,
+ROM, velocity, etc.) - no exercise-name or muscle field anywhere. The parent workouts are
+all `workout_type: "Custom"` with `workout_title: null` (48 distinct freeform workouts for
+the dominant id) - no program structure to lean on either. `tonal_workout_overrides` for
+these workouts all show `include_in_training_analysis: null` (default-included, not already
+flagged as low-quality).
+
+**Classification: B and D simultaneously** - it is Tonal's own generic/freeform artifact
+(D), and it demonstrably collapses genuinely different real exercises (B), proven by the
+neighbor-movement pattern (inspected only, never used to assign stimulus): the dominant id
+(`...0002`, 422 sets) co-occurs overwhelmingly with **arm-focused** exercises (Triceps
+Extension x423, Alternating Biceps Curl x315, Hammer Curl x259 co-occurrences), while id
+`...0009` (10 sets) co-occurs with a completely different, **lower-body-focused** pattern
+(Bulgarian Split Squat, Barbell RDL, Goblet Squat). The same generic id name therefore
+correctly represents different real exercises in different sessions - proof that assigning
+it to any single muscle would be wrong some of the time, not just unproven.
+
+**Resolution: remains explicitly unmapped**, per the resolution standard - no deterministic
+identifier exists anywhere in the schema (extracted columns or raw JSONB), and the standard
+explicitly disallows resolving it from neighboring exercises even where that pattern looks
+suggestive.
+
+**Quantified impact** (live-queried): 3 Handle Move ids + 1 "Bar Move" id (same
+`is_generic: true` pattern, not separately forensically audited beyond confirming it shares
+the placeholder signature) = **444 real completed working sets total** (422 + 10 + 1 + 11),
+about **4.8% of the user's 9,159 completed working sets** across their entire history,
+permanently and correctly excluded from every muscle's stimulus total. This is the
+data-quality warning this section is required to surface: **any ledger consumer (including
+a future TKI-3 dose model) should know that ~4.8% of real training volume is invisible by
+design, not by bug**, concentrated in freeform/custom sessions rather than spread evenly
+across programmed workouts.
+
+### 20.3 Post-fix mapping coverage
+
+| | catalog (331 movements) | actually-used (134 movements) |
+|---|---|---|
+| mapped | 316 (unchanged) | 130 (was 129) |
+| unmapped | 15 (unchanged - catalog includes 12 never-performed Calves-tagged movements) | 4 (was 5) |
+| coverage % | 95.5% (unchanged) | **97.0%** (was 96.3%) |
+
+Completed working sets: 9,159 total; 8,715 now mapped (95.2%); 444 unmapped (4.8%, all
+`is_generic` Tonal placeholders, see 20.2).
+
+### 20.4 Ledger differences (real data, post-fix vs. pre-fix)
+
+- **Calves**: 0.0 -> 0.0 at 7d/14d/30d as of this run (last real calf work was 35 days ago,
+  outside all three windows) - the fix is correct and end-to-end validated (20.1), but does
+  not change *today's* 7/14/30-day snapshot simply because there is no recent calf training
+  to surface. Confirmed non-zero over a wider (400-day) window: 22 stimulus sets, 5
+  sessions.
+- **Every other muscle (chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes,
+  core)**: 30-day totals are **byte-for-byte identical** to the pre-fix run
+  (e.g. chest 55.4, back 36.0, quads 8.55, glutes 19.3 - unchanged) - confirming **no
+  regression** in any existing mapping from this change, as directly required.
+- Monotonic-window property (7d <= 14d <= 30d per muscle) still holds for every muscle,
+  including calves.
+- No implausible values introduced (no negative counts, no new inflation pattern).
+
+### 20.5 Sep 12 recheck
+
+Re-ran `build_shadow_training_state` at the exact same `as_of` (2026-09-12T08:10:33 UTC,
+recovery_score=94.0). **Calves added to the focus set, all three windows**: 0.0 stimulus
+sets at 7d/14d/30d, `readiness: fresh` - consistent with every other muscle at that moment
+(nothing had been trained in the preceding 8 days), and consistent with calves' last real
+training (Aug 8) being well outside even the 30-day window relative to Sep 12.
+
+**Verdict: unchanged - still QUESTIONABLE.** Adding Calves to the picture does not change
+the assessment: it was equally "fresh" (equally untrained recently) as every other muscle,
+so it neither strengthens nor weakens the existing case that quads/hamstrings' comparative
+14d/30d stimulus deficit (vs. chest/back/biceps) was a legitimate, data-backed argument for
+favoring Lower Body, even though nothing locally contradicted Upper Pull. Historical
+recommendation not changed, per instruction.
 
 ## 19. Commits
 
-**No code changes this run** - two pre-existing bugs in `test_training_intelligence_postgres.py`
-(UUID-typed fixture columns; a fixture date colliding with real history) were found and
-fixed as part of getting the opt-in suite to actually run, and this report was updated with
-real-data results. One commit, report + test fixes only:
+Two commits this milestone (TKI-2.1):
 
-- `<pending>` **"Fix TKI-2 Postgres opt-in test fixtures; add live-data calibration results"**
+1. `9181ea6` (prior milestone, TKI-2 live calibration - unchanged, listed for continuity)
+2. **TKI-2.1 fix + forensics + report update** - `training_intelligence/stimulus/
+   taxonomy.py` (Calves direct-mapping table), `training_intelligence/stimulus/mapping.py`
+   (fallback wiring), `test_muscle_stimulus_ledger.py` (13 new tests: `CalvesFixTests`,
+   `PlaceholderMovementTests`, `TemporalLeakageNotIntroducedByCalvesFixTests`), and this
+   report - see section 21 below for the exact commit hash once pushed.
 
 ## Answers
 
 **1. Does the new ledger appear credible against actual Tonal history?**
-**Mostly yes, with one clear, quantified exception.** The core arithmetic (direct/secondary
-credit, rolling windows, session/recency counting, session-family classification) all
-produced sane, monotonic, non-inflated numbers against 3.2 years and 9,159 real working
-sets. The exception is mapping coverage: a generic Tonal placeholder ("Handle Move", 422
-real sets) and the entire Calves group are currently invisible to the ledger. That is a
-real, material gap, not a logic bug - the accounting is correct for every set it can
-classify.
+**Yes, with one now-quantified and bounded exception.** The core arithmetic validated
+cleanly against 3.2 years and 9,159 real working sets, unaffected by the mapping fix
+(section 20.4 - every non-Calves muscle's totals are byte-identical pre/post-fix). Calves is
+now correctly mapped and end-to-end validated. The remaining ~4.8% of working sets
+(placeholder/generic Tonal movements) are excluded by design, not by bug, and that
+exclusion is now precisely quantified and disclosed rather than an open question.
 
 **2. What did it say about Sep 12's 94% Recovery + Upper Pull prescription?**
-QUESTIONABLE, not contradicted, not clearly supported. See section 12: local readiness gave
-Upper Pull no red flag (nothing was fatigued after an 8-day layoff), but quads/hamstrings
-were measurably behind chest/biceps/back on both the 14-day and 30-day stimulus ledgers -
-exactly the kind of signal the approved spec's own example says should have favored a
-lower-body session, even without local fatigue forcing the issue.
+Still **QUESTIONABLE** after the Calves recheck (section 20.5) - unchanged from the first
+calibration run's assessment.
 
 **3. What information is still missing before TKI-3 Personal Dose Model?**
-A decision on the two HIGH-priority unmapped-movement gaps (Handle Move, Calves) - TKI-3's
-personal dose model would otherwise learn from a ledger that's silently missing ~4.6%+ of
-real working-set volume and 100% of real calf training. Also the recovery-band discrepancy
-decision (section 17), since TKI-3+ will lean on systemic readiness more heavily.
+The mapping gaps that motivated this milestone are now resolved-or-bounded. What remains:
+(a) the WHOOP recovery-band discrepancy decision (section 17, untouched by TKI-2.1, still
+open), (b) the warmup/non-working-set ambiguity (section 1/18, fundamentally undecidable
+with this schema, not a TKI-2.1 concern), and (c) awareness that ~4.8% of real training
+volume will always be invisible to any ledger-consuming model unless Tonal's own generic-
+movement UX changes or the user starts naming these sets.
 
 **4. Should we proceed to TKI-3, or does TKI-2 require calibration first?**
-**Calibration first**, specifically the mapping gaps in section 7/18 - not because the
-ledger's logic is wrong (it validated cleanly against real data on every axis this run
-checked), but because a personal dose model trained on a ledger with a known 4.6%+ blind
-spot and a fully-missing muscle group would be learning from incomplete data.
+**TKI-2 is now calibrated.** The two HIGH-priority gaps that blocked the prior verdict are
+resolved (Calves) or forensically bounded and quantified (Handle Move, correctly kept
+unmapped). Nothing found in this pass suggests the ledger's logic is unreliable - quite the
+opposite, every re-check (coverage, ledgers, temporal validation, Sep-12 diagnostic)
+confirmed it. TKI-3 can reasonably proceed once its own owner is ready, informed by the
+~4.8% known-excluded-by-design volume documented above.
 
 ## Final verdict
 
-**TKI-1 + TKI-2 DEVELOPMENT PARTIAL — CALIBRATION REQUIRED**
+**TKI-1 + TKI-2 DEVELOPMENT PASS — LEDGER VALIDATED**
+
+(Upgraded from the prior "PARTIAL — CALIBRATION REQUIRED": both HIGH-priority mapping gaps
+that justified that verdict have now been resolved (Calves, live-validated, zero B3/B4 risk
+by construction) or forensically investigated and correctly, permanently bounded as
+unmappable with full quantification (Handle Move, ~4.8% of history). The two remaining open
+items - the recovery-band documentation question and the warmup-ambiguity limitation - are
+disclosed, understood, and were out of scope for this hardening pass; neither one casts
+doubt on the ledger's core correctness.)
 
 (Different reason than the previous revision of this report: not "no live data was
 checked," but "live data was checked, the mechanism validated cleanly, and it surfaced two

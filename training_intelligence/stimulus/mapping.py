@@ -2,20 +2,35 @@
 
 Mapping precedence (section 5 of the TKI-1/TKI-2 assignment):
 
-    1. existing reliable app/Tonal mapping   <- this is all we have today,
-       and it is what this module uses exclusively.
-    2. deterministic curated mapping         <- not needed yet; every
-       Tonal movement already carries official muscle_groups metadata.
+    1. existing reliable app/Tonal mapping   <- integrations.tonal.
+       muscle_readiness._normalize_muscle, reused as-is.
+    2. deterministic curated mapping         <- taxonomy.
+       DIRECT_TONAL_LABEL_TO_CANONICAL (currently just "Calves" - see
+       TKI-2.1 CALVES FIX in taxonomy.py). Exact-string match only.
     3. explicit unknown                      <- returned whenever a
-       movement's muscle_groups is empty or contains only labels
-       `integrations.tonal.muscle_readiness._normalize_muscle` does not
-       recognize. Never guessed.
+       movement's muscle_groups is empty or contains only labels neither
+       of the above recognizes. Never guessed. "Handle Move" (Tonal's own
+       is_generic freeform placeholder, confirmed via live-data forensics
+       to collapse genuinely different real exercises with no
+       deterministic identifier anywhere in the schema) is the main
+       real-world example that correctly stays here - see
+       TRAINING_INTELLIGENCE_TKI12_REPORT.md.
 
 `tonal_movements.muscle_groups` is a JSONB array from Tonal's own API.
 integrations.tonal.muscle_readiness already establishes the convention
-this module reuses: the first recognized label is the primary muscle,
-every other recognized label is secondary. That convention is NOT
-reinvented here - it is imported.
+this module reuses: the first recognized label (in Tonal's own listed
+order) is the primary muscle, every other recognized label is secondary.
+That convention is NOT reinvented here - it is imported, and it now
+applies uniformly whether a label was recognized via step 1 or step 2
+above, in whatever order Tonal itself listed them. One concrete,
+already-observed consequence: "Racked Reverse Lunge" lists
+["Calves","Glutes","Hamstrings","Quads","Abs","Shoulders"] - before the
+Calves fix, "Calves" was silently skipped and "Glutes" became primary;
+after the fix, "Calves" (now recognized, and still first in Tonal's
+list) becomes primary instead. This is a real, disclosed change in this
+one movement's classification, not a silent regression - see
+TRAINING_INTELLIGENCE_TKI12_REPORT.md and
+test_muscle_stimulus_ledger.py's calves-related tests.
 """
 
 from __future__ import annotations
@@ -23,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from integrations.tonal.muscle_readiness import _normalize_muscle
-from training_intelligence.stimulus.taxonomy import to_canonical
+from training_intelligence.stimulus.taxonomy import to_canonical, canonical_from_raw_tonal_label
 
 MAPPING_SOURCE_TONAL_OFFICIAL = "tonal_official_muscle_groups"
 MAPPING_SOURCE_UNKNOWN = "unknown"
@@ -49,11 +64,16 @@ def classify_muscle_groups(raw_muscle_groups) -> MuscleMapping:
     unmapped = []
     for raw in raw_muscle_groups or []:
         existing = _normalize_muscle(raw)
-        if existing is None:
+        canonical = to_canonical(existing) if existing is not None else None
+        if canonical is None:
+            # Not in the existing B3/B4 taxonomy (or _normalize_muscle
+            # didn't recognize the raw label at all) - try the small,
+            # deterministic, TKI-owned direct table before giving up.
+            canonical = canonical_from_raw_tonal_label(raw)
+        if canonical is None:
             unmapped.append(raw)
             continue
-        canonical = to_canonical(existing)
-        if canonical and canonical not in recognized:
+        if canonical not in recognized:
             recognized.append(canonical)
 
     if not recognized:

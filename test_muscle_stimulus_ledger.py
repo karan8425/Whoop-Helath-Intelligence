@@ -26,7 +26,9 @@ from training_intelligence.stimulus.shadow_state import build_shadow_training_st
 from training_intelligence.stimulus.taxonomy import (
     CANONICAL_MUSCLES,
     CANONICAL_GROUPS_WITHOUT_EXISTING_SOURCE,
+    DIRECT_TONAL_LABEL_TO_CANONICAL,
     to_canonical,
+    canonical_from_raw_tonal_label,
 )
 
 AS_OF = datetime(2026, 9, 12, 8, 0, tzinfo=timezone.utc)
@@ -405,6 +407,129 @@ class ShadowStateTests(unittest.TestCase):
                    side_effect=fake_readiness):
             build_shadow_training_state(AS_OF, rows=[])
         self.assertEqual(call_count["n"], 1)
+
+
+class CalvesFixTests(unittest.TestCase):
+    """TKI-2.1: Calves is now recognized via a small, TKI-owned direct
+    table (training_intelligence.stimulus.taxonomy.
+    DIRECT_TONAL_LABEL_TO_CANONICAL), without touching
+    integrations.tonal.muscle_readiness/PROGRAMMING_MUSCLES at all."""
+
+    def test_calves_alone_normalizes_deterministically(self):
+        mapping = classify_muscle_groups(["Calves"])
+        self.assertEqual(mapping.primary, "calves")
+        self.assertEqual(mapping.secondary, ())
+        self.assertTrue(mapping.is_mapped)
+
+    def test_calves_recognition_is_idempotent_and_stable(self):
+        first = classify_muscle_groups(["Calves"])
+        second = classify_muscle_groups(["Calves"])
+        self.assertEqual(first, second)
+
+    def test_only_calves_is_in_the_direct_table_nothing_else_snuck_in(self):
+        self.assertEqual(dict(DIRECT_TONAL_LABEL_TO_CANONICAL), {"Calves": "calves"})
+
+    def test_direct_table_lookup_never_guesses_unknown_labels(self):
+        self.assertIsNone(canonical_from_raw_tonal_label("Neck"))
+        self.assertIsNone(canonical_from_raw_tonal_label("calves"))  # case-sensitive, exact match only
+
+    def test_real_racked_reverse_lunge_shape_now_primary_calves(self):
+        """Documents the disclosed, real-data side effect: Calves is
+        listed first in this movement's real muscle_groups, so once
+        Calves is recognized it becomes primary (glutes/hamstrings/
+        quads/core/shoulders become secondary) - a real reclassification
+        for this one movement, not a silent regression. See
+        TRAINING_INTELLIGENCE_TKI12_REPORT.md."""
+        mapping = classify_muscle_groups(
+            ["Calves", "Glutes", "Hamstrings", "Quads", "Abs", "Shoulders"]
+        )
+        self.assertEqual(mapping.primary, "calves")
+        self.assertEqual(
+            mapping.secondary,
+            ("glutes", "hamstrings", "quads", "core", "shoulders"),
+        )
+
+    def test_existing_non_calves_mappings_unchanged_by_the_fix(self):
+        """No regression in mappings that don't involve Calves at all."""
+        self.assertEqual(
+            classify_muscle_groups(["Back", "Biceps"]),
+            classify_muscle_groups(["Back", "Biceps"]),
+        )
+        mapping = classify_muscle_groups(["Chest", "Triceps", "Shoulders"])
+        self.assertEqual(mapping.primary, "chest")
+        self.assertEqual(mapping.secondary, ("triceps", "shoulders"))
+
+    def test_b3_b4_muscle_readiness_module_untouched_by_the_fix(self):
+        """The fix lives entirely in training_intelligence; the shared
+        B3/B4 engine's own recognition of "Calves" is unchanged (still
+        None) - proving no regression is even possible there, by
+        construction, not just by a passing test."""
+        from integrations.tonal.muscle_readiness import _normalize_muscle, PROGRAMMING_MUSCLES
+        self.assertIsNone(_normalize_muscle("Calves"))
+        self.assertNotIn("Calves", PROGRAMMING_MUSCLES)
+
+    def test_calves_ledger_credit_from_real_movement_shapes(self):
+        rows = [
+            _row(1, "resisted_calf_raise", ["Calves"], activity_id="w1", rep_count=12, volume=300.0),
+            _row(1, "racked_reverse_lunge",
+                 ["Calves", "Glutes", "Hamstrings", "Quads", "Abs", "Shoulders"],
+                 activity_id="w1", rep_count=10, volume=400.0),
+        ]
+        ledger = build_ledger_from_rows(rows, AS_OF, 7)
+        self.assertEqual(ledger["muscles"]["calves"]["direct_sets"], 2 * DIRECT_SET_CREDIT)
+        self.assertEqual(ledger["muscles"]["glutes"]["secondary_set_equivalents"], SECONDARY_SET_CREDIT)
+        self.assertEqual(ledger["data_quality"]["unmapped_working_sets"], 0)
+
+
+class PlaceholderMovementTests(unittest.TestCase):
+    """TKI-2.1 Handle Move forensics: confirmed via live-data investigation
+    to be Tonal's own is_generic freeform placeholder (multiple genuinely
+    different real exercises collapsed under one id, no deterministic
+    identifier anywhere in the schema - not fixable by this milestone's
+    resolution standard) and MUST remain explicitly unmapped, never
+    silently credited to any muscle."""
+
+    def test_empty_muscle_groups_placeholder_stays_unmapped(self):
+        mapping = classify_muscle_groups([])
+        self.assertFalse(mapping.is_mapped)
+        self.assertEqual(mapping.unmapped_raw_labels, ())
+
+    def test_placeholder_working_sets_excluded_from_every_muscle_and_counted(self):
+        rows = [_row(1, "handle_move_placeholder", [], rep_count=14, volume=785.0)]
+        ledger = build_ledger_from_rows(rows, AS_OF, 7)
+        for muscle in CANONICAL_MUSCLES:
+            self.assertEqual(ledger["muscles"][muscle]["total_stimulus_sets"], 0.0)
+        self.assertEqual(ledger["data_quality"]["unmapped_working_sets"], 1)
+
+    def test_placeholder_is_not_assigned_to_a_muscle_via_co_occurring_exercises(self):
+        """Regression guard for the explicit resolution-standard
+        prohibition: even when a placeholder set shares a workout with
+        clearly-mapped neighbors, it must not inherit their muscle."""
+        rows = [
+            _row(1, "handle_move_placeholder", [], activity_id="w1", rep_count=14, volume=785.0),
+            _row(1, "triceps_extension", ["Triceps"], activity_id="w1", rep_count=10, volume=200.0),
+        ]
+        ledger = build_ledger_from_rows(rows, AS_OF, 7)
+        self.assertEqual(ledger["muscles"]["triceps"]["direct_sets"], DIRECT_SET_CREDIT)
+        self.assertEqual(ledger["data_quality"]["unmapped_working_sets"], 1)
+
+
+class TemporalLeakageNotIntroducedByCalvesFixTests(unittest.TestCase):
+    """The Calves fix changes classification, not temporal handling - this
+    proves the existing temporal guarantees still hold for Calves-mapped
+    sets specifically, not just for the muscles already covered above."""
+
+    def test_future_calves_set_excluded(self):
+        rows = [
+            {**_row(0, "m1", ["Calves"]), "begin_time": AS_OF + timedelta(days=1)},
+        ]
+        ledger = build_ledger_from_rows(rows, AS_OF, 7)
+        self.assertEqual(ledger["muscles"]["calves"]["working_sets"], 0)
+
+    def test_calves_set_exactly_at_as_of_included(self):
+        rows = [{**_row(0, "m1", ["Calves"]), "begin_time": AS_OF}]
+        ledger = build_ledger_from_rows(rows, AS_OF, 7)
+        self.assertEqual(ledger["muscles"]["calves"]["working_sets"], 1)
 
 
 if __name__ == "__main__":

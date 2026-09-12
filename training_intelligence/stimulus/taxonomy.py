@@ -9,12 +9,23 @@ milestone, so we do not rename or extend it. Instead this module defines
 the 10-group canonical (lowercase) taxonomy the spec calls for, and an
 explicit, one-directional mapping from the existing taxonomy into it.
 
-"Calves" has no populated mapping source today (Tonal's own muscle_groups
-metadata for this user's movements does not appear to distinguish a
-Calves group - see the TONAL_DATA_AUDIT in the final report) - it is
-still exposed as a canonical group so the ledger's per-muscle shape is
-stable and future-proof, but is expected to read zero direct/secondary
-sets until either Tonal exposes it or a curated mapping adds it.
+TKI-2.1 CALVES FIX: live-data forensics (calibration run, see
+TRAINING_INTELLIGENCE_TKI12_REPORT.md) confirmed the earlier assumption
+here was wrong - Tonal's own muscle_groups metadata DOES provide
+"Calves" as a raw label (14 real movements carry it, 2 with actual
+working-set history). The reason it read as unmapped was narrower:
+integrations.tonal.muscle_readiness._normalize_muscle only recognizes
+labels present in PROGRAMMING_MUSCLES, which has no Calves entry by
+B3/B4's own design - so it correctly (for B3/B4's purposes) returns None
+for "Calves", and this module's mapping.classify_muscle_groups treated
+that the same as any other unrecognized label.
+
+DIRECT_TONAL_LABEL_TO_CANONICAL below is the fix: a small, TKI-owned,
+deterministic table for raw Tonal labels that have a stable canonical
+target but no B3/B4-taxonomy equivalent to route through `to_canonical`.
+It does not touch muscle_readiness.py, PROGRAMMING_MUSCLES, or any
+B3/B4 code path - B3/B4 behavior is unaffected by construction, not just
+by testing.
 """
 
 from __future__ import annotations
@@ -59,14 +70,32 @@ if _missing:
         f"PROGRAMMING_MUSCLES has group(s) with no canonical mapping: {_missing}"
     )
 
-# Canonical groups with no existing B3/B4 source at all (currently just
-# "calves" - see module docstring).
+# Canonical groups with no B3/B4-taxonomy source (currently just
+# "calves" - see module docstring). This no longer means "no data
+# available" for calves specifically: DIRECT_TONAL_LABEL_TO_CANONICAL
+# below supplies it via a separate, TKI-owned path.
 CANONICAL_GROUPS_WITHOUT_EXISTING_SOURCE = tuple(
     sorted(set(CANONICAL_MUSCLES) - set(_EXISTING_TO_CANONICAL.values()))
 )
+
+# Raw Tonal muscle_groups labels recognized directly, bypassing
+# _EXISTING_TO_CANONICAL, because they have no B3/B4-taxonomy equivalent
+# to route through. Deterministic exact-string match only - no fuzzy
+# matching, no spelling variants guessed. Confirmed against real data
+# that Tonal emits exactly "Calves" (not "calf"/"Calf"/etc.).
+DIRECT_TONAL_LABEL_TO_CANONICAL = {
+    "Calves": "calves",
+}
 
 
 def to_canonical(existing_muscle: str) -> str | None:
     """Maps an existing PROGRAMMING_MUSCLES label to its canonical group.
     Returns None for anything not in the existing taxonomy (never guesses)."""
     return _EXISTING_TO_CANONICAL.get(existing_muscle)
+
+
+def canonical_from_raw_tonal_label(raw_label: str) -> str | None:
+    """Direct raw-Tonal-label -> canonical lookup for labels with no
+    B3/B4-taxonomy equivalent (see DIRECT_TONAL_LABEL_TO_CANONICAL).
+    Returns None for anything not in this table (never guesses)."""
+    return DIRECT_TONAL_LABEL_TO_CANONICAL.get(raw_label)
