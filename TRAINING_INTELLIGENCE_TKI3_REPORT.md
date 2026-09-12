@@ -344,3 +344,66 @@ assignment specifically asked for), override-vs-resolved provenance, and determi
 `maintenance` is now a fully-supported mode (previously asserted `None`, which was only true
 because no policy existed for it yet). Full backend suite: **555 passed, 46 skipped, 0
 failed** (was 537; +18 new tests, 0 regressions). No B2/B3/production/iOS changes.
+
+## 16. Correction: goal-mode invariance was a foundation test, not the final behavior
+
+Section 15's first pass made goal policy purely narrative - `recommended_dose.working_sets`
+was identical across every goal mode, only `goal_context` differed. That was flagged as
+correct as a *foundation safety test* but not the intended final behavior: goal policy should
+select a POSTURE within an already-established, goal-agnostic feasible range, so the same
+history/readiness state legitimately produces different final doses under different goals.
+
+**Corrected architecture**:
+
+1. `training_intelligence/dose/shadow_dose.py::_feasible_dose_range()` computes a
+   goal-agnostic `[lower_bound, upper_bound]` working-set range from ONLY: the same
+   comparable-session baseline B2 already used (`dose["baseline"]["median_sets"]`, falling
+   back to B2's own `CONSERVATIVE_MUSCLE_SET_BASELINE` exactly as B2 does), B2's own
+   `WHOOP_CAPACITY_RANGES` band **endpoints** (not the single interpolated point B2 uses for
+   its own reference value - the full width of what today's systemic band justifies), and
+   B2's own recent-load multiplier - then hard-capped by the same total per-muscle readiness
+   budget B2 already enforces. This range is identical across every goal mode by construction
+   (nothing goal-related feeds into it) and collapses to exactly `[0, 0]` when B2's own
+   fatigue invariant would (validated:
+   `test_fatigued_muscle_collapses_range_to_zero_regardless_of_goal_mode`).
+2. `goal_policy.py` gained `range_position_fraction` (0.0-1.0) per mode - the one numeric
+   lever goal mode may apply: `lean_bulk` 0.80 (upper), `maintenance`/`general_fitness` 0.50
+   (midpoint), `lean_cut` 0.35 (lower-middle, preserve), `strength` 0.25 (lower, favor
+   intensity over added sets), `recovery` 0.10 (near the floor). `_goal_adjusted_working_sets()`
+   linearly interpolates within the range and clips defensively - it can never push the
+   result outside `[lower_bound, upper_bound]` (validated:
+   `test_goal_mode_never_exceeds_feasible_range`, all six modes). No resolved goal mode ->
+   the range's own midpoint (a neutral default, not a goal decision).
+3. `recommended_dose.working_sets` is now the goal-adjusted value;
+   `recommended_dose.goal_agnostic_reference_working_sets` keeps B2's own, never-goal-adjusted
+   single-point number for audit/backward-compatibility. `feasible_dose_range` and every other
+   numeric field (`local_readiness`, `systemic_capacity`, `dose_classification`,
+   `historical_dose_reference`, `performance_state`) remain exactly goal-agnostic
+   (validated: `test_feasible_range_identical_across_all_six_goal_modes`,
+   `test_other_numeric_fields_stay_goal_agnostic_too`).
+
+**Demonstrated with a synthetic fixture** (dense Back/Biceps muscle history so the per-muscle
+budget is generous enough that it is NOT the binding constraint, "low" WHOOP band for a wide
+range): feasible range `[6, 10]` working sets; `lean_cut` -> 7, `lean_bulk` -> 9, `strength`
+-> 7, `maintenance` -> 8, `recovery` -> 6 - four distinct values across the four required
+modes, `lean_bulk >= lean_cut` as expected, every value inside `[6, 10]`
+(`test_lean_cut_lean_bulk_strength_maintenance_can_produce_different_final_doses`).
+
+**Re-checked against real Sep-12 data**: the feasible range came back **`[9, 9]`** - a
+degenerate point, `capped_by_muscle_readiness_budget: true` - so all six goal modes
+correctly converged to `working_sets: 9`, identical to before. This is not a limitation of the
+implementation; it is the safety guarantee holding at a real boundary case: on that specific
+day, the local Back/Biceps readiness budget (~9.18 combined) was already tighter than any
+WHOOP-band variation would have allowed, leaving goal policy no room to differentiate -
+exactly what "goal policy must never exceed justified personalized limits" requires. The
+synthetic fixture above demonstrates the differentiation mechanism itself; the real data
+demonstrates it correctly does nothing when there is no room to safely differentiate.
+
+**Tests**: `test_training_intelligence_goal_policy.py` rewritten (24 tests, was 17) -
+registry completeness including `range_position_fraction` bounds and directional ordering
+(`lean_bulk > lean_cut`, `recovery` lowest of all six), the feasible-range foundation
+invariant, the fatigue-collapse invariant, the never-exceeds-range invariant, the
+four-required-modes distinctness requirement, midpoint-when-unresolved, and the existing
+provenance/determinism/version tests carried forward. Full backend suite: **562 passed, 46
+skipped, 0 failed** (was 555; +7 net, 0 regressions). No B2/B3/production/iOS changes.
+`GOAL_POLICY_VERSION` bumped 1 -> 2 (data shape changed: added `range_position_fraction`).

@@ -17,23 +17,37 @@ INSUFFICIENT_DATA from volume trend - also reused as-is.
 
 What TKI-3 actually adds, additively, in shadow mode only:
 
-  1. A descriptive PERSONAL TOLERANCE BAND for today's B2-computed
-     working-set target (tolerance_bands.classify_band), something B2
-     itself does not label.
+  1. A descriptive PERSONAL TOLERANCE BAND for today's goal-agnostic
+     reference working-set target (tolerance_bands.classify_band),
+     something B2 itself does not label.
   2. A DOSE_CLASSIFICATION (reduced/normal/upper_normal) derived
      directly from B2's own already-computed combined multiplier -
      a threshold label, not a new number.
   3. A cross-check against the TKI-2 canonical (10-muscle, Calves-
      aware) stimulus ledger for the same target muscles, alongside
      (not instead of) B2's own 9-muscle baselines.
-  4. Goal-POLICY framing (training_intelligence.dose.goal_policy) -
-     read-only, describes how each of six goal modes (lean_cut,
-     lean_bulk, strength, maintenance, general_fitness, recovery) frames
-     the SAME, unchanged dose output. The dose model itself remains
-     goal-agnostic - see goal_policy.py's module docstring and
-     test_training_intelligence_goal_policy.py's
-     test_goal_mode_does_not_change_the_numeric_dose.
-  5. One unified, provenance-rich shadow object tying all of the above
+  4. A GOAL-AGNOSTIC FEASIBLE DOSE RANGE (`feasible_dose_range`) -
+     [lower_bound, upper_bound] working sets, built ONLY from B2's own
+     already-computed values: the comparable-session baseline, B2's own
+     WHOOP_CAPACITY_RANGES band ENDPOINTS (not the single interpolated
+     point B2 uses for its own reference value), B2's own recent-load
+     multiplier, hard-capped by the same total per-muscle readiness
+     budget B2 already enforces. This range is identical across every
+     goal mode - see test_goal_mode_never_exceeds_feasible_range.
+  5. GOAL POLICY (training_intelligence.dose.goal_policy) selects a
+     POSITION within that already-established, goal-agnostic range
+     (`range_position_fraction`, one per goal mode) - it never invents
+     capacity, never widens the range, and is applied strictly after
+     the range's own hard fatigue/history caps, so it can never exceed
+     what local readiness and personal history already justify. This is
+     the one place goal mode is allowed to change a number:
+     `recommended_dose.working_sets` (the goal-adjusted final
+     recommendation) may differ across goal modes for the identical
+     history/readiness state; `feasible_dose_range` and every other
+     numeric field (local_readiness, systemic_capacity,
+     historical_dose_reference, performance_state) never do - see
+     test_training_intelligence_goal_policy.py.
+  6. One unified, provenance-rich shadow object tying all of the above
      together for inspection.
 
 Nothing here is called by workout_prescription.py's live B2/B3 call
@@ -56,6 +70,8 @@ from integrations.tonal.training_dose import (
     load_session_history,
     select_comparable_sessions,
     _percentile,
+    WHOOP_CAPACITY_RANGES,
+    CONSERVATIVE_MUSCLE_SET_BASELINE,
 )
 from integrations.tonal.workout_prescription import _latest_readiness
 from training_intelligence.dose.goal_policy import (
@@ -92,6 +108,77 @@ def _classify_dose(combined_multiplier: float) -> str:
     if combined_multiplier > DOSE_CLASSIFICATION_UPPER_NORMAL_FLOOR:
         return "upper_normal"
     return "normal"
+
+
+def _feasible_dose_range(dose: dict, target_muscles, readiness_band: str) -> dict:
+    """The goal-agnostic feasible working-set range for today - built
+    ONLY from values B2 already computed, never a new capacity estimate:
+
+      - the same comparable-session baseline B2 used for its own single-
+        point reference (dose["baseline"]["median_sets"]), falling back
+        to B2's own CONSERVATIVE_MUSCLE_SET_BASELINE exactly as B2 itself
+        does when there is no comparable history at all;
+      - B2's own WHOOP_CAPACITY_RANGES band ENDPOINTS (lo, hi) for
+        today's readiness_band - not the single interpolated multiplier
+        B2 uses for its reference value, so this genuinely represents
+        the full width of what today's systemic capacity band justifies;
+      - B2's own recent-load multiplier (data-driven, not goal-driven -
+        unaffected by which goal mode is active);
+      - hard-capped by the SAME total per-muscle readiness budget B2
+        already enforces (dose["muscle_budgets"]), so the range can
+        never exceed what local muscle readiness allows, and collapses
+        to exactly zero when B2's own fatigue invariant would force it
+        to zero (all target muscles SUPPRESSED/FATIGUED).
+
+    Goal policy may only select a POSITION inside this range - it never
+    widens it, and this function itself never depends on goal mode."""
+
+    baseline_sets = dose["baseline"]["median_sets"]
+    if baseline_sets is None:
+        baseline_sets = CONSERVATIVE_MUSCLE_SET_BASELINE * max(len(target_muscles), 1)
+
+    recent_load_multiplier = dose["modifiers"]["recent_load"] or 1.0
+    lo_whoop, hi_whoop = WHOOP_CAPACITY_RANGES.get(readiness_band, (1.0, 1.0))
+
+    raw_low = baseline_sets * lo_whoop * recent_load_multiplier
+    raw_high = baseline_sets * hi_whoop * recent_load_multiplier
+    raw_low, raw_high = min(raw_low, raw_high), max(raw_low, raw_high)
+
+    total_muscle_budget = sum(
+        budget["budget_effective_sets"] for budget in dose["muscle_budgets"].values()
+    )
+    budget_capped = False
+    if target_muscles:
+        if raw_high > total_muscle_budget:
+            raw_high = total_muscle_budget
+            budget_capped = True
+        if raw_low > total_muscle_budget:
+            raw_low = total_muscle_budget
+
+    low = max(0.0, raw_low)
+    high = max(0.0, raw_high)
+
+    return {
+        "lower_bound_working_sets": round(low),
+        "upper_bound_working_sets": round(high),
+        "capped_by_muscle_readiness_budget": budget_capped,
+    }
+
+
+def _goal_adjusted_working_sets(feasible_range: dict, range_position_fraction) -> int:
+    """Selects a point inside the already-established feasible range.
+    No resolved goal mode -> the range's own midpoint (a neutral default,
+    not a goal decision). Otherwise linearly interpolates by fraction and
+    clips defensively (belt-and-suspenders on top of the construction
+    guarantee) - goal policy can never push the result outside
+    [lower_bound, upper_bound]."""
+
+    low = feasible_range["lower_bound_working_sets"]
+    high = feasible_range["upper_bound_working_sets"]
+    if range_position_fraction is None:
+        return round((low + high) / 2.0)
+    fraction = max(0.0, min(1.0, range_position_fraction))
+    return max(low, min(high, round(low + fraction * (high - low))))
 
 
 def _goal_context(as_of, goal_mode_override=None):
@@ -205,6 +292,15 @@ def build_shadow_dose(
 
     trend = performance_trajectory(comparable_sessions)
 
+    # Goal-agnostic feasible range (identical across every goal mode),
+    # then goal policy selects a position inside it. See
+    # _feasible_dose_range's docstring for why this can never exceed
+    # what B2's own history/readiness caps already justify.
+    feasible_range = _feasible_dose_range(dose, target_muscles, readiness_band)
+    goal_context = _goal_context(as_of, goal_mode_override)
+    range_position_fraction = goal_context["policy"].get("range_position_fraction")
+    goal_adjusted_working_sets = _goal_adjusted_working_sets(feasible_range, range_position_fraction)
+
     dose_classification = _classify_dose(dose["modifiers"]["combined"])
 
     # Cross-check against the TKI-2 canonical (Calves-aware) ledger for
@@ -235,6 +331,21 @@ def build_shadow_dose(
         explanation_factors.append(f"{muscle}: {budget['reason']}")
     if dose["dose_limited_by"]:
         explanation_factors.append(f"Dose capped by: {dose['dose_limited_by']}")
+    explanation_factors.append(
+        f"Feasible range today: {feasible_range['lower_bound_working_sets']}-"
+        f"{feasible_range['upper_bound_working_sets']} working sets "
+        f"(goal-agnostic; capped by muscle readiness budget: {feasible_range['capped_by_muscle_readiness_budget']})"
+    )
+    if range_position_fraction is not None:
+        explanation_factors.append(
+            f"Goal mode '{goal_context['goal_mode']}' targets the "
+            f"{range_position_fraction:.0%} position in that range -> {goal_adjusted_working_sets} working sets."
+        )
+    else:
+        explanation_factors.append(
+            "No goal mode resolved - using the feasible range's midpoint "
+            f"({goal_adjusted_working_sets} working sets)."
+        )
 
     fallbacks_used = []
     if dose["baseline"]["source"] != "comparable_sessions_30_90d":
@@ -283,7 +394,14 @@ def build_shadow_dose(
             "median_duration_minutes": dose["baseline"]["median_duration_minutes"],
         },
 
-        "goal_context": _goal_context(as_of, goal_mode_override),
+        "goal_context": goal_context,
+
+        # Goal-agnostic by construction (section 4 of this module's
+        # docstring) - identical across every goal_mode_override for the
+        # same as_of/history/readiness state. See
+        # test_goal_mode_never_exceeds_feasible_range and
+        # test_feasible_range_identical_across_goal_modes.
+        "feasible_dose_range": feasible_range,
 
         "performance_state": {
             "trajectory": trend,
@@ -291,7 +409,19 @@ def build_shadow_dose(
         },
 
         "recommended_dose": {
-            "working_sets": dose["target"]["working_sets"],
+            # Goal-adjusted final recommendation: a position inside
+            # feasible_dose_range selected by the active goal mode's
+            # range_position_fraction (goal-agnostic default: the
+            # range's own midpoint). MAY differ across goal modes for
+            # the identical history/readiness state - see
+            # goal_agnostic_reference_working_sets below for B2's own,
+            # never-goal-adjusted single-point value.
+            "working_sets": goal_adjusted_working_sets,
+            # B2's own, unmodified, goal-agnostic single-point reference
+            # (kept for audit/backward-compatibility with v1 consumers -
+            # this is what "working_sets" always equaled before goal
+            # policy learned to select a posture within the range).
+            "goal_agnostic_reference_working_sets": dose["target"]["working_sets"],
             "exercise_count": dose["target"]["exercise_count"],
             "muscle_stimulus_ranges": muscle_stimulus_ranges,
             "target_rir_guidance": "See B3/progressive_overload per-exercise RIR - not recomputed here.",
