@@ -45,6 +45,10 @@ from body_composition_progress import (
     body_composition_progress,
 )
 
+from training_intelligence.stimulus.shadow_state import (
+    build_shadow_training_state,
+)
+
 from baselines import (
     init_baselines,
 )
@@ -992,8 +996,52 @@ async def body_composition_progress_mobile(
                 f"{exc}"
             ),
         ) from exc
+
+
 # ============================================================
-    
+# Admin Diagnostic endpoint - TKI-1/TKI-2 shadow training state.
+#
+# SHADOW MODE ONLY. Does not select, alter, or gate today's workout,
+# TrainingDetail, or any B3/B4 recommendation. Diagnostic/inspection use
+# only - see TRAINING_INTELLIGENCE_KNOWLEDGE_BASE_V1.md.
+# ============================================================
+@app.get(
+    "/training-intelligence/state"
+)
+async def training_intelligence_state_admin(
+    request: Request,
+    as_of: str | None = None,
+):
+    require_admin(request)
+
+    from datetime import datetime, timezone
+
+    if as_of:
+        try:
+            parsed_as_of = datetime.fromisoformat(as_of)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="as_of must be an ISO-8601 timestamp.",
+            ) from exc
+        if parsed_as_of.tzinfo is None:
+            parsed_as_of = parsed_as_of.replace(tzinfo=timezone.utc)
+    else:
+        parsed_as_of = datetime.now(timezone.utc)
+
+    try:
+        return build_shadow_training_state(parsed_as_of)
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Training Intelligence shadow state failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
 # ============================================================
 # WEEKLY HEALTH INTELLIGENCE AI TEST
 #
