@@ -1227,11 +1227,7 @@ async def mobile_health_intelligence_today(
 
     try:
 
-        return (
-            get_daily_health_intelligence(
-                force_refresh=False
-            )
-        )
+        return await anyio.to_thread.run_sync(get_daily_health_intelligence)
 
     except Exception as exc:
 
@@ -1265,9 +1261,7 @@ async def todays_plan(
 
     try:
 
-        return (
-            get_or_build_todays_plan()
-        )
+        return await anyio.to_thread.run_sync(get_or_build_todays_plan)
 
     except Exception as exc:
 
@@ -1302,9 +1296,7 @@ async def mobile_todays_plan(
 
     try:
 
-        return (
-            get_or_build_todays_plan()
-        )
+        return await anyio.to_thread.run_sync(get_or_build_todays_plan)
 
     except Exception as exc:
 
@@ -1335,11 +1327,9 @@ async def mobile_today_experience(
     )
 
     try:
-        plan = get_or_build_todays_plan()
-
-        return build_today_experience(
-            plan=plan
-        )
+        def load_today():
+            return build_today_experience(plan=get_or_build_todays_plan())
+        return await anyio.to_thread.run_sync(load_today)
 
     except Exception as exc:
         raise HTTPException(

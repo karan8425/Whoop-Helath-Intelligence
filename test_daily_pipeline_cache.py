@@ -1,530 +1,175 @@
-import json
-import sys
-import types
+"""Morning V3 replaces invalidation assertions with publication invariants."""
+import copy
+import time
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import date, datetime, timezone
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+import daily_job as job
+import todays_plan_store as store
+from whoop_refresh import data_version, metadata
 
+DAY = "2026-09-12"
+A = {"metric_date": DAY, "source_updated_at": "2026-09-12T05:34:00+00:00", "metrics_generated_at": "2026-09-12T05:35:00+00:00"}
+B = {**A, "source_updated_at": "2026-09-12T08:15:00+00:00"}
+def plan(source=A):
+    return {"status": "ok", "plan_date": DAY, "source_freshness": dict(source), "training": {}}
+def fresh(source=A):
+    return {"status": "fresh", "local_today": DAY, "can_generate_current_recommendation": True, "source_freshness": source}
+def cache(source=A):
+    return {"plan_payload": plan(source), "updated_at": datetime.now(timezone.utc)}
 
-_DEPENDENCY_MODULES = (
-    "psycopg",
-    "psycopg.types",
-    "psycopg.types.json",
-    "db",
-    "analytics",
-    "baselines",
-    "sync",
-    "recommendations",
-    "freshness",
-    "daily_health_intelligence_store",
-    "todays_plan",
-    "fastapi",
-    "whoop_webhook_store",
-)
-_ORIGINAL_MODULES = {
-    name: sys.modules.get(name)
-    for name in _DEPENDENCY_MODULES
-}
+class RevisionTests(unittest.TestCase):
+    def test_revision_changes(self):
+        self.assertNotEqual(data_version(A), data_version(B))
+    def test_generation_timestamp_does_not_change_revision(self):
+        self.assertEqual(data_version(A), data_version({**A, "metrics_generated_at": "later"}))
+    def test_timezone_normalization(self):
+        self.assertEqual(data_version(A), data_version({**A, "source_updated_at": "2026-09-12T01:34:00-04:00"}))
+    def test_non_max_resource_revision_also_changes_version(self):
+        self.assertNotEqual(data_version({**A, "source_revision":"raw-A"}), data_version({**A, "source_revision":"raw-B"}))
+    def test_identical_source_fingerprint_is_stable(self):
+        self.assertEqual(data_version({**A, "source_revision":"raw-A"}), data_version({**A, "source_revision":"raw-A", "metrics_generated_at":"later"}))
+    def test_missing_timestamp_has_no_fabricated_version(self):
+        self.assertIsNone(data_version({"metric_date": DAY}))
+    def test_metadata_identifies_cached_not_latest_source(self):
+        result = metadata(plan(A), {"refresh_in_progress": True, "latest_seen_source_updated_at": B["source_updated_at"]})
+        self.assertEqual(result["data_version"], data_version(A))
+        self.assertTrue(result["freshness"]["refresh_in_progress"])
 
+class CacheTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(store, "_today_local", return_value=date.fromisoformat(DAY)))
+        self.fresh = self.stack.enter_context(patch.object(store, "freshness_status", return_value=fresh(B)))
+        self.state = self.stack.enter_context(patch.object(store, "read_state", return_value={"refresh_in_progress": True}))
+        self.cached = self.stack.enter_context(patch.object(store, "load_cached_plan", return_value=cache(A)))
+        self.build = self.stack.enter_context(patch.object(store, "build_todays_plan", return_value=plan(B)))
+        self.stack.enter_context(patch.object(store, "raw_source_signature", return_value=None))
+        self.save = self.stack.enter_context(patch.object(store, "save_plan"))
+        self.stack.enter_context(patch("whoop_webhook_store.pipeline_lock", side_effect=lambda: nullcontext(True)))
+        self.stack.enter_context(patch.object(store, "build_activity_plan", return_value={}))
+    def test_fresh_but_updating_serves_A_without_build_or_activity(self):
+        with patch.object(store, "build_activity_plan") as activity:
+            start = time.perf_counter()
+            result = store.get_or_build_todays_plan()
+            elapsed = time.perf_counter() - start
+        self.assertEqual(result["data_version"], data_version(A))
+        self.assertTrue(result["refresh_in_progress"])
+        self.build.assert_not_called()
+        activity.assert_not_called()
+        print(f"MORNING_V3 simulated_swr_seconds={elapsed:.6f}")
+    def test_no_cache_while_updating_is_pending_not_duplicate_build(self):
+        self.cached.return_value = None
+        self.assertEqual(store.get_or_build_todays_plan()["status"], "pending_freshness")
+        self.build.assert_not_called()
+    def test_matching_settled_source_is_cache_hit(self):
+        self.state.return_value = {}
+        self.fresh.return_value = fresh(A)
+        self.assertEqual(store.get_or_build_todays_plan()["data_version"], data_version(A))
+        self.build.assert_not_called()
+    def test_changed_settled_source_builds_and_saves(self):
+        self.state.return_value = {}
+        self.assertEqual(store.get_or_build_todays_plan()["data_version"], data_version(B))
+        self.build.assert_called_once()
+        self.save.assert_called_once()
+    def test_request_racing_pipeline_lock_serves_cached_plan(self):
+        self.state.return_value = {}
+        with patch("whoop_webhook_store.pipeline_lock", side_effect=lambda: nullcontext(False)):
+            result = store.get_or_build_todays_plan()
+        self.assertTrue(result["refresh_in_progress"])
+        self.assertEqual(result["data_version"], data_version(A))
+        self.build.assert_not_called()
+    def test_cold_settled_cache_builds_once(self):
+        self.state.return_value = {}
+        self.cached.return_value = None
+        self.assertEqual(store.get_or_build_todays_plan()["status"], "ok")
+        self.build.assert_called_once()
+    def test_stale_guard_precedes_cached_plan(self):
+        self.fresh.return_value = {"status": "stale", "can_generate_current_recommendation": False}
+        self.assertEqual(store.get_or_build_todays_plan()["status"], "stale_data")
+        self.build.assert_not_called()
+    def test_pending_today_guard_is_preserved(self):
+        self.fresh.return_value = {"status": "pending_today", "can_generate_current_recommendation": False}
+        self.assertEqual(store.get_or_build_todays_plan()["status"], "pending_freshness")
+        self.build.assert_not_called()
+    def test_sep12_A_updating_A_then_B(self):
+        self.fresh.return_value = fresh(A)
+        self.state.return_value = {}
+        t1 = store.get_or_build_todays_plan()
+        self.state.return_value = {"refresh_in_progress": True}
+        self.fresh.return_value = fresh(B)
+        t3 = store.get_or_build_todays_plan()
+        self.cached.return_value = cache(B)
+        self.state.return_value = {}
+        t5 = store.get_or_build_todays_plan()
+        self.assertEqual([x["data_version"] for x in (t1,t3,t5)], [data_version(A),data_version(A),data_version(B)])
+        self.assertEqual([x["refresh_in_progress"] for x in (t1,t3,t5)], [False,True,False])
+        self.build.assert_not_called()
 
-def _module(name, **attributes):
-    module = types.ModuleType(name)
-    for key, value in attributes.items():
-        setattr(module, key, value)
-    sys.modules[name] = module
-    return module
+class PipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.events = []
+        values = {"coaching_date": DAY, "mark_started": 1, "read_state": {"generation": 1},
+                  "raw_source_signature": "B", "load_cached_plan": cache(A), "start_run": 1,
+                  "freshness_status": fresh(B), "build_todays_plan": plan(B),
+                  "daily_recommendation": {"metric_date": DAY}, "build_daily_health_ai_payload": {"plan_date": DAY},
+                  "generate_daily_health_intelligence": {"status": "ok", "brief": {"headline":"new"}},
+                  "save_intelligence": {}, "_stored_response": {"status":"ok", "cache": {}, "brief": {}},
+                  "store_intelligence": DAY}
+        names = set(values) | {"init_db", "init_analytics", "init_baselines", "init_automation_tables",
+            "rebuild_daily_metrics", "rebuild_baselines", "finish_run", "fail_run", "save_plan", "complete", "mark_failed", "observe_source"}
+        self.mocks = {}
+        for name in names:
+            def action(*args, _name=name, **kwargs):
+                self.events.append(_name)
+                return copy.deepcopy(values.get(_name, {}))
+            self.mocks[name] = self.stack.enter_context(patch.object(job, name, side_effect=action))
+        self.stack.enter_context(patch.object(job, "incremental_sync", new=AsyncMock(return_value={"new_rows": {"recoveries": 0}})))
+        self.stack.enter_context(patch.object(job, "request_scoped_connection", side_effect=lambda: nullcontext()))
+        self.stack.enter_context(patch.object(job, "get_conn", return_value=MagicMock()))
+    def run_pipeline(self):
+        return job.run_daily_pipeline(_lock_held=True)
+    def test_success_builds_once_and_publishes_before_completion_and_audit(self):
+        self.assertEqual(self.run_pipeline()["status"], "completed")
+        for name in ("build_todays_plan", "generate_daily_health_intelligence", "save_plan", "complete"):
+            self.mocks[name].assert_called_once()
+        self.assertLess(self.events.index("save_plan"), self.events.index("complete"))
+        self.assertLess(self.events.index("complete"), self.events.index("finish_run"))
+    def test_failed_build_preserves_last_good_cache(self):
+        self.mocks["build_todays_plan"].side_effect = RuntimeError("build failed")
+        with self.assertRaises(RuntimeError): self.run_pipeline()
+        self.mocks["save_plan"].assert_not_called()
+        self.mocks["complete"].assert_not_called()
+        self.mocks["mark_failed"].assert_called_once()
+    def test_ai_programming_failure_preserves_cache(self):
+        self.mocks["generate_daily_health_intelligence"].side_effect = ValueError("bug")
+        with self.assertRaises(ValueError): self.run_pipeline()
+        self.mocks["save_plan"].assert_not_called()
+    def test_pending_does_not_build(self):
+        self.mocks["freshness_status"].side_effect = lambda: {"status":"pending_today", "can_generate_current_recommendation":False}
+        self.assertEqual(self.run_pipeline()["status"], "pending_freshness")
+        self.mocks["build_todays_plan"].assert_not_called()
+    def test_zero_rows_unchanged_revision_skips_all_expensive_work(self):
+        self.mocks["read_state"].side_effect = lambda *a: {"generation":2, "source_signature":"B", "last_completed_data_version":data_version(A)}
+        self.assertTrue(self.run_pipeline()["rebuild_skipped"])
+        for name in ("rebuild_daily_metrics", "rebuild_baselines", "build_todays_plan", "generate_daily_health_intelligence"):
+            self.mocks[name].assert_not_called()
+    def test_zero_rows_newer_timestamp_still_rebuilds(self):
+        self.mocks["read_state"].side_effect = lambda *a: {"generation":2, "source_signature":"A", "last_completed_data_version":data_version(A)}
+        self.assertEqual(self.run_pipeline()["status"], "completed")
+        self.mocks["build_todays_plan"].assert_called_once()
+    def test_failed_prior_revision_is_retried_even_when_raw_source_unchanged(self):
+        self.mocks["read_state"].side_effect = lambda *a: {"generation":2, "source_signature":"A"}
+        self.run_pipeline()
+        self.mocks["build_todays_plan"].assert_called_once()
+    def test_fallback_intelligence_can_publish(self):
+        self.mocks["generate_daily_health_intelligence"].side_effect = lambda *a: {"status":"ok", "ai_synthesis_status":"degraded"}
+        result = self.run_pipeline()
+        self.assertFalse(result["intelligence_cache"]["llm_called"])
+        self.mocks["save_plan"].assert_called_once()
 
-
-# Keep this orchestration test independent of production-only database and
-# HTTP packages. Every imported collaborator is replaced again with a focused
-# mock in the individual tests.
-psycopg = _module("psycopg")
-psycopg_types = _module("psycopg.types")
-psycopg_json = _module("psycopg.types.json", Jsonb=lambda value: value)
-psycopg.types = psycopg_types
-psycopg_types.json = psycopg_json
-
-_module("db", get_conn=Mock(), init_db=Mock())
-_module("analytics", init_analytics=Mock(), rebuild_daily_metrics=Mock())
-_module("baselines", init_baselines=Mock(), rebuild_baselines=Mock())
-_module("sync", incremental_sync=AsyncMock())
-_module("recommendations", daily_recommendation=Mock())
-_module("freshness", freshness_status=Mock())
-_module(
-    "daily_health_intelligence_store",
-    get_daily_health_intelligence=Mock(),
-)
-_module("todays_plan", build_todays_plan=Mock())
-
-
-class _Router:
-    def post(self, *args, **kwargs):
-        return lambda function: function
-
-
-_module(
-    "fastapi",
-    APIRouter=lambda: _Router(),
-    BackgroundTasks=object,
-    HTTPException=Exception,
-    Request=object,
-)
-_module(
-    "whoop_webhook_store",
-    init_whoop_webhook_tables=Mock(),
-    store_webhook_event=Mock(),
-    mark_pipeline_started=Mock(),
-    mark_pipeline_completed=Mock(),
-    mark_pipeline_skipped=Mock(),
-    mark_pipeline_failed=Mock(),
-    pipeline_lock=Mock(),
-    take_superseded_skips=Mock(return_value=0),
-)
-
-import daily_job
-import todays_plan_store
-import whoop_webhook
-
-for _name, _original in _ORIGINAL_MODULES.items():
-    if _original is None:
-        sys.modules.pop(_name, None)
-    else:
-        sys.modules[_name] = _original
-
-
-class DailyPipelineCacheInvalidationTests(unittest.TestCase):
-
-    def _successful_pipeline_patches(self, events):
-        freshness = {
-            "status": "current",
-            "can_generate_current_recommendation": True,
-            "latest_physiology_date": "2026-08-31",
-        }
-        intelligence = {
-            "status": "ok",
-            "brief": {"headline": "Ready"},
-            "cache": "refreshed",
-        }
-
-        return {
-            "init_db": patch.object(daily_job, "init_db"),
-            "init_analytics": patch.object(daily_job, "init_analytics"),
-            "init_baselines": patch.object(daily_job, "init_baselines"),
-            "init_automation_tables": patch.object(
-                daily_job,
-                "init_automation_tables",
-            ),
-            "start_run": patch.object(daily_job, "start_run", return_value=17),
-            "incremental_sync": patch.object(
-                daily_job,
-                "incremental_sync",
-                new=AsyncMock(
-                    side_effect=lambda: events.append("sync") or {"new_rows": {}},
-                ),
-            ),
-            "rebuild_daily_metrics": patch.object(
-                daily_job,
-                "rebuild_daily_metrics",
-                side_effect=lambda: events.append("daily_metrics") or {},
-            ),
-            "rebuild_baselines": patch.object(
-                daily_job,
-                "rebuild_baselines",
-                side_effect=lambda: events.append("baselines") or {},
-            ),
-            "freshness_status": patch.object(
-                daily_job,
-                "freshness_status",
-                side_effect=lambda: events.append("freshness") or freshness,
-            ),
-            "daily_recommendation": patch.object(
-                daily_job,
-                "daily_recommendation",
-                side_effect=lambda: events.append("recommendation") or {
-                    "metric_date": date(2026, 8, 31),
-                    "training_recommendation": "Active Recovery",
-                    "overall_status": "recover",
-                },
-            ),
-            "get_daily_health_intelligence": patch.object(
-                daily_job,
-                "get_daily_health_intelligence",
-                side_effect=lambda **kwargs: events.append("intelligence")
-                or intelligence,
-            ),
-            "store_intelligence": patch.object(
-                daily_job,
-                "store_intelligence",
-                side_effect=lambda *args: events.append("store")
-                or date(2026, 8, 31),
-            ),
-            "finish_run": patch.object(
-                daily_job,
-                "finish_run",
-                side_effect=lambda *args: events.append("finish"),
-            ),
-            "fail_run": patch.object(daily_job, "fail_run"),
-            "invalidate_todays_plan": patch.object(
-                daily_job,
-                "invalidate_todays_plan",
-                side_effect=lambda: events.append("invalidate")
-                or date(2026, 8, 31),
-            ),
-        }
-
-    def test_success_invalidates_after_refresh_and_before_audit(self):
-        events = []
-        patches = self._successful_pipeline_patches(events)
-
-        with ExitStack() as stack:
-            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
-            result = daily_job.run_daily_pipeline()
-
-        self.assertEqual(result["status"], "completed")
-        self.assertLess(events.index("sync"), events.index("invalidate"))
-        self.assertLess(events.index("daily_metrics"), events.index("invalidate"))
-        self.assertLess(events.index("intelligence"), events.index("invalidate"))
-        self.assertLess(events.index("store"), events.index("invalidate"))
-        # Freshness-critical cache invalidation runs BEFORE the non-critical
-        # automation audit write, so an audit failure cannot strand a stale
-        # Today plan in cache.
-        self.assertLess(events.index("invalidate"), events.index("finish"))
-        mocks["invalidate_todays_plan"].assert_called_once_with()
-        mocks["fail_run"].assert_not_called()
-
-    def test_pending_freshness_skips_recommendation_and_invalidation(self):
-        events = []
-        patches = self._successful_pipeline_patches(events)
-        pending = {
-            "status": "pending_today",
-            "can_generate_current_recommendation": False,
-            "latest_physiology_date": "2026-09-03",
-        }
-        patches["freshness_status"] = patch.object(
-            daily_job,
-            "freshness_status",
-            side_effect=lambda: events.append("freshness") or pending,
-        )
-
-        with ExitStack() as stack:
-            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
-            result = daily_job.run_daily_pipeline()
-
-        self.assertEqual(result["status"], "pending_freshness")
-        self.assertNotIn("recommendation", events)
-        self.assertNotIn("intelligence", events)
-        self.assertNotIn("invalidate", events)
-        mocks["daily_recommendation"].assert_not_called()
-        mocks["get_daily_health_intelligence"].assert_not_called()
-        mocks["store_intelligence"].assert_not_called()
-        mocks["invalidate_todays_plan"].assert_not_called()
-        mocks["fail_run"].assert_not_called()
-
-    def test_freshness_recovers_and_generates_on_next_run(self):
-        # First run: pending. Second run: source has arrived -> full pipeline.
-        first_events = []
-        pending_patches = self._successful_pipeline_patches(first_events)
-        pending = {
-            "status": "pending_today",
-            "can_generate_current_recommendation": False,
-            "latest_physiology_date": "2026-09-03",
-        }
-        pending_patches["freshness_status"] = patch.object(
-            daily_job,
-            "freshness_status",
-            side_effect=lambda: first_events.append("freshness") or pending,
-        )
-        with ExitStack() as stack:
-            for item in pending_patches.values():
-                stack.enter_context(item)
-            first = daily_job.run_daily_pipeline()
-
-        second_events = []
-        ok_patches = self._successful_pipeline_patches(second_events)
-        with ExitStack() as stack:
-            mocks = {
-                name: stack.enter_context(item)
-                for name, item in ok_patches.items()
-            }
-            second = daily_job.run_daily_pipeline()
-
-        self.assertEqual(first["status"], "pending_freshness")
-        self.assertEqual(second["status"], "completed")
-        mocks["get_daily_health_intelligence"].assert_called_once()
-        mocks["invalidate_todays_plan"].assert_called_once()
-
-    def test_repeated_successful_runs_are_idempotent(self):
-        # Reconciliation cron may fire twice on the same physiology (e.g. the
-        # 09:10 and 09:30 UTC Development schedule). Each run must reach the
-        # same terminal state, invalidate exactly once, and never crash.
-        for _ in range(2):
-            events = []
-            patches = self._successful_pipeline_patches(events)
-            with ExitStack() as stack:
-                mocks = {
-                    name: stack.enter_context(item)
-                    for name, item in patches.items()
-                }
-                result = daily_job.run_daily_pipeline()
-
-            self.assertEqual(result["status"], "completed")
-            mocks["invalidate_todays_plan"].assert_called_once_with()
-            mocks["finish_run"].assert_called_once()
-            mocks["fail_run"].assert_not_called()
-
-    def test_failed_pipeline_does_not_invalidate(self):
-        with (
-            patch.object(daily_job, "init_db"),
-            patch.object(daily_job, "init_analytics"),
-            patch.object(daily_job, "init_baselines"),
-            patch.object(daily_job, "init_automation_tables"),
-            patch.object(daily_job, "start_run", return_value=18),
-            patch.object(
-                daily_job,
-                "incremental_sync",
-                new=AsyncMock(side_effect=RuntimeError("sync failed")),
-            ),
-            patch.object(daily_job, "fail_run") as fail_run,
-            patch.object(daily_job, "invalidate_todays_plan") as invalidate,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "sync failed"):
-                daily_job.run_daily_pipeline()
-
-        fail_run.assert_called_once()
-        invalidate.assert_not_called()
-
-    def test_degraded_intelligence_persists_and_invalidates(self):
-        events = []
-        patches = self._successful_pipeline_patches(events)
-        degraded = {
-            "status": "ok",
-            "brief": {"headline": "Deterministic fallback"},
-            "cache": {"source": "forced_refresh", "llm_called": False},
-            "ai_synthesis_status": "degraded",
-        }
-        patches["get_daily_health_intelligence"] = patch.object(
-            daily_job,
-            "get_daily_health_intelligence",
-            side_effect=lambda **kwargs: events.append("intelligence") or degraded,
-        )
-
-        with ExitStack() as stack:
-            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
-            result = daily_job.run_daily_pipeline()
-
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["ai_synthesis_status"], "degraded")
-        mocks["store_intelligence"].assert_called_once()
-        mocks["finish_run"].assert_called_once()
-        mocks["invalidate_todays_plan"].assert_called_once()
-        mocks["fail_run"].assert_not_called()
-
-    def test_unexpected_intelligence_error_still_fails_pipeline(self):
-        events = []
-        patches = self._successful_pipeline_patches(events)
-        patches["get_daily_health_intelligence"] = patch.object(
-            daily_job,
-            "get_daily_health_intelligence",
-            side_effect=ValueError("programming defect"),
-        )
-
-        with ExitStack() as stack:
-            mocks = {name: stack.enter_context(item) for name, item in patches.items()}
-            with self.assertRaisesRegex(ValueError, "programming defect"):
-                daily_job.run_daily_pipeline()
-
-        mocks["store_intelligence"].assert_not_called()
-        mocks["finish_run"].assert_not_called()
-        mocks["invalidate_todays_plan"].assert_not_called()
-        mocks["fail_run"].assert_called_once()
-
-    def test_sleep_webhook_schedules_immediate_pipeline_without_delay(self):
-        payload = {
-            "type": "sleep.updated",
-            "trace_id": "trace-1",
-            "id": "sleep-1",
-            "user_id": "user-1",
-        }
-        request = Mock()
-        request.headers = {
-            "X-WHOOP-Signature-Timestamp": "timestamp",
-            "X-WHOOP-Signature": "signature",
-        }
-        request.body = AsyncMock(return_value=json.dumps(payload).encode("utf-8"))
-        background_tasks = Mock()
-
-        with (
-            patch.object(whoop_webhook, "_validate_timestamp"),
-            patch.object(whoop_webhook, "_validate_signature"),
-            patch.object(whoop_webhook, "init_whoop_webhook_tables"),
-            patch.object(whoop_webhook, "store_webhook_event", return_value=21),
-            patch.object(daily_job, "invalidate_todays_plan") as invalidate,
-        ):
-            result = __import__("asyncio").run(
-                whoop_webhook.receive_whoop_webhook(request, background_tasks)
-            )
-
-        # No artificial "wait for recovery" delay: sleep.updated now runs the
-        # same immediate pipeline as recovery.updated / workout.updated.
-        self.assertEqual(result["trigger_mode"], "immediate")
-        background_tasks.add_task.assert_called_once_with(
-            whoop_webhook._run_immediate_pipeline,
-            21,
-            "trace-1",
-            "sleep.updated",
-        )
-        self.assertFalse(hasattr(whoop_webhook, "_run_sleep_pipeline"))
-        self.assertFalse(hasattr(whoop_webhook, "SLEEP_EVENT_DELAY_SECONDS"))
-        invalidate.assert_not_called()
-
-
-PLAN_SOURCE_FRESHNESS = {
-    "metric_date": "2026-09-04",
-    "source_updated_at": "2026-09-04T11:00:00+00:00",
-    "metrics_generated_at": "2026-09-04T11:05:00+00:00",
-}
-
-PLAN_SOURCE_FRESHNESS_NEWER = {
-    "metric_date": "2026-09-04",
-    "source_updated_at": "2026-09-04T16:45:00+00:00",
-    "metrics_generated_at": "2026-09-04T16:50:00+00:00",
-}
-
-
-def _plan_freshness(*, can_generate=True, status="fresh", source_freshness=None):
-    return {
-        "status": status,
-        "local_today": "2026-09-04",
-        "latest_physiology_date": "2026-09-04",
-        "age_days": 0 if can_generate else 1,
-        "can_generate_current_recommendation": can_generate,
-        "source_freshness": (
-            PLAN_SOURCE_FRESHNESS if source_freshness is None else source_freshness
-        ),
-        "message": "test freshness",
-    }
-
-
-class TodaysPlanCacheBehaviorTests(unittest.TestCase):
-
-    # ----- CASE F: cache current with source -> fast hit preserved -----
-    def test_case_f_cache_hit_with_matching_source_uses_saved_plan(self):
-        cached_plan = {
-            "status": "ok",
-            "headline": "cached",
-            "source_freshness": PLAN_SOURCE_FRESHNESS,
-        }
-        cached_row = {
-            "plan_payload": cached_plan,
-            "updated_at": datetime.now(timezone.utc),
-        }
-        with (
-            patch.object(
-                todays_plan_store,
-                "freshness_status",
-                return_value=_plan_freshness(),
-            ),
-            patch.object(
-                todays_plan_store,
-                "load_cached_plan",
-                return_value=cached_row,
-            ),
-            patch.object(todays_plan_store, "build_todays_plan") as build,
-        ):
-            result = todays_plan_store.get_or_build_todays_plan()
-
-        self.assertEqual(result, cached_plan)
-        build.assert_not_called()
-
-    # ----- CASE E: cache generated before newer WHOOP source -> rejected -----
-    def test_case_e_cache_with_stale_source_is_rejected_and_rebuilt(self):
-        stale_cached = {
-            "plan_payload": {
-                "status": "ok",
-                "headline": "old",
-                "source_freshness": PLAN_SOURCE_FRESHNESS,
-            },
-            "updated_at": datetime.now(timezone.utc),
-        }
-        built_plan = {"status": "ok", "headline": "fresh"}
-        with (
-            patch.object(
-                todays_plan_store,
-                "freshness_status",
-                return_value=_plan_freshness(
-                    source_freshness=PLAN_SOURCE_FRESHNESS_NEWER
-                ),
-            ),
-            patch.object(
-                todays_plan_store,
-                "load_cached_plan",
-                return_value=stale_cached,
-            ),
-            patch.object(
-                todays_plan_store,
-                "build_todays_plan",
-                return_value=built_plan,
-            ) as build,
-            patch.object(todays_plan_store, "save_plan") as save,
-        ):
-            result = todays_plan_store.get_or_build_todays_plan()
-
-        build.assert_called_once_with()
-        save.assert_called_once()
-        saved_plan = save.call_args[0][0]
-        self.assertEqual(
-            saved_plan["source_freshness"], PLAN_SOURCE_FRESHNESS_NEWER
-        )
-        self.assertEqual(result["source_freshness"], PLAN_SOURCE_FRESHNESS_NEWER)
-
-    # ----- CASE I: existing cache-miss behavior still works -----
-    def test_cache_miss_still_builds_and_saves_plan(self):
-        built_plan = {"status": "ok", "headline": "fresh"}
-        with (
-            patch.object(
-                todays_plan_store,
-                "freshness_status",
-                return_value=_plan_freshness(),
-            ),
-            patch.object(todays_plan_store, "load_cached_plan", return_value=None),
-            patch.object(
-                todays_plan_store,
-                "build_todays_plan",
-                return_value=built_plan,
-            ) as build,
-            patch.object(todays_plan_store, "save_plan") as save,
-        ):
-            result = todays_plan_store.get_or_build_todays_plan()
-
-        build.assert_called_once_with()
-        save.assert_called_once()
-        saved_plan = save.call_args[0][0]
-        self.assertEqual(saved_plan["status"], "ok")
-        self.assertEqual(saved_plan["source_freshness"], PLAN_SOURCE_FRESHNESS)
-        self.assertEqual(result["source_freshness"], PLAN_SOURCE_FRESHNESS)
-
-    # ----- CASE C (plan layer): pending freshness is not silently served -----
-    def test_pending_freshness_returns_structured_state_without_building(self):
-        with (
-            patch.object(
-                todays_plan_store,
-                "freshness_status",
-                return_value=_plan_freshness(
-                    can_generate=False, status="pending_today"
-                ),
-            ),
-            patch.object(todays_plan_store, "load_cached_plan") as load,
-            patch.object(todays_plan_store, "build_todays_plan") as build,
-        ):
-            result = todays_plan_store.get_or_build_todays_plan()
-
-        self.assertEqual(result["status"], "pending_freshness")
-        self.assertTrue(result["plan_date"])
-        self.assertIn("freshness", result)
-        build.assert_not_called()
-        load.assert_not_called()
-
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()

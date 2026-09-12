@@ -197,7 +197,7 @@ def _execute_pipeline_once(
         )
 
         result = (
-            run_daily_pipeline()
+            run_daily_pipeline(_lock_held=True)
         )
 
         mark_pipeline_completed(
@@ -231,6 +231,15 @@ def _run_immediate_pipeline(
             event_type,
         )
 
+        # A cold API request may own the lock without any webhook worker to
+        # drain superseded events. Retry lock acquisition in the background;
+        # acknowledgment already returned and the durable generation stays pending.
+        for _ in range(120):
+            if not result or result.get("status") != "skipped_pipeline_busy":
+                break
+            time.sleep(5)
+            result = _execute_pipeline_once(event_id, trace_id, event_type)
+
         # Coalesce related events. WHOOP delivers sleep.updated and
         # recovery.updated within seconds of each other and they share the
         # pipeline lock window: one skips while the other runs. If this run
@@ -251,6 +260,7 @@ def _run_immediate_pipeline(
 
             if superseded:
 
+                print(f"WHOOP_REFRESH_COALESCE superseded_events={superseded} checking_source=true", flush=True)
                 print(
                     "[whoop-webhook] "
                     "re-running pipeline to cover "

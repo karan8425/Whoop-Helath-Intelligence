@@ -121,12 +121,7 @@ class DailyCoachingSummaryTests(unittest.TestCase):
             types.SimpleNamespace(build_todays_plan=lambda: plan),
         )
         module = importlib.import_module("daily_health_intelligence")
-        original = module.build_todays_plan
-        module.build_todays_plan = lambda: plan
-        try:
-            payload = module.build_daily_health_ai_payload()
-        finally:
-            module.build_todays_plan = original
+        payload = module.build_daily_health_ai_payload(plan=plan)
 
         self.assertEqual(
             payload["daily_coaching_summary"]["overall_state"],

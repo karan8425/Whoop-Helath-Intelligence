@@ -4,9 +4,6 @@ import re
 
 from openai import OpenAI
 
-from todays_plan import (
-    build_todays_plan,
-)
 from daily_coaching_summary import build_daily_coaching_summary
 
 
@@ -102,11 +99,11 @@ def _strip_json_fence(
 # PAYLOAD
 # ============================================================
 
-def build_daily_health_ai_payload():
+def build_daily_health_ai_payload(plan=None):
 
-    plan = (
-        build_todays_plan()
-    )
+    if plan is None:
+        from todays_plan_store import get_or_build_todays_plan
+        plan = get_or_build_todays_plan()
 
     if plan.get(
         "status"
@@ -118,6 +115,7 @@ def build_daily_health_ai_payload():
         )
 
     return {
+        "source_freshness": plan.get("source_freshness"),
         "plan_date":
             plan.get(
                 "plan_date"
@@ -428,8 +426,11 @@ DATA:
 {json.dumps(payload, default=str)}
 """
 
+    llm_request_count = 0
     try:
         client = _client()
+        llm_request_count = 1
+        print("WHOOP_REFRESH_SYNTHESIS llm_requests=1", flush=True)
         response = (
             client.responses.create(
                 model=_model(),
@@ -445,7 +446,9 @@ DATA:
             f"AI_SYNTHESIS status=degraded reason={reason}",
             flush=True,
         )
-        return _deterministic_fallback(payload, reason)
+        fallback = _deterministic_fallback(payload, reason)
+        fallback["llm_request_count"] = llm_request_count
+        return fallback
 
     raw = (
         _strip_json_fence(
@@ -568,6 +571,7 @@ DATA:
         )
 
     return {
+        "llm_request_count": llm_request_count,
         "status":
             "ok",
 

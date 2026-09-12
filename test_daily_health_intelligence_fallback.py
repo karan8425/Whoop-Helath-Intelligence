@@ -163,6 +163,11 @@ class InternalServerError(Exception):
 
 
 class DailyHealthIntelligenceFallbackTests(unittest.TestCase):
+    def setUp(self):
+        state = patch.object(store_module, "read_state", return_value={"refresh_in_progress": False})
+        state.start()
+        self.addCleanup(state.stop)
+
     def test_success_uses_ai_and_preserves_deterministic_values(self):
         client = _Client()
         with patch.object(module, "_client", return_value=client):
@@ -185,7 +190,8 @@ class DailyHealthIntelligenceFallbackTests(unittest.TestCase):
         self.assertEqual(result["brief"]["training"]["category"], "Active Recovery")
         self.assertNotIn("PRIVATE_RECOVERY_PAYLOAD", output.getvalue())
         self.assertNotIn("PRIVATE_EXCEPTION_TEXT", output.getvalue())
-        self.assertEqual(output.getvalue().strip(), "AI_SYNTHESIS status=degraded reason=insufficient_quota")
+        self.assertEqual(output.getvalue().strip().splitlines(), ["WHOOP_REFRESH_SYNTHESIS llm_requests=1", "AI_SYNTHESIS status=degraded reason=insufficient_quota"])
+        self.assertEqual(result["llm_request_count"], 1)
 
     def test_timeout_connection_and_server_failure_return_fallback(self):
         for exc, reason in (

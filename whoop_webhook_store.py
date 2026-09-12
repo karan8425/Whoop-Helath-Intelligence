@@ -1,3 +1,6 @@
+from contextvars import ContextVar
+_pipeline_owned = ContextVar("whoop_pipeline_owned", default=False)
+from whoop_refresh import ensure_table as ensure_refresh_table, mark_started
 from contextlib import contextmanager
 
 from psycopg.types.json import Jsonb
@@ -311,6 +314,8 @@ def store_webhook_event(
             "WHOOP webhook event did not contain type."
         )
 
+    ensure_refresh_table()
+
     with get_conn() as conn:
 
         with conn.cursor() as cur:
@@ -349,6 +354,8 @@ def store_webhook_event(
             ))
 
             row = cur.fetchone()
+            if row and event_type in {"recovery.updated", "sleep.updated", "workout.updated"}:
+                mark_started(event_type, cur)
 
     if not row:
 
@@ -483,6 +490,12 @@ def take_superseded_skips(
 
 @contextmanager
 def pipeline_lock():
+    # Nested Today/intelligence calls in the same worker already own this
+    # distributed lock. Other request contexts still acquire it independently.
+    if _pipeline_owned.get():
+        yield True
+        return
+    ownership_token = None
 
     connection_context = (
         get_conn()
@@ -512,9 +525,14 @@ def pipeline_lock():
                 row["acquired"]
             )
 
+        if acquired:
+            ownership_token = _pipeline_owned.set(True)
         yield acquired
 
     finally:
+        if ownership_token is not None:
+            _pipeline_owned.reset(ownership_token)
+
 
         if acquired:
 

@@ -57,6 +57,11 @@ def daily_freshness(
 
 
 class DailyIntelligenceFastPathTests(unittest.TestCase):
+    def setUp(self):
+        state = patch.object(daily_store, "read_state", return_value={"refresh_in_progress": False})
+        state.start()
+        self.addCleanup(state.stop)
+
 
     def cached_row(
         self,

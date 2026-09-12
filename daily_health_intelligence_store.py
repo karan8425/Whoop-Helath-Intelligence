@@ -1,3 +1,4 @@
+from whoop_refresh import read_state, metadata, data_version, same_metric_source
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -147,7 +148,7 @@ def ensure_table():
                 """
             )
 
-        conn.commit()
+        # Transaction ownership belongs to get_conn / request_scoped_connection.
 
 
 # ============================================================
@@ -287,8 +288,7 @@ def _is_current_cached_intelligence(
         cached
         and str(cached.get("plan_date")) == str(plan_date)
         and cached.get("intelligence_version") == INTELLIGENCE_VERSION
-        and deterministic_payload.get("source_freshness")
-        == source_freshness
+        and same_metric_source(deterministic_payload.get("source_freshness"), source_freshness)
     )
 
 
@@ -300,6 +300,9 @@ def _stored_response(cached):
     )
 
     return {
+        "source_freshness": deterministic_payload.get("source_freshness"),
+        "data_version": data_version(deterministic_payload.get("source_freshness")),
+        "source_updated_at": (deterministic_payload.get("source_freshness") or {}).get("source_updated_at"),
         "status": "ok",
         "cache": {
             "source": "stored",
@@ -465,7 +468,7 @@ def save_intelligence(
                 cur.fetchone()
             )
 
-        conn.commit()
+        # Transaction ownership belongs to get_conn / request_scoped_connection.
 
     return dict(
         row
@@ -479,12 +482,24 @@ def get_daily_health_intelligence(
     force_refresh=False,
 ):
 
-    return get_or_create_intelligence(
-        generator=
-            generate_daily_health_intelligence,
-        force_refresh=
-            force_refresh,
-    )
+    from whoop_webhook_store import pipeline_lock
+    with pipeline_lock() as acquired:
+        if acquired:
+            return get_or_create_intelligence(
+                generator=generate_daily_health_intelligence,
+                force_refresh=force_refresh,
+            )
+        freshness = freshness_status()
+        day = freshness.get("local_today") or _current_plan_date()
+        state = read_state(day)
+        state["refresh_in_progress"] = True
+        cached = load_current_intelligence(day)
+        if freshness.get("can_generate_current_recommendation") and cached:
+            return metadata(_stored_response(cached), state)
+        result = _pending_response(day, freshness)
+        if freshness.get("can_generate_current_recommendation"):
+            result["status"] = "pending_freshness"
+        return metadata(result, state)
 
 
 # ============================================================
@@ -507,6 +522,17 @@ def get_or_create_intelligence(
             freshness,
         )
 
+    state = read_state(current_plan_date)
+    if state.get("refresh_in_progress"):
+        current_cached = load_current_intelligence(current_plan_date)
+        if current_cached:
+            response = _stored_response(current_cached)
+            response["source_freshness"] = (current_cached.get("deterministic_payload") or {}).get("source_freshness")
+            return metadata(response, state)
+        response = _pending_response(current_plan_date, freshness)
+        response["status"] = "pending_freshness"
+        return metadata(response, state)
+
     if not force_refresh:
 
         current_cached = load_current_intelligence(
@@ -519,12 +545,10 @@ def get_or_create_intelligence(
             source_freshness,
         ):
 
-            return _stored_response(
-                current_cached
-            )
+            return metadata(_stored_response(current_cached), state)
 
     deterministic_payload = build_daily_health_ai_payload()
-    deterministic_payload["source_freshness"] = source_freshness
+    deterministic_payload["source_freshness"] = deterministic_payload.get("source_freshness") or source_freshness
 
     plan_date = (
         deterministic_payload.get(
@@ -736,7 +760,7 @@ def validate_daily_health_intelligence_store():
                 ),
             )
 
-        conn.commit()
+        # Transaction ownership belongs to get_conn / request_scoped_connection.
 
     # --------------------------------------------------------
     # First request:

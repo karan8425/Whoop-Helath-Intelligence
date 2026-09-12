@@ -1,3 +1,4 @@
+from whoop_refresh import read_state, metadata, data_version, same_metric_source, raw_source_signature
 import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -133,7 +134,7 @@ def ensure_table():
                 """
             )
 
-        conn.commit()
+        # Transaction ownership belongs to get_conn / request_scoped_connection.
 
 
 # ============================================================
@@ -242,7 +243,7 @@ def _cache_is_fresh(
     return (
         time_fresh
         and source_freshness is not None
-        and stored_source_freshness == source_freshness
+        and same_metric_source(stored_source_freshness, source_freshness)
     )
 
 
@@ -339,7 +340,7 @@ def save_plan(
 
             row = cur.fetchone()
 
-        conn.commit()
+        # Transaction ownership belongs to get_conn / request_scoped_connection.
 
     return dict(
         row
@@ -373,7 +374,7 @@ def invalidate_todays_plan():
                 ),
             )
 
-        conn.commit()
+        # Transaction ownership belongs to get_conn / request_scoped_connection.
 
     return plan_date
 
@@ -396,6 +397,15 @@ def get_or_build_todays_plan(
             plan_date,
             freshness,
         )
+
+    state = read_state(str(plan_date))
+    cached = load_cached_plan(plan_date)
+    if state.get("refresh_in_progress"):
+        if cached and (cached.get("plan_payload") or {}).get("status") == "ok":
+            return metadata(cached["plan_payload"], state)
+        pending = _pending_plan(plan_date, freshness)
+        pending["status"] = "pending_freshness"
+        return metadata(pending, state)
 
     if not force_refresh:
 
@@ -441,8 +451,28 @@ def get_or_build_todays_plan(
                     flush=True,
                 )
             payload["training"] = training
-            return payload
+            return metadata(payload, state)
 
+    # Share the pipeline lock with webhook/cron writers. A request that raced
+    # event acceptance must not build from partially ingested physiology.
+    from whoop_webhook_store import pipeline_lock
+    with pipeline_lock() as acquired:
+        state = read_state(str(plan_date))
+        cached = load_cached_plan(plan_date)
+        if not acquired or state.get("refresh_in_progress"):
+            state["refresh_in_progress"] = True
+            if cached:
+                return metadata(cached["plan_payload"], state)
+            pending = _pending_plan(plan_date, freshness)
+            pending["status"] = "pending_freshness"
+            return metadata(pending, state)
+        # A different request may have completed the cache while we waited.
+        if not force_refresh and _cache_is_fresh(cached, source_freshness):
+            return metadata(cached["plan_payload"], state)
+        return _build_and_save(plan_date, source_freshness, state)
+
+
+def _build_and_save(plan_date, source_freshness, state):
     print(
         "TODAYS_PLAN_CACHE "
         f"status=miss "
@@ -465,10 +495,10 @@ def get_or_build_todays_plan(
         "ok"
     ):
 
-        return plan
+        return metadata(plan, state)
 
     plan = dict(plan)
-    plan["source_freshness"] = source_freshness
+    plan["source_freshness"] = {**source_freshness, "source_revision": raw_source_signature()}
 
     save_plan(plan)
 
@@ -479,4 +509,4 @@ def get_or_build_todays_plan(
         flush=True,
     )
 
-    return plan
+    return metadata(plan, state)

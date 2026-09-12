@@ -292,7 +292,7 @@ class ExecutePipelineOnceTests(unittest.TestCase):
             result = whoop_webhook._execute_pipeline_once(5, "t", "recovery.updated")
         self.assertEqual(result["status"], "completed")
         whoop_webhook.mark_pipeline_started.assert_called_once_with(5)
-        whoop_webhook.run_daily_pipeline.assert_called_once_with()
+        whoop_webhook.run_daily_pipeline.assert_called_once_with(_lock_held=True)
         whoop_webhook.mark_pipeline_completed.assert_called_once_with(5)
 
     def test_lock_busy_marks_skipped_and_does_not_run(self):
@@ -336,16 +336,17 @@ class ImmediatePipelineCoalescingTests(unittest.TestCase):
 
         self.assertEqual(once.call_count, 1)
 
-    def test_no_rerun_and_no_claim_when_this_run_itself_was_skipped(self):
+    def test_busy_lock_retries_without_blocking_webhook_acknowledgment(self):
         with patch.object(
             whoop_webhook,
             "_execute_pipeline_once",
-            return_value={"status": "skipped_pipeline_busy"},
-        ) as once:
+            side_effect=[{"status": "skipped_pipeline_busy"}, {"status":"completed"}],
+        ) as once, patch.object(whoop_webhook.time, "sleep") as sleep:
             whoop_webhook._run_immediate_pipeline(7, "trace-sep6", "recovery.updated")
 
-        self.assertEqual(once.call_count, 1)
-        whoop_webhook.take_superseded_skips.assert_not_called()
+        self.assertEqual(once.call_count, 2)
+        sleep.assert_called_once_with(5)
+        whoop_webhook.take_superseded_skips.assert_called_once()
 
     def test_pipeline_exception_is_marked_failed(self):
         with patch.object(

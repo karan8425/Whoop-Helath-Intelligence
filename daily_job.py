@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 
 from psycopg.types.json import Jsonb
 
-from db import get_conn, init_db
+from db import get_conn, init_db, request_scoped_connection
+import time
+from whoop_refresh import (coaching_date, mark_started, read_state, raw_source_signature, data_version, complete, mark_failed, observe_source)
+from todays_plan import build_todays_plan
+from daily_health_intelligence import build_daily_health_ai_payload, generate_daily_health_intelligence
+from daily_health_intelligence_store import save_intelligence, _stored_response
+from todays_plan_store import load_cached_plan, save_plan
 from json_safe import json_safe
 from analytics import init_analytics, rebuild_daily_metrics
 from baselines import init_baselines, rebuild_baselines
@@ -13,12 +19,7 @@ from sync import incremental_sync
 from recommendations import daily_recommendation
 from freshness import freshness_status
 
-from daily_health_intelligence_store import (
-    get_daily_health_intelligence,
-)
-from todays_plan_store import (
-    invalidate_todays_plan,
-)
+from whoop_webhook_store import pipeline_lock
 
 
 # ============================================================
@@ -235,8 +236,21 @@ def store_intelligence(
 # AUTHORITATIVE DAILY PIPELINE
 # ============================================================
 
-def run_daily_pipeline():
+def run_daily_pipeline(_lock_held=False):
+    if _lock_held:
+        return _run_daily_pipeline()
+    with pipeline_lock() as acquired:
+        if not acquired:
+            return {"status": "skipped_pipeline_busy"}
+        return _run_daily_pipeline()
 
+
+def _run_daily_pipeline():
+
+    started = time.monotonic()
+    day = coaching_date()
+    mark_started("daily_pipeline")
+    generation = read_state(day)["generation"]
     init_db()
     init_analytics()
     init_baselines()
@@ -263,6 +277,23 @@ def run_daily_pipeline():
         sync_result = asyncio.run(
             incremental_sync()
         )
+
+        signature = raw_source_signature()
+        prior_state = read_state(day)
+        cached = load_cached_plan(day)
+        if (cached and prior_state.get("source_signature") == signature
+                and not any((sync_result.get("new_rows") or {}).values())
+                and data_version((cached.get("plan_payload") or {}).get("source_freshness"))
+                    == prior_state.get("last_completed_data_version")
+                and prior_state.get("last_completed_data_version")):
+            with get_conn() as conn, conn.cursor() as cur:
+                complete(cur, day, generation, prior_state["last_completed_data_version"],
+                         prior_state.get("latest_seen_source_updated_at"), signature)
+            finish_run(run_id, "completed", day, sync_result, {}, {}, None, None, freshness_status())
+            print("WHOOP_REFRESH_COALESCE superseded_event_no_new_source_data skip=true "
+                  "new_source_data=false rerun_skipped=true today_builds=0 llm_calls=0", flush=True)
+            return {"status": "completed", "run_id": run_id, "rebuild_skipped": True,
+                    "pipeline_seconds": time.monotonic() - started, "sync_new_rows": sync_result.get("new_rows")}
 
         # ----------------------------------------------------
         # 2. Rebuild daily metrics
@@ -313,6 +344,8 @@ def run_daily_pipeline():
             ),
             flush=True,
         )
+
+        observe_source(day, freshness.get("source_freshness"))
 
         if not freshness[
             "can_generate_current_recommendation"
@@ -390,8 +423,8 @@ def run_daily_pipeline():
         #
         # /api/v1/health-intelligence/today
         #
-        # force_refresh=True guarantees that an event-driven
-        # recalculation produces fresh intelligence.
+        # Build one authoritative Today plan and use it for synthesis and
+        # cache publication. Unchanged-source runs returned before this point.
         # ----------------------------------------------------
 
         print(
@@ -399,72 +432,29 @@ def run_daily_pipeline():
             flush=True,
         )
 
-        intelligence_result = (
-            get_daily_health_intelligence(
-                force_refresh=True
-            )
-        )
-
-        if (
-            intelligence_result.get(
-                "status"
-            )
-            != "ok"
-        ):
-
-            raise RuntimeError(
-                "Daily Health Intelligence "
-                "did not return status=ok."
-            )
-
-        # ----------------------------------------------------
-        # Maintain historical compatibility table
-        # ----------------------------------------------------
-
-        metric_date = (
-            store_intelligence(
-                deterministic,
-                intelligence_result,
-            )
-        )
-
-        # ----------------------------------------------------
-        # Today cache invalidation (freshness-critical)
-        #
-        # The complete, current physiology and intelligence state is now
-        # durable. Invalidate at this success boundary so the next Today
-        # request cannot serve a plan built from partially refreshed WHOOP
-        # data. This runs BEFORE the automation audit write below: audit
-        # finalization is bookkeeping only, and a failure there (e.g. a
-        # serialization regression) must never strand a stale Today plan
-        # in cache.
-        # ----------------------------------------------------
-
-        try:
-
-            invalidated_date = (
-                invalidate_todays_plan()
-            )
-
-            print(
-                "TODAYS_PLAN_CACHE "
-                "status=invalidated "
-                "reason=whoop_daily_pipeline "
-                f"date={invalidated_date}",
-                flush=True,
-            )
-
-        except Exception as exc:
-
-            # Cache maintenance must not mask an otherwise successful
-            # refresh; surface it and continue to the audit write.
-            print(
-                "TODAYS_PLAN_CACHE "
-                "status=invalidation_failed "
-                "reason=whoop_daily_pipeline "
-                f"error={type(exc).__name__}",
-                flush=True,
-            )
+        plan = build_todays_plan()
+        if not isinstance(plan, dict) or plan.get("status") != "ok" or str(plan.get("plan_date")) != day:
+            raise RuntimeError("Current Today plan was not built successfully")
+        source = {**(freshness.get("source_freshness") or {}), "source_revision": signature}
+        plan["source_freshness"] = source
+        payload = build_daily_health_ai_payload(plan=plan)
+        payload["source_freshness"] = source
+        generated = generate_daily_health_intelligence(payload)
+        if generated.get("status") != "ok":
+            raise RuntimeError("Daily Health Intelligence did not return status=ok")
+        # No expensive work in this transaction. Both caches and the completion
+        # generation become visible together. Newer accepted events stay pending.
+        with request_scoped_connection():
+            saved = save_intelligence(payload, generated)
+            intelligence_result = _stored_response(saved)
+            intelligence_result["cache"]["llm_called"] = generated.get("ai_synthesis_status", "success") == "success"
+            save_plan(plan)
+            with get_conn() as conn, conn.cursor() as cur:
+                complete(cur, day, generation, data_version(source), source.get("source_updated_at"), signature)
+        metric_date = store_intelligence(deterministic, intelligence_result)
+        print(f"TODAYS_PLAN_CACHE status=replaced data_version={data_version(source)} "
+              f"today_builds=1 llm_calls={generated.get('llm_request_count', 0)} "
+              f"pipeline_seconds={time.monotonic() - started:.3f}", flush=True)
 
         # ----------------------------------------------------
         # Complete automation audit (bookkeeping)
@@ -551,6 +541,7 @@ def run_daily_pipeline():
 
     except Exception as exc:
 
+        mark_failed(day, exc)
         error_text = (
             f"{type(exc).__name__}: {exc}\n"
             f"{traceback.format_exc()}"

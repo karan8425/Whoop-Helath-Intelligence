@@ -87,6 +87,13 @@ class TakeSupersededSkipsTests(unittest.TestCase):
 
 
 class StoreWebhookEventDedupTests(unittest.TestCase):
+    def setUp(self):
+        for name in ("ensure_refresh_table", "mark_started"):
+            item = patch.object(store, name)
+            mock = item.start()
+            setattr(self, name, mock)
+            self.addCleanup(item.stop)
+
 
     def test_returns_new_id_on_insert(self):
         sink = []
@@ -100,6 +107,7 @@ class StoreWebhookEventDedupTests(unittest.TestCase):
                 payload={"type": "recovery.updated"},
             )
         self.assertEqual(event_id, 7)
+        self.mark_started.assert_called_once_with("recovery.updated", cursor)
         sql, params = sink[0]
         norm = _norm(sql)
         self.assertIn("on conflict ( trace_id, event_type ) do nothing", norm)
@@ -118,6 +126,7 @@ class StoreWebhookEventDedupTests(unittest.TestCase):
                 payload={},
             )
         self.assertIsNone(event_id)
+        self.mark_started.assert_not_called()
 
     def test_missing_trace_id_or_type_raises(self):
         with self.assertRaises(ValueError):

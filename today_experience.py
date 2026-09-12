@@ -187,6 +187,7 @@ def build_today_experience(plan=None, coaching_summary=None):
 
     if plan.get("status") != "ok":
         return {
+            **{key: plan.get(key) for key in ("freshness", "data_version", "source_updated_at", "metrics_generated_at", "refresh_in_progress", "latest_source_updated_at", "refresh_started_at", "refresh_error")},
             "status": plan.get("status", "not_ready"),
             "version": VERSION,
             "date": plan.get("plan_date"),
@@ -199,6 +200,7 @@ def build_today_experience(plan=None, coaching_summary=None):
     coaching = deepcopy(coaching_summary)
 
     return {
+        **{key: plan.get(key) for key in ("data_version", "source_updated_at", "metrics_generated_at", "refresh_in_progress", "latest_source_updated_at", "refresh_started_at", "refresh_error")},
         "status": "ok",
         "version": VERSION,
         "date": plan.get("plan_date"),
