@@ -407,3 +407,45 @@ four-required-modes distinctness requirement, midpoint-when-unresolved, and the 
 provenance/determinism/version tests carried forward. Full backend suite: **562 passed, 46
 skipped, 0 failed** (was 555; +7 net, 0 regressions). No B2/B3/production/iOS changes.
 `GOAL_POLICY_VERSION` bumped 1 -> 2 (data shape changed: added `range_position_fraction`).
+
+## 17. Corrected architecture re-validated against real data (90-day, all six goal modes)
+
+Re-ran the Sep-12 diagnostic and a 90-day backtest (2 session families x 15 dates x 6 goal
+modes = 180 real `build_shadow_dose` calls) against the live Development database under the
+corrected architecture.
+
+**Sep 12 re-check, all six modes**: feasible range `[9, 9]` (muscle-budget-capped, same as
+before) - every mode correctly returns `working_sets: 9`. Confirms section 16's finding is
+stable, not a one-off.
+
+**90-day backtest**: **0 anomalies** across all 180 checks (the feasible range was verified
+byte-identical across all six goal modes on every single date; no goal-adjusted dose ever
+fell outside its own date's range). **6 of 30 sampled dates (20%) had a non-degenerate range**
+- the rest, like Sep 12, were muscle-budget-capped to a single point. On every one of those 6
+real dates, the goal-mode ordering matched the intended design exactly:
+
+| date | family | range | lean_cut | lean_bulk | strength | maintenance | general_fitness | recovery |
+|---|---|---|---|---|---|---|---|---|
+| 2026-08-16 | Upper Pull | 11-13 | 12 | 13 | 12 | 12 | 12 | 11 |
+| 2026-07-11 | Upper Pull | 13-14 | 13 | 14 | 13 | 14 | 14 | 13 |
+| 2026-08-16 | Lower Body | 11-13 | 12 | 13 | 12 | 12 | 12 | 11 |
+| 2026-07-11 | Lower Body | 13-16 | 14 | 15 | 14 | 14 | 14 | 13 |
+| 2026-07-05 | Lower Body | 14-16 | 15 | 16 | 14 | 15 | 15 | 14 |
+| 2026-06-23 | Lower Body | 12-14 | 13 | 14 | 12 | 13 | 13 | 12 |
+
+`lean_bulk` sits at or near the upper bound on every one of these 6 real dates;
+`recovery`/`strength` sit at or near the lower bound; `lean_cut` sits just above the floor;
+`maintenance`/`general_fitness` sit in the middle - exactly the intended ordering, on real
+data, not just the synthetic fixture.
+
+**Honest limitation carried forward**: for this real user's current data density, goal-mode
+differentiation is only visible on about 1 in 5 days - the rest of the time the per-muscle
+readiness budget (built from comparatively sparse muscle-level history for a 2-3-muscle
+session family) is tighter than any WHOOP-band variation would allow anyway, so every goal
+mode correctly converges to the same number. This is not a defect: it is "goal policy must
+never exceed justified personalized limits" holding at its most common real boundary case
+for this user. Whether that 80% collapse rate is itself something to revisit (e.g. the
+per-muscle budget heuristic in B2) is a B2 question, out of this milestone's scope.
+
+Nothing in this validation pass touched Production, Render, or any deployment - entirely
+Development-repo, shadow-mode, read-only backend work, matching every prior TKI-3 milestone.
