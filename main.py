@@ -53,6 +53,10 @@ from training_intelligence.dose.shadow_dose import (
     build_shadow_dose,
 )
 
+from training_intelligence.selection.shadow_selection import (
+    build_shadow_selection,
+)
+
 from baselines import (
     init_baselines,
 )
@@ -1093,6 +1097,58 @@ async def training_intelligence_dose_admin(
             status_code=500,
             detail=(
                 "Training Intelligence shadow dose failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# Admin Diagnostic endpoint - TKI-4 shadow session selection.
+#
+# SHADOW MODE ONLY. Does not select, alter, or gate today's workout,
+# TrainingDetail, or any B3/B4 recommendation - integrations.tonal.
+# training_priority.build_training_priority() (the live session-
+# selection engine) is untouched and unaware this endpoint exists.
+# `goal_mode` is optional and overrides the goal policy's own
+# resolution from the active goal profile - for diagnostic/multi-
+# goal-validation use only.
+# ============================================================
+@app.get(
+    "/training-intelligence/selection"
+)
+async def training_intelligence_selection_admin(
+    request: Request,
+    as_of: str | None = None,
+    goal_mode: str | None = None,
+):
+    require_admin(request)
+
+    from datetime import datetime, timezone
+
+    if as_of:
+        try:
+            parsed_as_of = datetime.fromisoformat(as_of)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="as_of must be an ISO-8601 timestamp.",
+            ) from exc
+        if parsed_as_of.tzinfo is None:
+            parsed_as_of = parsed_as_of.replace(tzinfo=timezone.utc)
+    else:
+        parsed_as_of = datetime.now(timezone.utc)
+
+    try:
+        return build_shadow_selection(parsed_as_of, goal_mode_override=goal_mode)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Training Intelligence shadow selection failed: "
                 f"{exc}"
             ),
         ) from exc

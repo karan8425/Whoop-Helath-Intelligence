@@ -181,8 +181,8 @@ def _goal_adjusted_working_sets(feasible_range: dict, range_position_fraction) -
     return max(low, min(high, round(low + fraction * (high - low))))
 
 
-def _goal_context(as_of, goal_mode_override=None):
-    goal = get_active_goal(as_of=as_of) or {}
+def _goal_context(as_of, goal_mode_override=None, active_goal=None):
+    goal = active_goal if active_goal is not None else (get_active_goal(as_of=as_of) or {})
     goal_mode = goal_mode_override or resolve_goal_mode(goal)
     policy = get_goal_policy(goal_mode)
     return {
@@ -211,6 +211,9 @@ def build_shadow_dose(
     muscle_rows=None,
     ledger_rows=None,
     goal_mode_override=None,
+    readiness=None,
+    muscle_readiness_result=None,
+    active_goal=None,
 ) -> dict:
     """The full TKI-3 shadow dose object for one session family, as of a
     given moment. Read-only; calls nothing that writes to the database
@@ -223,7 +226,16 @@ def build_shadow_dose(
     see training_intelligence/dose/goal_policy.py. Passing it never
     changes any numeric dose output (working_sets, muscle budgets, WHOOP
     multiplier, etc.) - only the goal_context/policy framing - by
-    construction, since it is applied strictly after `dose` is computed."""
+    construction, since it is applied strictly after `dose` is computed.
+
+    `readiness`/`muscle_readiness_result`/`active_goal`: optional
+    pre-fetched results of _latest_readiness()/calculate_muscle_readiness()
+    /get_active_goal() (none of which are session_family-specific), so a
+    caller evaluating multiple families at the same as_of - e.g. TKI-4's
+    candidate scoring - can fetch each exactly once and reuse it across
+    every build_shadow_dose call instead of re-querying per family. Not
+    session_family-specific, so reusing them across families for the
+    same as_of is exactly as fresh as calling this fresh per family."""
 
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be a timezone-aware datetime")
@@ -249,11 +261,13 @@ def build_shadow_dose(
 
     target_muscles = SESSION_TEMPLATES[session_family]["muscles"]
 
-    readiness = _latest_readiness(now=as_of)
+    if readiness is None:
+        readiness = _latest_readiness(now=as_of)
     readiness_band = readiness.get("readiness_band")
     recovery_score = readiness.get("recovery_score")
 
-    muscle_readiness_result = calculate_muscle_readiness(now=as_of)
+    if muscle_readiness_result is None:
+        muscle_readiness_result = calculate_muscle_readiness(now=as_of)
     muscle_readiness_by_name = {
         entry["muscle"]: entry for entry in muscle_readiness_result.get("muscles", [])
     }
@@ -297,7 +311,7 @@ def build_shadow_dose(
     # _feasible_dose_range's docstring for why this can never exceed
     # what B2's own history/readiness caps already justify.
     feasible_range = _feasible_dose_range(dose, target_muscles, readiness_band)
-    goal_context = _goal_context(as_of, goal_mode_override)
+    goal_context = _goal_context(as_of, goal_mode_override, active_goal=active_goal)
     range_position_fraction = goal_context["policy"].get("range_position_fraction")
     goal_adjusted_working_sets = _goal_adjusted_working_sets(feasible_range, range_position_fraction)
 
