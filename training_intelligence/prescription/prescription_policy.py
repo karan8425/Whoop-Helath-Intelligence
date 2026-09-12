@@ -88,3 +88,63 @@ GOAL_POSTURE_ELIGIBLE_STATES = ("HOLD", "PROGRESS_REPS")
 # mechanism - in case a profile ever reaches this module through a path
 # that does not apply that filter.
 GENERIC_PLACEHOLDER_NAMES = frozenset({"Handle Move", "Bar Move"})
+
+# ----------------------------------------------------------------------
+# TKI-5.1 addendum: feasible exercise-count range + dose-absorption
+# waterfall (training_intelligence.prescription.composition). Exercise
+# count is now an OUTCOME of the usable candidate pool + personal
+# history, not a preference computed first and then hoped to fit -
+# DEFAULT_SETS_PER_EXERCISE/EXERCISE_COUNT_DELTA_BY_GOAL_MODE above are
+# reused unchanged, but only as one INPUT to that preference, always
+# capped by how many candidates genuinely exist (composition.py).
+# ----------------------------------------------------------------------
+
+COMPOSITION_MODEL_VERSION = 1
+
+# CALIBRATION PARAMETER: how far back to look for the user's own
+# comparable-session exercise-count/set-count structure. 60 days (double
+# TKI-2's own 30-day ledger default) to give the median a fairer sample
+# without requiring a second, unbounded historical query.
+HISTORICAL_STRUCTURE_LOOKBACK_DAYS = 60
+
+# CALIBRATION PARAMETER: fewer real comparable sessions than this and
+# personal historical structure is not used to inform the preferred
+# exercise count - falls through to the goal-policy/dose default instead
+# (section 5's fallback hierarchy). Matches the same minimum-comparable-
+# session floor already used elsewhere in this package (TKI-2's ledger,
+# TKI-4.1's rolling representation) rather than inventing a new number.
+MIN_COMPARABLE_SESSIONS_FOR_HISTORICAL_STRUCTURE = 3
+
+# CALIBRATION PARAMETER (section 10, tier A): a movement's personal
+# tolerated set ceiling, when enough personal history exists for it, is
+# its own historical recent_sets_per_session plus this margin - allows
+# modest, evidence-informed absorption above what was merely typical,
+# never an unbounded amount.
+PERSONAL_TOLERATED_SETS_MARGIN = 1
+
+# CALIBRATION PARAMETER (section 10, tier D - versioned product-policy
+# fallback, used only when no personal/pattern/family history exists for
+# a movement): matches B3's OWN existing _set_allocation() remainder-
+# distribution ceiling (it never raises an allocation above 4 sets while
+# distributing surplus) - not a new number invented for TKI-5.1.
+PER_MOVEMENT_ABSORPTION_CAP_FALLBACK = 4
+
+# CALIBRATION PARAMETER (section 12/27): the dose-absorption waterfall
+# may never redirect more than this fraction of the TOTAL target dose
+# into a single movement, regardless of how much personal-history
+# headroom that movement has - a hard guard against "excessive set
+# dumping into one accessory movement" even when the per-movement cap
+# above would otherwise allow it.
+MAX_REALLOCATION_SHARE_PER_MOVEMENT = 0.4
+
+# CALIBRATION PARAMETER: a movement must already carry at least this
+# many allocated sets before the waterfall will consider adding MORE to
+# it - prevents redirecting surplus onto a movement that was barely
+# included in the first place.
+MIN_ALLOCATED_SETS_TO_BE_REALLOCATION_TARGET = 2
+
+# Progression states B3's own progressive_overload.prescribe() may
+# return that indicate the movement is NOT a safe target for additional,
+# reallocated sets today (section 8/11) - reused verbatim from that
+# module's own vocabulary, not redefined here.
+NON_ABSORBING_PROGRESSION_STATES = ("REDUCE", "REBUILD")

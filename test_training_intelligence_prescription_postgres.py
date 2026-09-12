@@ -113,6 +113,27 @@ class ShadowPrescriptionPostgresTests(unittest.TestCase):
              for e in with_future["exercises"]],
         )
 
+    def test_future_workout_does_not_change_feasible_exercise_count(self):
+        """TKI-5.1: feasible_exercise_count()'s personal-history structure
+        input (historical_session_structure) is derived from real ledger
+        rows loaded fresh each call - a future workout must not change
+        the historical median exercises-per-session it computes."""
+        as_of = datetime(2035, 5, 1, 8, 0, tzinfo=timezone.utc)
+        for i in range(4):
+            self._insert_workout(f"tki5_struct_{i}", as_of - timedelta(days=3 + i * 6))
+        baseline = build_shadow_prescription(as_of)
+
+        self._insert_workout(
+            "tki5_struct_future", as_of + timedelta(days=10),
+            set_count=99, movement_label="tki5_struct_future_movement", base_weight=999.0,
+        )
+        with_future = build_shadow_prescription(as_of)
+
+        self.assertEqual(baseline["feasible_exercise_count"], with_future["feasible_exercise_count"])
+        if baseline["dose"] is not None:
+            self.assertEqual(baseline["data_quality"]["historical_structure_sample_count"],
+                              with_future["data_quality"]["historical_structure_sample_count"])
+
 
 if __name__ == "__main__":
     unittest.main()
