@@ -1,0 +1,51 @@
+[
+  {
+    "rule_id": "TRAINING_STRENGTH_001",
+    "name": "Preserve meaningful loading for strength-focused movements",
+    "category": "strength",
+    "evidence_class": "evidence_tier1",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND"],
+    "description": "ACSM recommends heavier loading around 80% 1RM and multiple sets when strength is the primary outcome.",
+    "conditions": ["movement_is_strength_focused"],
+    "action": ["preserve_relative_loading_even_in_energy_deficit"],
+    "explanation": [
+      "Strength-focused movements should preserve meaningful loading even during a fat-loss phase, unless recovery/local readiness argues otherwise."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_STRENGTH_002",
+    "name": "Failure is not required for adaptation",
+    "category": "strength",
+    "evidence_class": "evidence_tier1",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND"],
+    "description": "ACSM's 2026 review reports that momentary muscular failure is not consistently necessary for results in healthy adults.",
+    "conditions": ["prescribing_effort_target"],
+    "action": ["use_rir_or_rpe_effort_target_instead_of_mandatory_failure"],
+    "explanation": [
+      "Do not require training to failure; use RIR/RPE-style effort targets alongside progressive overload."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_STRENGTH_003",
+    "name": "Lean-cut goal preserves strength/lean mass rather than maximizing volume",
+    "category": "strength",
+    "evidence_class": "product_policy",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND", "BARBELL_MEDICINE_STRENGTH_PROGRAMMING"],
+    "description": "For a fat-loss-with-lean-mass-preservation goal, the primary training objective is to preserve or improve strength and lean mass while body fat declines.",
+    "conditions": ["goal_phase == lean_cut"],
+    "action": [
+      "maintain_meaningful_resistance_intensity",
+      "avoid_unnecessary_large_volume_increases_in_deficit",
+      "prioritize_high_quality_hard_sets"
+    ],
+    "explanation": [
+      "A cut must not turn primarily into cardio; body-composition and performance trends should be used to detect possible under-recovery."
+    ],
+    "confidence": "high",
+    "version": 1
+  }
+]

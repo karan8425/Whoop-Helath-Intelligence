@@ -1,0 +1,52 @@
+[
+  {
+    "rule_id": "TRAINING_PROGRESSION_001",
+    "name": "Prefer the least disruptive progression variable",
+    "category": "progression",
+    "evidence_class": "evidence_tier2",
+    "source_ids": ["STRONGER_BY_SCIENCE_PROGRESSIVE_OVERLOAD"],
+    "description": "Stronger by Science describes progression through reps, load, sets, proximity to failure, and other variables.",
+    "conditions": ["evaluating_next_progression_step"],
+    "action": [
+      "step_1_improve_reps_within_target_range",
+      "step_2_increase_resistance_after_rep_target_consistently_achieved",
+      "step_3_add_set_only_if_weekly_stimulus_insufficient_and_recovery_permits",
+      "step_4_change_exercise_only_for_balance_stagnation_discomfort_or_program_design"
+    ],
+    "explanation": [
+      "Ordering progression this way changes the least at a time, making it possible to attribute a result to a single variable."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_PROGRESSION_002",
+    "name": "Do not increase every variable simultaneously",
+    "category": "progression",
+    "evidence_class": "product_policy",
+    "source_ids": ["STRONGER_BY_SCIENCE_PROGRESSIVE_OVERLOAD"],
+    "description": "Progressive overload must be based on comparable exercise history and should not simultaneously increase load, reps, and sets without justification.",
+    "conditions": ["multiple_progression_variables_eligible_at_once"],
+    "action": ["select_single_dominant_progression_variable"],
+    "explanation": [
+      "Simultaneous multi-variable increases make the plan harder to explain and harder to attribute if something goes wrong."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_PROGRESSION_003",
+    "name": "Hold or regress when performance or recovery worsens",
+    "category": "progression",
+    "evidence_class": "product_policy",
+    "source_ids": ["BARBELL_MEDICINE_STRENGTH_PROGRAMMING"],
+    "description": "If performance or recovery worsens, hold load, reduce reps/sets, or substitute as appropriate.",
+    "conditions": ["performance_or_recovery_trend_declining"],
+    "action": ["hold_or_reduce_prescription"],
+    "explanation": [
+      "Progression is not one-directional; regression protects long-term adherence and injury risk."
+    ],
+    "confidence": "medium",
+    "version": 1
+  }
+]

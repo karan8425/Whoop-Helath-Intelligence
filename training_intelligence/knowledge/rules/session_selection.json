@@ -1,0 +1,52 @@
+[
+  {
+    "rule_id": "TRAINING_LOCAL_001",
+    "name": "Prefer fresh muscle over fatigued muscle",
+    "category": "session_selection",
+    "evidence_class": "product_policy",
+    "source_ids": ["WHOOP_RECOVERY_GUIDANCE"],
+    "description": "When systemic readiness is high but the intended primary muscle is locally fatigued, and a fresh alternative with comparable program value exists, re-score the session candidates instead of defaulting to the intended muscle.",
+    "conditions": [
+      "systemic_readiness == high",
+      "intended_primary_muscle == fatigued",
+      "fresh_alternative_with_program_value == true"
+    ],
+    "action": ["rescore_session_candidates"],
+    "explanation": [
+      "Systemic readiness is high, but the planned target is locally fatigued.",
+      "NOT YET WIRED: no code in TKI-1/TKI-2 executes this rescoring. This rule is knowledge-layer only until a future session-ranking milestone (TKI-4) consumes it."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_SESSION_002",
+    "name": "The session selector should optimize the week, not merely rotate names",
+    "category": "session_selection",
+    "evidence_class": "product_policy",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND"],
+    "description": "Session selection should be driven by goal relevance, weekly stimulus debt, local readiness, program balance, days since trained, systemic readiness, recent performance, schedule, exercise availability, and user constraints - in that order.",
+    "conditions": ["evaluating_next_session_candidate"],
+    "action": ["not_yet_implemented_future_TKI4_session_scoring"],
+    "explanation": [
+      "This is the target session-selection hierarchy for a future milestone. TKI-1/TKI-2 expose the ledger and readiness data this hierarchy will eventually consume; they do not rank sessions."
+    ],
+    "confidence": "medium",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_SESSION_003",
+    "name": "A generated workout must pass consistency invariants before publication",
+    "category": "session_selection",
+    "evidence_class": "product_policy",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND", "WHOOP_RECOVERY_GUIDANCE"],
+    "description": "Goal consistency, weekly balance, local readiness, systemic-dose consistency, historical-dose consistency, progression consistency, recovery protection, and explainability must all hold before a session is published.",
+    "conditions": ["session_ready_for_publication"],
+    "action": ["not_yet_implemented_future_TKI6_validation"],
+    "explanation": [
+      "Documented here for provenance; enforcement is a future milestone (TKI-6). No current recommendation path is gated by this rule."
+    ],
+    "confidence": "medium",
+    "version": 1
+  }
+]

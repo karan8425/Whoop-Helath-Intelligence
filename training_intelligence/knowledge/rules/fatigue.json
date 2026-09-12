@@ -1,0 +1,65 @@
+[
+  {
+    "rule_id": "TRAINING_FATIGUE_001",
+    "name": "More volume is not automatically better",
+    "category": "fatigue",
+    "evidence_class": "evidence_tier2",
+    "source_ids": ["STRONGER_BY_SCIENCE_STRENGTH_GUIDE"],
+    "description": "Training produces both adaptation and fatigue; the goal is the highest useful stimulus that can be recovered from while maintaining progression.",
+    "conditions": ["evaluating_weekly_volume_target"],
+    "action": ["cap_volume_at_recoverable_useful_stimulus"],
+    "explanation": [
+      "A fitness-fatigue balance framework, not raw tonnage maximization, should govern weekly volume."
+    ],
+    "confidence": "medium",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_FATIGUE_002",
+    "name": "WHOOP Recovery is systemic readiness, not muscle selection",
+    "category": "fatigue",
+    "evidence_class": "evidence_tier3",
+    "source_ids": ["WHOOP_RECOVERY_GUIDANCE", "WHOOP_TRAINING_ZONES"],
+    "description": "WHOOP describes high Recovery as greater capacity for training load and low Recovery as a reason to reduce strain.",
+    "conditions": ["systemic_readiness_known"],
+    "action": ["use_recovery_to_scale_dose_or_intensity_only"],
+    "explanation": [
+      "WHOOP may scale dose/intensity, but it must not select a fatigued muscle merely because systemic Recovery is high."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_FATIGUE_003",
+    "name": "A high WHOOP Recovery score cannot override local muscle fatigue",
+    "category": "fatigue",
+    "evidence_class": "product_policy",
+    "source_ids": ["WHOOP_RECOVERY_GUIDANCE"],
+    "description": "Local muscle readiness (Tonal-derived) is a separate, workload-recovery signal from WHOOP systemic Recovery.",
+    "conditions": [
+      "systemic_readiness == high",
+      "intended_primary_muscle == fatigued"
+    ],
+    "action": ["do_not_convert_fatigued_muscle_into_high_volume_target"],
+    "explanation": [
+      "This is the central invariant of the local-readiness layer: systemic capacity is necessary but not sufficient to justify loading an already-fatigued muscle."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_FATIGUE_004",
+    "name": "Daily movement and resistance training are governed separately",
+    "category": "fatigue",
+    "evidence_class": "evidence_tier1",
+    "source_ids": ["WHO_PHYSICAL_ACTIVITY"],
+    "description": "WHO guidance supports regular aerobic activity plus resistance training as separate, complementary components.",
+    "conditions": ["evaluating_daily_movement_target"],
+    "action": ["do_not_substitute_strength_tonnage_for_movement_or_vice_versa"],
+    "explanation": [
+      "Daily activity/conditioning has its own adaptive target; strength volume is not a substitute for it, and steps are not a substitute for resistance training."
+    ],
+    "confidence": "high",
+    "version": 1
+  }
+]

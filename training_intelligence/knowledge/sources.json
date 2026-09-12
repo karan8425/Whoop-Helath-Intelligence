@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "source_id": "ACSM_2026_RT_POSITION_STAND",
+      "organization": "American College of Sports Medicine",
+      "tier": 1,
+      "title": "2026 Resistance Training Position Stand",
+      "urls": [
+        "https://acsm.org/resistance-training-guidelines-update-2026/",
+        "https://www.acsm.org/wp-content/uploads/2026/03/Resistance-Training-Position-Stand-infographic.pdf"
+      ],
+      "used_for": "Hard guardrails and default training principles: full-body coverage frequency, hypertrophy volume anchor, strength loading intensity, failure-not-mandatory guidance."
+    },
+    {
+      "source_id": "WHO_PHYSICAL_ACTIVITY",
+      "organization": "World Health Organization",
+      "tier": 1,
+      "title": "Physical Activity Guidance",
+      "urls": [
+        "https://www.who.int/initiatives/behealthy/physical-activity"
+      ],
+      "used_for": "Baseline aerobic-activity guidance; keeping daily movement governed separately from resistance training dose."
+    },
+    {
+      "source_id": "STRONGER_BY_SCIENCE_STRENGTH_GUIDE",
+      "organization": "Stronger by Science",
+      "tier": 2,
+      "title": "Complete Strength Training Guide",
+      "urls": [
+        "https://www.strongerbyscience.com/complete-strength-training-guide/"
+      ],
+      "used_for": "Practical programming interpretation of progressive overload and session structure."
+    },
+    {
+      "source_id": "STRONGER_BY_SCIENCE_PROGRESSIVE_OVERLOAD",
+      "organization": "Stronger by Science",
+      "tier": 2,
+      "title": "Progressive Overload Strategies",
+      "urls": [
+        "https://www.strongerbyscience.com/progressive-overload-strategies/"
+      ],
+      "used_for": "Ordering of progression variables (reps, then load, then sets, then exercise change)."
+    },
+    {
+      "source_id": "STRONGER_BY_SCIENCE_POWERBUILDING",
+      "organization": "Stronger by Science",
+      "tier": 2,
+      "title": "Powerbuilding",
+      "urls": [
+        "https://www.strongerbyscience.com/how-to-powerbuild/"
+      ],
+      "used_for": "Balancing strength and hypertrophy objectives within the same program."
+    },
+    {
+      "source_id": "BARBELL_MEDICINE_STRENGTH_PROGRAMMING",
+      "organization": "Barbell Medicine",
+      "tier": 2,
+      "title": "Strength Training Programming",
+      "urls": [
+        "https://www.barbellmedicine.com/blog/strength-training-programming/"
+      ],
+      "used_for": "Starting dose near tolerated/previously-progressed volume; fatigue-aware adjustment."
+    },
+    {
+      "source_id": "BARBELL_MEDICINE_POWERLIFTING_PROGRAMMING",
+      "organization": "Barbell Medicine",
+      "tier": 2,
+      "title": "Powerlifting programming / individual volume discussion",
+      "urls": [
+        "https://www.barbellmedicine.com/training-programs/powerlifting/"
+      ],
+      "used_for": "Individualized weekly volume reasoning."
+    },
+    {
+      "source_id": "TONAL_TRAINING_PROGRAMS",
+      "organization": "Tonal",
+      "tier": 3,
+      "title": "Training Programs",
+      "urls": [
+        "https://tonal.com/pages/training-programs"
+      ],
+      "used_for": "Platform-specific program structure context for Tonal movements."
+    },
+    {
+      "source_id": "TONAL_GOAL_PROGRESS_METRICS",
+      "organization": "Tonal",
+      "tier": 3,
+      "title": "Training Goal Progress Metrics",
+      "urls": [
+        "https://tonal.com/blogs/all/training-goal-progress-key-metrics"
+      ],
+      "used_for": "Context for what Tonal itself treats as a progress signal."
+    },
+    {
+      "source_id": "TONAL_90_DAY_MUSCLE_BUILDING",
+      "organization": "Tonal",
+      "tier": 3,
+      "title": "90-Day Muscle Building Plan",
+      "urls": [
+        "https://tonal.com/blogs/all/workout-plan-build-muscle"
+      ],
+      "used_for": "Illustrative platform programming pattern, not a copied program."
+    },
+    {
+      "source_id": "WHOOP_RECOVERY_GUIDANCE",
+      "organization": "WHOOP",
+      "tier": 3,
+      "title": "Recovery guidance",
+      "urls": [
+        "https://support.whoop.com/s/article/WHOOP-Recovery"
+      ],
+      "used_for": "Systemic-readiness banding (green/yellow/red) and the Recovery-informs-capacity principle."
+    },
+    {
+      "source_id": "WHOOP_TRAINING_ZONES",
+      "organization": "WHOOP",
+      "tier": 3,
+      "title": "Training Zones / Recovery and Strain",
+      "urls": [
+        "https://www.whoop.com/us/en/thelocker/whoop-training-zones-optimal-overreaching-restoring/"
+      ],
+      "used_for": "Systemic dose scaling context (overreaching vs. restoring)."
+    },
+    {
+      "source_id": "WHOOP_STRAIN",
+      "organization": "WHOOP",
+      "tier": 3,
+      "title": "WHOOP Strain",
+      "urls": [
+        "https://www.whoop.com/us/en/thelocker/how-does-whoop-strain-work-101/"
+      ],
+      "used_for": "Recent cumulative strain as systemic-readiness context."
+    }
+  ]
+}

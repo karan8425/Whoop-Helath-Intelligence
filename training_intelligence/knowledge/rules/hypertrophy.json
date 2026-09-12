@@ -1,0 +1,47 @@
+[
+  {
+    "rule_id": "TRAINING_HYPERTROPHY_001",
+    "name": "Train all major muscle groups at least twice weekly",
+    "category": "hypertrophy",
+    "evidence_class": "evidence_tier1",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND"],
+    "description": "ACSM's 2026 position stand emphasizes training all major muscle groups at least twice weekly and individualizing programs around goals and adherence.",
+    "conditions": ["evaluating_weekly_program_structure"],
+    "action": ["maintain_rolling_weekly_stimulus_ledger_by_muscle_group"],
+    "explanation": [
+      "Never optimize one day in isolation; a rolling weekly stimulus ledger is required to see whether every major muscle group is actually receiving regular training."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_HYPERTROPHY_002",
+    "name": "~10 weekly sets per muscle group is a practical hypertrophy anchor",
+    "category": "hypertrophy",
+    "evidence_class": "evidence_tier1",
+    "source_ids": ["ACSM_2026_RT_POSITION_STAND"],
+    "description": "ACSM's 2026 guidance highlights approximately 10 weekly sets per muscle group as a practical hypertrophy target.",
+    "conditions": ["hypertrophy_reference_needed", "no_personalized_range_learned_yet"],
+    "action": ["expose_reference_default_of_10_sets_per_week"],
+    "explanation": [
+      "This is a starting anchor, not an immutable prescription. It must not itself drive today's workout; it is a reference/default value only, superseded by Tier 4 personal history once available."
+    ],
+    "confidence": "high",
+    "version": 1
+  },
+  {
+    "rule_id": "TRAINING_HYPERTROPHY_003",
+    "name": "Personalized history should calibrate, not be replaced by, generic volume formulas",
+    "category": "hypertrophy",
+    "evidence_class": "product_policy",
+    "source_ids": ["BARBELL_MEDICINE_STRENGTH_PROGRAMMING"],
+    "description": "Barbell Medicine recommends beginning near volumes the individual has previously tolerated and progressed on, then adjusting according to performance and fatigue.",
+    "conditions": ["sufficient_personal_history_exists"],
+    "action": ["prefer_personal_history_anchor_over_generic_volume_formula"],
+    "explanation": [
+      "Historical successful sessions should be the default dose anchor once enough personal data exists; generic guidance only initializes the model."
+    ],
+    "confidence": "medium",
+    "version": 1
+  }
+]
