@@ -57,6 +57,10 @@ from training_intelligence.selection.shadow_selection import (
     build_shadow_selection,
 )
 
+from training_intelligence.prescription.shadow_prescription import (
+    build_shadow_prescription,
+)
+
 from baselines import (
     init_baselines,
 )
@@ -1149,6 +1153,57 @@ async def training_intelligence_selection_admin(
             status_code=500,
             detail=(
                 "Training Intelligence shadow selection failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# Admin Diagnostic endpoint - TKI-5 shadow exercise prescription.
+#
+# SHADOW MODE ONLY. Does not select, alter, or gate today's workout,
+# TrainingDetail, or any B3/B4/iOS payload - integrations.tonal.
+# workout_prescription.build_daily_workout_prescription() (the live
+# exercise-prescription engine) is untouched and unaware this endpoint
+# exists. `goal_mode` is optional and overrides the goal policy's own
+# resolution - for diagnostic/multi-goal-validation use only.
+# ============================================================
+@app.get(
+    "/training-intelligence/prescription"
+)
+async def training_intelligence_prescription_admin(
+    request: Request,
+    as_of: str | None = None,
+    goal_mode: str | None = None,
+):
+    require_admin(request)
+
+    from datetime import datetime, timezone
+
+    if as_of:
+        try:
+            parsed_as_of = datetime.fromisoformat(as_of)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="as_of must be an ISO-8601 timestamp.",
+            ) from exc
+        if parsed_as_of.tzinfo is None:
+            parsed_as_of = parsed_as_of.replace(tzinfo=timezone.utc)
+    else:
+        parsed_as_of = datetime.now(timezone.utc)
+
+    try:
+        return build_shadow_prescription(parsed_as_of, goal_mode_override=goal_mode)
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Training Intelligence shadow prescription failed: "
                 f"{exc}"
             ),
         ) from exc
