@@ -29,6 +29,18 @@ ONCE per build_shadow_selection() call and reused across every candidate
 family - see section 23's performance requirement and
 TRAINING_INTELLIGENCE_TKI4_REPORT.md's performance section for the
 before/after query count this avoids.
+
+TKI-4.1 addendum (calibration): after C/D scoring produces each eligible
+candidate's original v1 `score_total` (scoring.py, UNCHANGED), a separate
+soft calibration layer (training_intelligence.selection.monotony /
+calibration_policy) computes a bounded `monotony_adjustment` per eligible,
+non-Rest candidate - a consecutive-repeat dampener (over the selector's
+own optional `recent_selections` history), a rolling real-history
+representation adjustment, and a starvation-protection bonus. Ranking and
+final selection use `score_total_calibrated = clamp01(score_total +
+monotony_adjustment)`; the original `score_total`/`score_components` are
+preserved unchanged in the output for full provenance. See
+TRAINING_INTELLIGENCE_TKI41_REPORT.md.
 """
 
 from __future__ import annotations
@@ -41,7 +53,9 @@ from integrations.tonal.training_dose import load_session_history, _load_muscle_
 from integrations.tonal.training_priority import SESSION_TEMPLATES
 from integrations.tonal.workout_prescription import _latest_readiness
 from training_intelligence.dose.goal_policy import GOAL_POLICY_VERSION, resolve_goal_mode
+from training_intelligence.selection.calibration_policy import CALIBRATION_POLICY_VERSION
 from training_intelligence.selection.candidates import generate_candidates
+from training_intelligence.selection.monotony import compute_monotony_adjustment
 from training_intelligence.selection.scoring import score_candidates
 from training_intelligence.selection.scoring_policy import (
     SCORING_POLICY_VERSION,
@@ -56,8 +70,12 @@ from training_intelligence.selection.scoring_policy import (
 from training_intelligence.stimulus.ledger import load_rows
 from training_intelligence.stimulus.session_family import session_family_windows
 
-SELECTION_MODEL_VERSION = 1
+SELECTION_MODEL_VERSION = 2
 REST_FAMILY_NAME = "Rest / Active Recovery"
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 def _rest_candidate(readiness, goal_mode, eligible_candidates, any_productive_dose):
@@ -84,6 +102,7 @@ def _rest_candidate(readiness, goal_mode, eligible_candidates, any_productive_do
     if not reasons:
         reasons.append("no condition currently favors rest - included for completeness")
 
+    rest_score = round(min(1.0, score), 4)
     return {
         "session_family": REST_FAMILY_NAME,
         "primary_muscles": [],
@@ -92,7 +111,7 @@ def _rest_candidate(readiness, goal_mode, eligible_candidates, any_productive_do
         "eligible_muscles": [],
         "excluded_muscles": {},
         "dose": None,
-        "score_total": round(min(1.0, score), 4),
+        "score_total": rest_score,
         "score_components": {
             "stimulus_debt": None, "local_readiness": None, "days_since_trained": None,
             "program_balance": None, "systemic_capacity": None, "goal_relevance": None,
@@ -100,17 +119,25 @@ def _rest_candidate(readiness, goal_mode, eligible_candidates, any_productive_do
         },
         "scoring_weights_used": None,
         "rest_bonus_reasons": reasons,
+        # Rest is exempt from the TKI-4.1 monotony/rolling-representation/
+        # starvation layer (calibration_policy.py's module docstring) -
+        # repeating Rest is not the pathology this milestone addresses.
+        "monotony": None,
+        "score_total_calibrated": rest_score,
     }
 
 
 def _sort_key(candidate):
-    """Section 16: explicit, versioned tie-break order - larger unresolved
+    """Section 16 (TKI-4) + TKI-4.1's calibration layer: rank first by the
+    CALIBRATED score (original v1 score_total plus the bounded, soft
+    monotony/rolling-representation/starvation adjustment), then fall
+    back to the original, unchanged tie-break order - larger unresolved
     stimulus debt, then better local readiness, then stronger program-
     balance need, then longer justified days-since-trained, then better
     dose feasibility, then alphabetical as the absolute last resort."""
     components = candidate.get("score_components") or {}
     return (
-        -candidate["score_total"],
+        -candidate.get("score_total_calibrated", candidate["score_total"]),
         -(components.get("stimulus_debt") or 0.0),
         -(components.get("local_readiness") or 0.0),
         -(components.get("program_balance") or 0.0),
@@ -161,6 +188,16 @@ def _explanation_factors(candidate, goal_mode):
             f"{dose['feasible_dose_range']['upper_bound_working_sets']} working sets -> "
             f"goal-adjusted {dose['recommended_dose']['working_sets']}."
         )
+    monotony = candidate.get("monotony")
+    if monotony and monotony["monotony_adjustment_total"] != 0:
+        factors.append(
+            f"calibration (TKI-4.1): consecutive_repeat_streak={monotony['consecutive_repeat_streak']}, "
+            f"repeat_penalty=-{monotony['repeat_penalty']:.3f}, "
+            f"rolling_representation_adjustment={monotony['rolling_representation_adjustment']:+.3f}, "
+            f"starvation_bonus=+{monotony['starvation_bonus']:.3f} "
+            f"-> net {monotony['monotony_adjustment_total']:+.3f} "
+            f"(score_total {candidate['score_total']:.3f} -> {candidate['score_total_calibrated']:.3f})"
+        )
     return factors
 
 
@@ -175,6 +212,13 @@ def _finalize_candidate(candidate, goal_mode):
         # never merely "scored lower") - .get() rather than a KeyError.
         "score_total": candidate.get("score_total"),
         "score_components": candidate.get("score_components"),
+        # TKI-4.1 addendum - the original v1 score_total/score_components
+        # above are UNCHANGED; these are the calibrated fields ranking
+        # and selection actually use (identical to score_total when no
+        # monotony/rolling-representation/starvation adjustment applied,
+        # e.g. Rest, or an ineligible candidate).
+        "monotony": candidate.get("monotony"),
+        "score_total_calibrated": candidate.get("score_total_calibrated", candidate.get("score_total")),
         "primary_muscles": candidate["primary_muscles"],
         # SESSION_TEMPLATES does not itself distinguish primary/secondary
         # muscles at the family level (only individual exercises do,
@@ -196,9 +240,22 @@ def build_shadow_selection(
     sessions=None,
     muscle_rows=None,
     ledger_rows=None,
+    recent_selections=None,
 ) -> dict:
-    """The full TKI-4 shadow selection object as of a given moment.
-    Read-only; not reachable from any live request path."""
+    """The full TKI-4(.1) shadow selection object as of a given moment.
+    Read-only; not reachable from any live request path.
+
+    `recent_selections` (TKI-4.1, optional): an iterable of
+    (decision_datetime, session_family) pairs describing what this same
+    shadow selector would have selected on preceding decisions, most-
+    recent-first or in any order (this function sorts/filters them).
+    Defaults to none - a single ad-hoc call (e.g. the admin diagnostic
+    endpoint) gets zero consecutive-repeat penalty, which is the correct
+    cold-start behavior (no fake certainty about a decision history that
+    was never supplied). A caller iterating day-by-day (e.g. a backtest)
+    can thread its own growing selection history forward at no extra
+    query cost - see the 90-day backtest in
+    TRAINING_INTELLIGENCE_TKI41_REPORT.md."""
 
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be a timezone-aware datetime")
@@ -228,15 +285,19 @@ def build_shadow_selection(
         sessions=sessions, muscle_rows=muscle_rows, ledger_rows=ledger_rows,
     )
 
-    # Program-balance input: TKI-2's own session-family classification of
-    # ACTUAL recent Tonal history (not merely past recommendations).
-    families_14d = session_family_windows(ledger_rows, as_of, (14,))[14]
+    # Program-balance input (unchanged) + TKI-4.1's wider rolling-
+    # representation windows - both from the SAME already-loaded
+    # ledger_rows (one query total, no N+1 - section 17).
+    family_windows = session_family_windows(ledger_rows, as_of, (7, 14, 30))
+    families_14d = family_windows[14]
     family_session_counts_14d = {family: entry["sessions"] for family, entry in families_14d.items()}
     for family in SESSION_TEMPLATES:
         family_session_counts_14d.setdefault(family, 0)
 
     # ------------------------------------------------------------------
-    # C/D: scoring (goal-weighted).
+    # C/D: scoring (goal-weighted). scoring.py itself is UNCHANGED by
+    # TKI-4.1 - score_total/score_components below are the original v1
+    # values, preserved as-is in the final output for provenance.
     # ------------------------------------------------------------------
     candidates = score_candidates(
         candidates, muscle_readiness_result, readiness, goal_mode, family_session_counts_14d
@@ -251,7 +312,23 @@ def build_shadow_selection(
     rest = _rest_candidate(readiness, goal_mode, eligible, any_productive_dose)
 
     # ------------------------------------------------------------------
-    # E/F: tie-break + final ranking.
+    # TKI-4.1: soft calibration layer - consecutive-repeat monotony
+    # dampener, real-history rolling representation, starvation
+    # protection. Computed only for eligible, non-Rest candidates; never
+    # touches eligibility (candidates.py, unmodified) or the original
+    # score_total (scoring.py, unmodified).
+    # ------------------------------------------------------------------
+    for candidate in eligible:
+        monotony = compute_monotony_adjustment(
+            candidate, as_of, goal_mode, recent_selections, family_windows, len(eligible),
+        )
+        candidate["monotony"] = monotony
+        candidate["score_total_calibrated"] = round(
+            _clamp01(candidate["score_total"] + monotony["monotony_adjustment_total"]), 4
+        )
+
+    # ------------------------------------------------------------------
+    # E/F: tie-break + final ranking (on the calibrated score).
     # ------------------------------------------------------------------
     ranked = sorted(eligible + [rest], key=_sort_key)
     winner = ranked[0]
@@ -266,6 +343,7 @@ def build_shadow_selection(
         "selection_model_version": SELECTION_MODEL_VERSION,
         "scoring_policy_version": SCORING_POLICY_VERSION,
         "goal_policy_version": GOAL_POLICY_VERSION,
+        "calibration_policy_version": CALIBRATION_POLICY_VERSION,
         "as_of": as_of.isoformat(),
 
         "goal_mode": goal_mode,
@@ -280,7 +358,9 @@ def build_shadow_selection(
 
         "selected_session_family": winner["session_family"],
         "selection_explanation": (
-            f"Selected '{winner['session_family']}' (score {winner['score_total']:.3f}) "
+            f"Selected '{winner['session_family']}' "
+            f"(calibrated score {winner.get('score_total_calibrated', winner['score_total']):.3f}, "
+            f"v1 score {winner['score_total']:.3f}) "
             f"over {len(ranked) - 1} other eligible candidate(s): "
             + "; ".join(_explanation_factors(winner, goal_mode))
         ),
