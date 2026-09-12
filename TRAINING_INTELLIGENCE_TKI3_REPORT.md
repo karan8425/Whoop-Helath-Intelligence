@@ -293,3 +293,54 @@ fast.
 5. The N+1-shaped multi-query pattern (section 13) - flagged, not optimized.
 6. TKI-3 does not select which session family to evaluate (that remains TKI-4, not built) -
    this is by design per the assignment, not an oversight.
+
+## 15. Goal Policy Architecture (addendum)
+
+The initial TKI-3 `_goal_context()` only defined a `training_objective` for `phase ==
+"lean_cut"` - correct in spirit (goal never touched the numeric dose), but incomplete: every
+other phase silently produced `None`. This was replaced with a proper versioned policy layer,
+`training_intelligence/dose/goal_policy.py` (`GOAL_POLICY_VERSION = 1`), so the same engine
+supports multiple users and goal modes without a code change per mode.
+
+**Design**: six goal modes, matching `TRAINING_INTELLIGENCE_KNOWLEDGE_BASE_V1.md` section 5
+exactly - `lean_cut`, `lean_bulk` (alias `hypertrophy_gain`), `strength`, `maintenance`,
+`general_fitness`, `recovery` (alias `return_to_training`). Each has a full policy: training
+objective, stimulus posture, volume posture, progression emphasis, fatigue tolerance,
+intensity/volume tradeoff, and maintenance-vs-growth priority - all narrative/descriptive
+framing consumed for explanation, never fed back into `compute_dose_target`'s inputs.
+
+**Resolution**: `resolve_goal_mode(goal)` prefers the real, more specific `goal_type` field
+(`health_goal_profiles.goal_type`) over the coarser `phase`, falling back to `phase` only
+when `goal_type` doesn't map to a known mode, and returning `None` (never a silently-assumed
+default) when neither resolves. Only `lean_cut`/`lean_bulk`/`maintenance`/`general_fitness`
+are reachable from real goal data today - `strength` and `recovery` have no `goal_type` in
+the live goal-setting schema yet (a real, disclosed gap, not a bug) - so
+`build_shadow_dose(..., goal_mode_override=...)` accepts an explicit mode, which is both how
+those two are tested today and how a future goal-setting addition or a non-body-composition
+training goal could select them without any training-intelligence code change.
+
+**Proof the core model stays goal-agnostic** (the assignment's central requirement):
+`test_goal_mode_does_not_change_the_numeric_dose` forces the SAME historical/readiness
+fixture through all six goal modes and asserts `recommended_dose`, `local_readiness`,
+`systemic_capacity`, `dose_classification`, `historical_dose_reference`, and
+`performance_state` are byte-identical across every mode - only `goal_context` differs.
+Confirmed against **real data** too: querying the actual Sep-12 state through
+`lean_cut`/`lean_bulk`/`strength`/`maintenance` overrides all returned **`working_sets: 9`**,
+identical to the real-goal (unforced) result - only `training_objective`/`policy` changed.
+The real active goal today correctly resolves to `lean_cut`
+(`goal_mode_source: resolved_from_active_goal`), matching the stated current user phase.
+
+**Multi-user extensibility**: every field in `GOAL_POLICIES` is a property of the goal MODE
+(a small, finite, shared taxonomy), never of a specific person - a second user on a
+different goal mode reads a different table entry through the identical code path, not a
+different branch. No user-specific constant was introduced anywhere in this layer.
+
+**Tests**: `test_training_intelligence_goal_policy.py`, 17 tests - registry completeness (all
+six modes fully defined), alias resolution, explicit non-guessing of unknown modes,
+`goal_type`-over-`phase` resolution precedence, the dose-invariance proof, distinct policy
+framing per mode (lean_cut/lean_bulk/strength/maintenance pairwise-distinct, as the
+assignment specifically asked for), override-vs-resolved provenance, and determinism.
+`test_training_intelligence_dose.py`'s goal-context tests were updated to reflect that
+`maintenance` is now a fully-supported mode (previously asserted `None`, which was only true
+because no policy existed for it yet). Full backend suite: **555 passed, 46 skipped, 0
+failed** (was 537; +18 new tests, 0 regressions). No B2/B3/production/iOS changes.

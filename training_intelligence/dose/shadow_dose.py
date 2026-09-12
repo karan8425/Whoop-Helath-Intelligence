@@ -26,8 +26,13 @@ What TKI-3 actually adds, additively, in shadow mode only:
   3. A cross-check against the TKI-2 canonical (10-muscle, Calves-
      aware) stimulus ledger for the same target muscles, alongside
      (not instead of) B2's own 9-muscle baselines.
-  4. Goal-context framing (lean_cut -> preserve_or_gain_lean_mass),
-     read-only, exactly as TKI-2's shadow_state already does.
+  4. Goal-POLICY framing (training_intelligence.dose.goal_policy) -
+     read-only, describes how each of six goal modes (lean_cut,
+     lean_bulk, strength, maintenance, general_fitness, recovery) frames
+     the SAME, unchanged dose output. The dose model itself remains
+     goal-agnostic - see goal_policy.py's module docstring and
+     test_training_intelligence_goal_policy.py's
+     test_goal_mode_does_not_change_the_numeric_dose.
   5. One unified, provenance-rich shadow object tying all of the above
      together for inspection.
 
@@ -53,23 +58,30 @@ from integrations.tonal.training_dose import (
     _percentile,
 )
 from integrations.tonal.workout_prescription import _latest_readiness
+from training_intelligence.dose.goal_policy import (
+    GOAL_POLICY_VERSION,
+    get_goal_policy,
+    resolve_goal_mode,
+)
 from training_intelligence.dose.tolerance_bands import classify_band
 from training_intelligence.knowledge.loader import KNOWLEDGE_VERSION
 from training_intelligence.stimulus.ledger import build_ledger_windows, load_rows
 from training_intelligence.stimulus.policy import STIMULUS_POLICY_VERSION
 from training_intelligence.stimulus.taxonomy import to_canonical
 
-DOSE_MODEL_VERSION = 1
+# v2: goal_context gained the versioned goal_policy layer (goal_mode,
+# goal_mode_source, policy, goal_policy_version) replacing the single-
+# phase _PHASE_TRAINING_OBJECTIVE lookup. training_objective is kept at
+# the top level for backward compatibility with v1 consumers, now
+# populated for every goal mode instead of only lean_cut.
+DOSE_MODEL_VERSION = 2
 
 # Product-policy thresholds on B2's own combined multiplier
 # (whoop_capacity x recent_load). Not a new dose computation - purely a
-# descriptive label over a value B2 already produces.
+# descriptive label over a value B2 already produces. Goal-agnostic:
+# these thresholds are identical for every goal mode.
 DOSE_CLASSIFICATION_REDUCED_CEILING = 0.85
 DOSE_CLASSIFICATION_UPPER_NORMAL_FLOOR = 1.05
-
-_PHASE_TRAINING_OBJECTIVE = {
-    "lean_cut": "preserve_or_gain_lean_mass",
-}
 
 
 def _classify_dose(combined_multiplier: float) -> str:
@@ -82,13 +94,20 @@ def _classify_dose(combined_multiplier: float) -> str:
     return "normal"
 
 
-def _goal_context(as_of):
+def _goal_context(as_of, goal_mode_override=None):
     goal = get_active_goal(as_of=as_of) or {}
-    phase = goal.get("phase")
+    goal_mode = goal_mode_override or resolve_goal_mode(goal)
+    policy = get_goal_policy(goal_mode)
     return {
-        "phase": phase,
+        "phase": goal.get("phase"),
         "goal_type": goal.get("goal_type"),
-        "training_objective": _PHASE_TRAINING_OBJECTIVE.get(phase),
+        "goal_mode": goal_mode,
+        "goal_mode_source": "override" if goal_mode_override else "resolved_from_active_goal",
+        "goal_policy_version": GOAL_POLICY_VERSION,
+        "policy": policy,
+        # Backward-compatible top-level field (was the only thing
+        # exposed before the versioned goal_policy layer existed).
+        "training_objective": policy.get("training_objective"),
         # Section 8: a single body-composition reading must not change
         # today's dose. Nothing in this pipeline (B2 or this module)
         # reads a point-in-time body-composition value at all, so this
@@ -104,10 +123,20 @@ def build_shadow_dose(
     sessions=None,
     muscle_rows=None,
     ledger_rows=None,
+    goal_mode_override=None,
 ) -> dict:
     """The full TKI-3 shadow dose object for one session family, as of a
     given moment. Read-only; calls nothing that writes to the database
-    and is not on any live request path."""
+    and is not on any live request path.
+
+    `goal_mode_override`: bypasses inference from the active goal profile
+    and applies a specific goal_policy.GOAL_MODES entry directly. This is
+    the only way to exercise "strength" or "recovery" today, since the
+    live health_goal_profiles schema has no goal_type for either yet -
+    see training_intelligence/dose/goal_policy.py. Passing it never
+    changes any numeric dose output (working_sets, muscle budgets, WHOOP
+    multiplier, etc.) - only the goal_context/policy framing - by
+    construction, since it is applied strictly after `dose` is computed."""
 
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be a timezone-aware datetime")
@@ -254,7 +283,7 @@ def build_shadow_dose(
             "median_duration_minutes": dose["baseline"]["median_duration_minutes"],
         },
 
-        "goal_context": _goal_context(as_of),
+        "goal_context": _goal_context(as_of, goal_mode_override),
 
         "performance_state": {
             "trajectory": trend,

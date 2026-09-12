@@ -248,10 +248,23 @@ class GoalContextTests(unittest.TestCase):
             result = build_shadow_dose(AS_OF, "Upper Pull", sessions=[], muscle_rows=[], ledger_rows=[])
         self.assertIn("none", result["goal_context"]["body_composition_single_reading_influence"])
 
-    def test_other_phase_leaves_objective_unset(self):
-        readiness_ctx = _patched(goal={"phase": "maintenance", "goal_type": "recomposition"})
+    def test_maintenance_phase_now_resolves_its_own_policy(self):
+        """Superseded expectation from before the versioned goal_policy
+        layer (TKI-3.1): maintenance is one of the six fully-supported
+        goal modes now, so it must NOT read as an unresolved objective -
+        see test_training_intelligence_goal_policy.py for the full
+        six-mode registry tests."""
+        readiness_ctx = _patched(goal={"phase": "maintenance", "goal_type": "maintain"})
         with readiness_ctx[0], readiness_ctx[1], readiness_ctx[2]:
             result = build_shadow_dose(AS_OF, "Upper Pull", sessions=[], muscle_rows=[], ledger_rows=[])
+        self.assertEqual(result["goal_context"]["goal_mode"], "maintenance")
+        self.assertEqual(result["goal_context"]["training_objective"], "hold_current_capability")
+
+    def test_unrecognized_goal_leaves_objective_unset(self):
+        readiness_ctx = _patched(goal={"phase": "unknown_phase", "goal_type": "unknown_type"})
+        with readiness_ctx[0], readiness_ctx[1], readiness_ctx[2]:
+            result = build_shadow_dose(AS_OF, "Upper Pull", sessions=[], muscle_rows=[], ledger_rows=[])
+        self.assertIsNone(result["goal_context"]["goal_mode"])
         self.assertIsNone(result["goal_context"]["training_objective"])
 
 
