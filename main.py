@@ -1127,6 +1127,46 @@ async def program_intelligence_get_session(
         ) from exc
 
 
+# Program Intelligence V2 - Development/admin-only, read-only shadow
+# diagnostic. Never called from /api/v1/todays-plan or any mobile-
+# facing route; no program/session/enrollment state is written by this
+# endpoint (persist_snapshot is opt-in via include_debug-adjacent
+# query param, off by default).
+@app.get(
+    "/training-intelligence/program-adaptation"
+)
+async def program_intelligence_adaptation_admin(
+    request: Request,
+    as_of: str | None = Query(default=None),
+    available_duration_min: int | None = Query(default=None),
+    include_candidates: bool = Query(default=True),
+    include_debug: bool = Query(default=False),
+):
+    require_admin(request)
+
+    try:
+        from datetime import datetime, timezone
+        from training_intelligence.programs.adaptation.shadow import build_daily_program_adaptation
+
+        parsed_as_of = datetime.fromisoformat(as_of) if as_of else datetime.now(timezone.utc)
+        if parsed_as_of.tzinfo is None:
+            parsed_as_of = parsed_as_of.replace(tzinfo=timezone.utc)
+
+        return build_daily_program_adaptation(
+            "primary", parsed_as_of, available_duration_min=available_duration_min,
+            include_candidates=include_candidates, include_debug=include_debug,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Program Intelligence adaptation diagnostic failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
 @app.get(
     "/api/v1/body-composition/progress"
 )
