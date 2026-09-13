@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from time import perf_counter
 
@@ -13,6 +13,12 @@ from activity_plan import build_activity_plan
 
 from integrations.tonal.workout_prescription import (
     build_daily_workout_prescription,
+)
+
+from training_engine_flag import (
+    resolve_training_prescription_engine,
+    ENGINE_B3,
+    ENGINE_TKI,
 )
 
 
@@ -71,6 +77,84 @@ def _safe_engine(engine, engine_name):
             "engine": engine_name,
             "reason": str(exc),
         }
+
+
+# ============================================================
+# TRAINING PRESCRIPTION ROUTER (TKI-6)
+#
+# Development-only, feature-flagged. B3 (build_daily_workout_
+# prescription) is untouched and remains the exclusive default and
+# Production behavior. When TRAINING_PRESCRIPTION_ENGINE=tki, this
+# attempts the validated TKI-5.1 shadow engine, adapted into B3's exact
+# return shape (see training_intelligence.prescription.mobile_adapter)
+# so _training_card() below needs no engine-specific branching at all.
+# A TKI failure is caught ONLY here (the routing boundary, not broadly
+# elsewhere) and falls back to B3, explicitly and observably logged -
+# never a silent "claims TKI but actually B3".
+# ============================================================
+
+def _build_workout():
+    requested_engine = resolve_training_prescription_engine()
+
+    if requested_engine == ENGINE_TKI:
+        started = perf_counter()
+        as_of = datetime.now(timezone.utc)
+
+        try:
+            from training_intelligence.prescription.shadow_prescription import (
+                build_shadow_prescription,
+            )
+            from training_intelligence.prescription.mobile_adapter import (
+                adapt_to_workout_schema,
+            )
+
+            tki_result = build_shadow_prescription(as_of)
+            workout = adapt_to_workout_schema(as_of, tki_result)
+
+            elapsed = perf_counter() - started
+            dose = tki_result.get("dose") or {}
+            dose_absorption = tki_result.get("dose_absorption") or {}
+
+            _print_timing(
+                f"engine=training seconds={elapsed:.3f} "
+                f"training_prescription_engine=tki "
+                f"requested_engine=tki actual_engine=tki "
+                f"date={as_of.date().isoformat()} "
+                f"family={tki_result.get('selected_session_family')} "
+                f"target_sets={dose.get('working_sets')} "
+                f"delivered_sets={dose_absorption.get('dose_allocated')} "
+                f"dose_shortfall={dose_absorption.get('dose_shortfall')} "
+                f"adaptations={len(tki_result.get('adaptations_used') or [])} "
+                f"fallbacks={len(tki_result.get('fallbacks_used') or [])}"
+            )
+
+            return workout
+
+        except Exception as exc:
+            elapsed = perf_counter() - started
+
+            _print_timing(
+                f"engine=training seconds={elapsed:.3f} "
+                f"training_prescription_engine=tki "
+                f"requested_engine=tki actual_engine=b3 "
+                f"status=fallback "
+                f"fallback_reason={type(exc).__name__}: {exc}"
+            )
+
+            # Explicit, observable fallback - never silently claim TKI
+            # succeeded. Falls through to the B3 path below.
+
+    workout = _safe_engine(
+        build_daily_workout_prescription,
+        "training",
+    )
+
+    if requested_engine == ENGINE_B3:
+        _print_timing(
+            "training_prescription_engine=b3 requested_engine=b3 actual_engine=b3"
+        )
+
+    return workout
 
 
 # ============================================================
@@ -862,10 +946,7 @@ def build_todays_plan():
     # PRESCRIPTION ENGINES
     # --------------------------------------------------------
 
-    workout = _safe_engine(
-        build_daily_workout_prescription,
-        "training",
-    )
+    workout = _build_workout()
 
     nutrition = _safe_engine(
         lambda: build_nutrition_prescription(

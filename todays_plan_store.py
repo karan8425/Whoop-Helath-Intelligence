@@ -7,6 +7,7 @@ from db import get_conn
 from freshness import freshness_status
 from todays_plan import build_todays_plan
 from activity_plan import build_activity_plan
+from training_engine_flag import resolve_training_prescription_engine, ENGINE_B3, ENGINE_TKI
 
 
 # ============================================================
@@ -28,6 +29,25 @@ TABLE_NAME = "todays_plan_cache"
 # exercise-level progression evidence under low systemic recovery.
 # 9 -> 10: reject the cached legacy low-readiness policy description.
 PLAN_VERSION = 12
+
+# TKI-6: two engines can now generate today's plan (training_engine_
+# flag.py). Reusing the SAME (plan_date, plan_version) UNIQUE
+# constraint the cache table already has - no schema change, no new
+# table, no migration - each engine gets its own numerically distinct
+# cache PARTITION of the identical plan_version integer column, so a
+# plan built under one engine can never be served as fresh under the
+# other. Offsets are PRODUCT POLICY / CALIBRATION PARAMETER bookkeeping,
+# not a scientific or semantic claim.
+ENGINE_PLAN_VERSION_OFFSET = {
+    ENGINE_B3: 0,
+    ENGINE_TKI: 500,
+}
+
+
+def _effective_plan_version(engine=None):
+    if engine is None:
+        engine = ENGINE_B3
+    return PLAN_VERSION + ENGINE_PLAN_VERSION_OFFSET.get(engine, 0)
 
 LOCAL_TIMEZONE = ZoneInfo(
     "America/New_York"
@@ -143,12 +163,16 @@ def ensure_table():
 
 def load_cached_plan(
     plan_date=None,
+    plan_version=None,
 ):
 
     ensure_table()
 
     if plan_date is None:
         plan_date = _today_local()
+
+    if plan_version is None:
+        plan_version = PLAN_VERSION
 
     with get_conn() as conn:
 
@@ -171,7 +195,7 @@ def load_cached_plan(
                 """,
                 (
                     plan_date,
-                    PLAN_VERSION,
+                    plan_version,
                 ),
             )
 
@@ -272,6 +296,7 @@ def _pending_plan(
 
 def save_plan(
     plan,
+    plan_version=None,
 ):
 
     ensure_table()
@@ -285,6 +310,9 @@ def save_plan(
         plan_date = str(
             _today_local()
         )
+
+    if plan_version is None:
+        plan_version = PLAN_VERSION
 
     now = _utc_now()
 
@@ -329,7 +357,7 @@ def save_plan(
                 """,
                 (
                     plan_date,
-                    PLAN_VERSION,
+                    plan_version,
                     _canonical_json(
                         plan
                     ),
@@ -352,10 +380,23 @@ def save_plan(
 # ============================================================
 
 def invalidate_todays_plan():
+    """Invalidates TODAY's cached plan only (unchanged scope/semantics)
+    - never a broader/global cache clear. TKI-6: invalidates every known
+    engine's cache partition for today, not just B3's - existing callers
+    (goals.py, daily_sync.py) call this bare, with no idea which engine
+    is currently active, and underlying data changing is equally
+    invalidating for whichever engine is active. Still exactly one
+    DELETE, still scoped to exactly one plan_date - not a destructive
+    clear of any other day or of history."""
 
     ensure_table()
 
     plan_date = _today_local()
+
+    all_plan_versions = tuple(
+        PLAN_VERSION + offset
+        for offset in set(ENGINE_PLAN_VERSION_OFFSET.values())
+    )
 
     with get_conn() as conn:
 
@@ -366,11 +407,11 @@ def invalidate_todays_plan():
                 DELETE FROM public.{TABLE_NAME}
                 WHERE
                     plan_date = %s
-                    AND plan_version = %s
+                    AND plan_version = ANY(%s)
                 """,
                 (
                     plan_date,
-                    PLAN_VERSION,
+                    list(all_plan_versions),
                 ),
             )
 
@@ -391,6 +432,13 @@ def get_or_build_todays_plan(
     freshness = freshness_status()
     source_freshness = freshness.get("source_freshness") or {}
 
+    # TKI-6: resolved ONCE per request. Every cache read/write below uses
+    # this same engine's own cache partition (_effective_plan_version),
+    # so a plan built under one engine can never be served as a cache
+    # hit under the other - see ENGINE_PLAN_VERSION_OFFSET above.
+    engine = resolve_training_prescription_engine()
+    plan_version = _effective_plan_version(engine)
+
     if not freshness.get("can_generate_current_recommendation"):
 
         return _pending_plan(
@@ -399,7 +447,7 @@ def get_or_build_todays_plan(
         )
 
     state = read_state(str(plan_date))
-    cached = load_cached_plan(plan_date)
+    cached = load_cached_plan(plan_date, plan_version)
     if state.get("refresh_in_progress"):
         if cached and (cached.get("plan_payload") or {}).get("status") == "ok":
             return metadata(cached["plan_payload"], state)
@@ -410,7 +458,8 @@ def get_or_build_todays_plan(
     if not force_refresh:
 
         cached = load_cached_plan(
-            plan_date
+            plan_date,
+            plan_version,
         )
 
         if (
@@ -458,7 +507,7 @@ def get_or_build_todays_plan(
     from whoop_webhook_store import pipeline_lock
     with pipeline_lock() as acquired:
         state = read_state(str(plan_date))
-        cached = load_cached_plan(plan_date)
+        cached = load_cached_plan(plan_date, plan_version)
         if not acquired or state.get("refresh_in_progress"):
             state["refresh_in_progress"] = True
             if cached:
@@ -469,10 +518,10 @@ def get_or_build_todays_plan(
         # A different request may have completed the cache while we waited.
         if not force_refresh and _cache_is_fresh(cached, source_freshness):
             return metadata(cached["plan_payload"], state)
-        return _build_and_save(plan_date, source_freshness, state)
+        return _build_and_save(plan_date, source_freshness, state, plan_version)
 
 
-def _build_and_save(plan_date, source_freshness, state):
+def _build_and_save(plan_date, source_freshness, state, plan_version=None):
     print(
         "TODAYS_PLAN_CACHE "
         f"status=miss "
@@ -500,7 +549,7 @@ def _build_and_save(plan_date, source_freshness, state):
     plan = dict(plan)
     plan["source_freshness"] = {**source_freshness, "source_revision": raw_source_signature()}
 
-    save_plan(plan)
+    save_plan(plan, plan_version)
 
     print(
         "TODAYS_PLAN_CACHE "

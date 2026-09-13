@@ -348,10 +348,19 @@ async def login(
 )
 async def health():
 
+    # TKI-6 (section 9): deployment provenance, additive only. Render
+    # sets RENDER_GIT_COMMIT/RENDER_SERVICE_NAME automatically for a
+    # git-deployed service - never hardcoded here, and both default to
+    # None (not an error) when absent, e.g. a local run. No secret
+    # values are read or exposed; this never blocks startup.
+    import os
+
     return {
         "status": "ok",
         "phase": "5D.3",
         "version": "0.5.5",
+        "git_sha": os.getenv("RENDER_GIT_COMMIT"),
+        "environment": os.getenv("RENDER_SERVICE_NAME"),
         "daily_coaching_cache": True,
         "daily_health_intelligence": True,
         "todays_plan_api": True,
