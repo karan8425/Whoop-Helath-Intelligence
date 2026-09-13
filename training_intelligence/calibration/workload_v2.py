@@ -209,3 +209,105 @@ def workload_sanity_v2(exercises, sessions, family, as_of, target_sets, binding_
         "reference_window_days": window_days,
         "envelope": envelope,
     }
+
+
+# ============================================================
+# TKI-5.4 section 28: workload_sanity_v3 - adds real counterfactual
+# justification provenance on top of v2's gap decomposition. v2 remains
+# unchanged above for continuity/rollback comparison; v3 is what
+# shadow.py's quality_verdict_v3 now reads.
+# ============================================================
+
+WORKLOAD_V3_POLICY_VERSION = 1
+
+# Maps decompose_gap's dominant_gap_causes into the human-facing gap
+# classification TKI-5.4 sections 18/31 ask for. A cause list with more
+# than one non-trivial entry is always MIXED - never forced to pick one.
+_GAP_CLASSIFICATION_MAP = {
+    "dose_contribution": "DOSE_DRIVEN",
+    "exercise_count_contribution": "COMPOSITION_DRIVEN",
+    "resistance_or_rep_contribution": "INTENSITY_DRIVEN",
+    "movement_mix_or_semantics_contribution": "SEMANTICS_DRIVEN",
+}
+
+
+def classify_gap(dominant_gap_causes):
+    real_causes = [c for c in dominant_gap_causes if c not in ("none_below_threshold", "insufficient_comparable_evidence")]
+    if not dominant_gap_causes or dominant_gap_causes == ["insufficient_comparable_evidence"]:
+        return "INSUFFICIENT_EVIDENCE"
+    if not real_causes:
+        return "NONE"
+    if len(real_causes) > 1:
+        return "MIXED"
+    return _GAP_CLASSIFICATION_MAP.get(real_causes[0], "MIXED")
+
+
+def workload_sanity_v3(exercises, sessions, family, as_of, target_sets, capacity, readiness_band,
+                        local_states, structure_cap, goal_mode, actual_feasible, actual_dose):
+    """Section 28. Reuses v2's envelope/gap machinery for the ratio
+    dimensions, then replaces v2's naive "constraint.binding == True"
+    justification citation with real counterfactual-tested
+    justifications (justification_v2.counterfactual_effects) and a
+    proportional sufficiency test (justification_v2.
+    justification_sufficient, section 21) - status is only *_JUSTIFIED
+    when justification_sufficient is True, never merely "a reason
+    string exists"."""
+    from training_intelligence.calibration.justification_v2 import (
+        JUSTIFICATION_POLICY_VERSION, counterfactual_effects, justification_sufficient,
+    )
+
+    estimated_workload = sum(e["estimated_volume"] or 0 for e in exercises)
+    delivered_sets = sum(e["working_sets"] for e in exercises)
+    exercise_count = len(exercises)
+    known_workload = sum(e["estimated_volume"] or 0 for e in exercises if e["workload"]["confidence"] != "LOW")
+    known_workload_fraction = round(known_workload / estimated_workload, 4) if estimated_workload else 0.0
+
+    envelope = workload_envelope_v2(sessions, family, as_of, exercise_count, delivered_sets)
+    window_days, window = _select_window(envelope)
+
+    justifications = counterfactual_effects(
+        capacity, sessions, as_of, readiness_band, local_states, structure_cap,
+        goal_mode, actual_feasible, actual_dose,
+    )
+
+    base = {
+        "workload_v3_policy_version": WORKLOAD_V3_POLICY_VERSION,
+        "justification_policy_version": JUSTIFICATION_POLICY_VERSION,
+        "known_workload_fraction": known_workload_fraction,
+        "justifications": justifications,
+        "estimated_workload": estimated_workload,
+    }
+
+    if window is None:
+        return dict(base, status="INSUFFICIENT_DATA", absolute_workload_ratio=None,
+                    workload_per_set_ratio=None, set_count_ratio=None, exercise_count_ratio=None,
+                    comparable_count=0, comparable_quality=None, gap_classification="INSUFFICIENT_EVIDENCE",
+                    dominant_gap_causes=["insufficient_comparable_evidence"],
+                    justification_sufficient=False, confidence="LOW", reference_window_days=None, envelope=envelope)
+
+    gap = decompose_gap(estimated_workload, delivered_sets, exercise_count, window)
+    ratio = gap["absolute_ratio_to_median"]
+    low, high = WITHIN_RANGE_RATIO_BAND
+    sufficient = justification_sufficient(justifications, ratio)
+    if ratio is None:
+        status = "INSUFFICIENT_DATA"
+    elif low <= ratio <= high:
+        status = "WITHIN_PERSONAL_RANGE"
+    elif ratio < low:
+        status = "BELOW_PERSONAL_RANGE_JUSTIFIED" if sufficient else "BELOW_PERSONAL_RANGE_UNEXPLAINED"
+    else:
+        status = "ABOVE_PERSONAL_RANGE_JUSTIFIED" if sufficient else "ABOVE_PERSONAL_RANGE_UNEXPLAINED"
+
+    confidence = (
+        "LOW" if known_workload_fraction < 0.6 or window["normalized_workload"]["effective_count"] < MIN_EFFECTIVE_COMPARABLE_COUNT
+        else ("HIGH" if window["normalized_workload"]["effective_count"] >= 6 else "MEDIUM")
+    )
+
+    return dict(base, status=status, absolute_workload_ratio=gap["absolute_ratio_to_median"],
+                workload_per_set_ratio=gap["workload_per_set_ratio"], set_count_ratio=gap["set_count_ratio"],
+                exercise_count_ratio=gap["exercise_count_ratio"], comparable_count=window["comparable_count"],
+                comparable_quality=window["quality_distribution"],
+                gap_classification=classify_gap(gap["dominant_gap_causes"]) if status not in ("WITHIN_PERSONAL_RANGE",) else "NONE",
+                dominant_gap_causes=gap["dominant_gap_causes"] if status not in ("WITHIN_PERSONAL_RANGE",) else [],
+                justification_sufficient=sufficient, confidence=confidence,
+                reference_window_days=window_days, envelope=envelope)

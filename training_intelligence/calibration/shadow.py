@@ -19,10 +19,18 @@ from training_intelligence.calibration.history import (
     comparable_sessions, envelope, pattern, COMPOUNDS, distribution,
 )
 from training_intelligence.calibration.capacity import capacity_reference, feasible_capacity, choose_dose
-from training_intelligence.calibration.progression import prescribe, matched_history, movement_capacity
-from training_intelligence.calibration.workload_v2 import workload_sanity_v2, ACCEPTED_JUSTIFICATIONS
+from training_intelligence.calibration.progression import matched_history, movement_capacity
+from training_intelligence.calibration.progression_v2 import prescribe_v2 as prescribe
+from training_intelligence.calibration.workload_v2 import (
+    workload_sanity_v2, ACCEPTED_JUSTIFICATIONS, workload_sanity_v3,
+)
+from training_intelligence.calibration.justification_v2 import JUSTIFICATION_POLICY_VERSION
 
 MAX_EXERCISES = 6  # Versioned product ceiling, not a personal constant.
+# TKI-5.4 section 37: quality_verdict/_v2/_v3 coexist for continuity;
+# this names which verdict function shape is "current" for snapshot
+# provenance without forcing a schema rewrite of prior snapshots.
+QUALITY_VERDICT_VERSION = 3
 MIN_EXERCISE_SETS = 2
 COMPOUND_SCORE_BONUS = 15
 
@@ -145,6 +153,53 @@ def quality_verdict_v2(exercises, feasible, sanity_v2, states, target):
     }
 
 
+def quality_verdict_v3(exercises, feasible, sanity_v3, states, target):
+    """TKI-5.4 section 29: identical hard-safety gates to v2.
+    QUESTIONABLE now distinguishes an unjustified/insufficiently-
+    justified deviation (sanity_v3.justification_sufficient is False)
+    from a genuinely justified one - a reason string existing is never
+    enough on its own (justification_v2.justification_sufficient
+    already applied the counterfactual + strength + large-deviation
+    test before sanity_v3['status'] was assigned)."""
+    total = sum(e["working_sets"] for e in exercises)
+    if total > feasible["upper_bound_working_sets"]:
+        return {"verdict": "CONTRADICTED", "reasons": ["Dose exceeds the hard feasible upper bound."]}
+    blocked = {m for m, s in states.items() if s in ("FATIGUED", "SUPPRESSED")}
+    if any(blocked & set(e["primary_muscles"] + e["secondary_muscles"]) for e in exercises):
+        return {"verdict": "CONTRADICTED", "reasons": ["Prescription loads a fatigued/suppressed muscle."]}
+
+    issues = []
+    if total < target:
+        issues.append("Selected movements could not safely absorb the chosen dose.")
+    status = sanity_v3["status"]
+    if status == "INSUFFICIENT_DATA":
+        issues.append(
+            f"Comparable workload evidence is insufficient (comparable_count={sanity_v3['comparable_count']}, "
+            f"known_workload_fraction={sanity_v3['known_workload_fraction']})."
+        )
+    elif status.endswith("_UNEXPLAINED"):
+        binding_count = sum(1 for j in sanity_v3["justifications"] if j["binding"])
+        issues.append(
+            f"Workload is {status.replace('_', ' ').lower()} - {binding_count} binding factor(s) found, "
+            f"none sufficient for a {sanity_v3['gap_classification']} deviation of this magnitude "
+            f"(ratio_to_median={sanity_v3['absolute_workload_ratio']})."
+        )
+    progression_evidence = [e.get("progression_evidence") for e in exercises if e.get("progression_evidence")]
+    low_confidence = [e["movement_name"] for e in exercises if e["confidence"] == "LOW"]
+    genuinely_sparse = [pe for pe in progression_evidence if pe["evidence_tier"] == 5]
+    if low_confidence and status != "INSUFFICIENT_DATA" and len(genuinely_sparse) < len(low_confidence):
+        # Some LOW-confidence movements have real (tier 2-4) evidence
+        # that simply wasn't strong enough for HIGH/MEDIUM - worth
+        # flagging distinctly from a movement with truly zero history.
+        issues.append(f"Weak paired progression evidence for: {low_confidence}.")
+    elif low_confidence and status != "INSUFFICIENT_DATA" and genuinely_sparse:
+        issues.append(f"Genuinely insufficient progression history for: {low_confidence}.")
+    return {
+        "verdict": "QUESTIONABLE" if issues else "SUPPORTED",
+        "reasons": issues or ["Readiness, dose, workload envelope, and progression evidence are all consistent."],
+    }
+
+
 def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows=None,
                                          profiles=None, selection=None, readiness=None,
                                          muscle_readiness=None):
@@ -166,9 +221,14 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
     if family == REST_FAMILY_NAME:
         rest_quality = {"verdict": "SUPPORTED", "reasons": ["TKI-4 selected deliberate recovery."]}
         return dict(base, exercises=[], dose={"working_sets": 0, "delivered_sets": 0, "dose_shortfall": 0, "shortfall_reason": None},
-                    estimated_total_volume=0, quality=rest_quality, quality_v2=rest_quality,
+                    estimated_total_volume=0, quality=rest_quality, quality_v2=rest_quality, quality_v3=rest_quality,
                     workload_sanity_v2={"status": "WITHIN_PERSONAL_RANGE", "estimated_workload": 0,
-                                        "justification": ["deliberate_recovery_session"], "confidence": "HIGH"})
+                                        "justification": ["deliberate_recovery_session"], "confidence": "HIGH"},
+                    workload_sanity_v3={"status": "WITHIN_PERSONAL_RANGE", "estimated_workload": 0,
+                                        "justifications": [{"reason": "deliberate_recovery_session", "binding": True,
+                                                             "strength": "STRONG", "observed_effect": None, "evidence": None}],
+                                        "justification_sufficient": True, "confidence": "HIGH",
+                                        "gap_classification": "NONE"})
     relationships = multipliers(rows, as_of)
     sessions = sessions_from_rows(rows, as_of, relationships)
     capacity = capacity_reference(sessions, family, as_of)
@@ -253,6 +313,7 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
             "progression_state": p["progression_state"], "progression_action": p["progression_label"],
             "progression_reason": p["rationale"], "confidence": p["confidence"],
             "performance_state": p["trajectory"], "comparable_history": p["comparable_performance"],
+            "progression_evidence": p.get("progression_evidence"),
             "smart_weight": {"mode": "standard", "spotter": False, "cross_mode_fallback": False},
             "workload": workload, "workload_multiplier": workload["workload_multiplier"],
             "multiplier_source": workload["multiplier_source"],
@@ -272,6 +333,10 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
     sanity_v2 = workload_sanity_v2(exercises, sessions, family, as_of, target,
                                     feasible["binding_constraints"], goal_reduced)
     quality_v2 = quality_verdict_v2(exercises, feasible, sanity_v2, states, target)
+    sanity_v3 = workload_sanity_v3(exercises, sessions, family, as_of, target, capacity,
+                                    readiness.get("readiness_band"), local, structure_cap, goal_mode,
+                                    feasible, target)
+    quality_v3 = quality_verdict_v3(exercises, feasible, sanity_v3, states, target)
     return dict(base, personal_capacity_reference=capacity,
                 feasible_range=feasible,
                 dose={"working_sets": target, "delivered_sets": sum(e["working_sets"] for e in exercises),
@@ -289,4 +354,10 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
                 # TKI-5.3 additive fields - the v1 fields above are kept
                 # unchanged for continuity/comparison; workload_sanity_v2
                 # and quality_v2 are the primary shadow diagnostic now.
-                workload_sanity_v2=sanity_v2, quality_v2=quality_v2)
+                workload_sanity_v2=sanity_v2, quality_v2=quality_v2,
+                # TKI-5.4 additive fields - v2 above is kept unchanged for
+                # continuity/comparison; workload_sanity_v3/quality_v3 are
+                # the primary shadow diagnostic now (real counterfactual
+                # justification provenance replaces v2's naive
+                # binding-flag citation).
+                workload_sanity_v3=sanity_v3, quality_v3=quality_v3)

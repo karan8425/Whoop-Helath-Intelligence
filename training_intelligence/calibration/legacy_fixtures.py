@@ -118,3 +118,73 @@ def sep12_legacy_fixture_analysis():
         "quality_verdict": "QUESTIONABLE",
         "quality_verdict_note": "Not forced to PASS/SUPPORTED - workload was below every reference distribution regardless of raw-vs-cable-aware reading or window choice, and the deviation's justification cannot be honestly confirmed.",
     }
+
+
+def sep12_legacy_fixture_v3_analysis():
+    """TKI-5.4 section 30: runs the surviving Sep-12 facts through the
+    TKI-5.4 justification rules. This is a STRUCTURAL analysis, not a
+    mechanical re-run of justification_v2.counterfactual_effects with
+    synthetic session data - synthesizing fake sessions/capacity for a
+    day that recorded none would itself be fabricated state (the exact
+    thing TKI-5.3 refused to do for the same fixture). Instead, this
+    reasons directly from justification_v2's own guard clauses, which
+    are deterministic and independent of any specific data:
+
+    - counterfactual_effects() only ever proposes 'systemic_readiness'
+      when `readiness_band not in (None, "high")`. Sep-12's forensic
+      recovery was 94% - unambiguously the "high" band - so
+      systemic_readiness COULD NOT have been a valid justification
+      candidate under TKI-5.4 rules, structurally, regardless of any
+      other detail of that day.
+    - counterfactual_effects() only ever proposes 'local_readiness'
+      when at least one target muscle is NOT "READY". The forensic
+      record states all target muscles were READY - so local_readiness
+      COULD NOT have been a valid justification candidate either.
+
+    Both exclusions are true by construction (mode_compatibility-style
+    guard clauses inspected directly, not evaluated against invented
+    inputs) - they hold for ANY hypothetical Sep-12 state consistent
+    with the two surviving facts (94% recovery, READY muscles), so no
+    fabricated capacity/session/local-state object is needed to state
+    them.
+
+    What remains PROVABLY UNRESOLVED: whether goal posture or a
+    session-structure/movement-availability constraint was genuinely
+    binding that day. Both require capacity/pool-size context that was
+    never persisted (the same UNREPRODUCIBLE_LEGACY_STATE gap TKI-5.3
+    already found) - this module does not guess at them.
+    """
+    gap = sep12_legacy_fixture_analysis()
+    ruled_out = {
+        "systemic_readiness": "Recovery 94% is the 'high' readiness band; justification_v2.counterfactual_effects "
+                               "never proposes systemic_readiness when readiness_band == 'high' (its own guard "
+                               "clause) - true by construction, not by re-running against invented inputs.",
+        "local_readiness": "All target muscles were READY; counterfactual_effects never proposes local_readiness "
+                            "unless at least one target muscle is NOT READY - true by construction.",
+    }
+    unresolved = {
+        "reduced_goal_posture": "The original goal mode was never persisted (no decision snapshot existed) - "
+                                 "cannot be evaluated either way.",
+        "session_structure": "The original eligible-movement pool size/per-movement capacity was never persisted - "
+                              "cannot be evaluated either way.",
+    }
+    gap_classifications = {
+        key: "DOSE_DRIVEN" if value["absolute_ratio_to_median"] and value["absolute_ratio_to_median"] < 0.85 else "NONE"
+        for key, value in gap["decomposition"].items()
+    }
+    return {
+        "classification": "UNREPRODUCIBLE_LEGACY_STATE",
+        "workload_gap_decomposition": gap["decomposition"],
+        "gap_classification_by_reading": gap_classifications,
+        "justifications_structurally_ruled_out": ruled_out,
+        "justifications_unresolved_not_fabricated": unresolved,
+        "conclusion": (
+            "No accepted binding justification survives for Sep-12 under TKI-5.4 rules: the two most "
+            "readiness-related candidates (systemic_readiness, local_readiness) are structurally excluded by "
+            "the known facts themselves (94% recovery = high band, READY muscles), and the two remaining "
+            "candidates (goal posture, session/movement-availability limitation) cannot be evaluated because "
+            "their inputs were never persisted. Sep-12 therefore has NO PROVEN sufficient justification - "
+            "consistent with, and not contradicting, TKI-5.3's original QUESTIONABLE finding."
+        ),
+        "quality_verdict": "QUESTIONABLE",
+    }

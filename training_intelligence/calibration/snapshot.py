@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime, timezone
 
 from db import get_conn
+from training_intelligence.calibration.shadow import QUALITY_VERDICT_VERSION
 
 TABLE_NAME = "training_decision_snapshots"
 SNAPSHOT_SCHEMA_VERSION = 1
@@ -35,7 +36,7 @@ SNAPSHOT_SCHEMA_VERSION = 1
 DECISION_CRITICAL_FIELDS = (
     "readiness", "local_readiness", "goal_mode", "selected_session_family",
     "feasible_range", "dose", "composition", "estimated_total_volume",
-    "workload_sanity_v2", "quality_v2",
+    "workload_sanity_v2", "quality_v2", "workload_sanity_v3", "quality_v3",
 )
 
 
@@ -80,6 +81,16 @@ def build_snapshot(as_of: datetime, result: dict, local_date=None) -> dict:
             "prescription_model_version": result.get("prescription_model_version"),
             "goal_policy_version": result.get("goal_policy_version"),
             "workload_v2_policy_version": (result.get("workload_sanity_v2") or {}).get("workload_v2_policy_version"),
+            # TKI-5.4 section 37: added, never backfilled onto snapshots
+            # saved before this milestone - a pre-TKI-5.4 snapshot simply
+            # has these keys absent, which is the honest record of what
+            # it actually was (UNREPRODUCIBLE_LEGACY_STATE-style honesty,
+            # applied here to schema evolution rather than data drift).
+            "progression_evidence_version": (result.get("exercises") or [{}])[0].get("progression_evidence", {}).get("progression_evidence_version")
+                if result.get("exercises") else None,
+            "justification_policy_version": (result.get("workload_sanity_v3") or {}).get("justification_policy_version"),
+            "workload_sanity_version": (result.get("workload_sanity_v3") or {}).get("workload_v3_policy_version"),
+            "quality_verdict_version": QUALITY_VERDICT_VERSION if result.get("quality_v3") else None,
             "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
         },
         "goal_mode": result.get("goal_mode"),
@@ -103,12 +114,15 @@ def build_snapshot(as_of: datetime, result: dict, local_date=None) -> dict:
         ],
         "workload_reference": result.get("workload_reference"),
         "workload_sanity_v2": result.get("workload_sanity_v2"),
+        "workload_sanity_v3": result.get("workload_sanity_v3"),
+        "quality_v2": result.get("quality_v2"),
+        "quality_v3": result.get("quality_v3"),
         "final_prescription": {
             "dose": result.get("dose"),
             "exercises": result.get("exercises"),
             "estimated_total_volume": result.get("estimated_total_volume"),
         },
-        "final_quality_verdict": result.get("quality_v2") or result.get("quality"),
+        "final_quality_verdict": result.get("quality_v3") or result.get("quality_v2") or result.get("quality"),
     }
 
 
@@ -190,7 +204,6 @@ def _extract(snapshot, field):
         "composition": "composition",
         "dose": lambda s: (s.get("final_prescription") or {}).get("dose"),
         "estimated_total_volume": lambda s: (s.get("final_prescription") or {}).get("estimated_total_volume"),
-        "quality_v2": "final_quality_verdict",
         "readiness": "readiness_input",
         "local_readiness": "local_readiness_input",
     }
