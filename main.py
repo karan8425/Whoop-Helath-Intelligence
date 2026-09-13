@@ -7,6 +7,7 @@ from fastapi import (
     Request,
     HTTPException,
     Form,
+    Query,
 )
 
 from fastapi.responses import (
@@ -1020,6 +1021,107 @@ async def training_intelligence_current_admin(
             status_code=500,
             detail=(
                 "Training Intelligence diagnostic failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# Program Intelligence V1 - Development/admin-only, read-only API.
+# Reads normalized program/session/slot definitions and their Tonal
+# movement-mapping candidates. No writes from this API. No user health
+# data - program definitions are not per-user. Never called by
+# /api/v1/todays-plan or any mobile-facing route; a fully separate,
+# additive, isolated layer.
+
+@app.get(
+    "/training-intelligence/programs"
+)
+async def program_intelligence_list_programs(
+    request: Request,
+    goal: str | None = Query(default=None),
+    experience_level: str | None = Query(default=None),
+    days_per_week: int | None = Query(default=None),
+    split_type: str | None = Query(default=None),
+):
+    require_admin(request)
+
+    try:
+        from training_intelligence.programs import service
+
+        return {
+            "programs": service.list_programs(
+                goal_mode=goal, experience_level=experience_level,
+                days_per_week=days_per_week, split_type=split_type,
+            )
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Program Intelligence list failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+@app.get(
+    "/training-intelligence/programs/{slug}"
+)
+async def program_intelligence_get_program(
+    request: Request,
+    slug: str,
+):
+    require_admin(request)
+
+    try:
+        from training_intelligence.programs import service
+
+        structure = service.get_program_structure(slug)
+        if structure is None:
+            raise HTTPException(status_code=404, detail=f"No program with slug '{slug}'.")
+        return structure
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Program Intelligence program lookup failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+@app.get(
+    "/training-intelligence/programs/{slug}/sessions/{session_key}"
+)
+async def program_intelligence_get_session(
+    request: Request,
+    slug: str,
+    session_key: str,
+):
+    require_admin(request)
+
+    try:
+        from training_intelligence.programs import service
+
+        result = service.get_session_structure_with_candidates(slug, session_key)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No session '{session_key}' in program '{slug}'.",
+            )
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Program Intelligence session lookup failed: "
                 f"{exc}"
             ),
         ) from exc
