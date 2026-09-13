@@ -19,6 +19,8 @@ from training_engine_flag import (
     resolve_training_prescription_engine,
     ENGINE_B3,
     ENGINE_TKI,
+    training_intelligence_mobile_enabled,
+    training_intelligence_shadow_compare_enabled,
 )
 
 
@@ -93,8 +95,69 @@ def _safe_engine(engine, engine_name):
 # never a silent "claims TKI but actually B3".
 # ============================================================
 
+def _build_training_intelligence_workout(as_of):
+    """TKI-7: the fully calibrated (TKI-5.2/5.3/5.4) engine, adapted
+    into B3's exact mobile shape. Raises on any failure - the caller
+    (_build_workout) is the single place that catches it and falls back,
+    exactly mirroring the existing TKI-6 ENGINE_TKI pattern below."""
+    from training_intelligence.calibration.orchestrator import build_training_intelligence_prescription
+    from training_intelligence.calibration.mobile_adapter import adapt_calibrated_to_workout_schema
+
+    result, snapshot_info = build_training_intelligence_prescription(as_of)
+    return adapt_calibrated_to_workout_schema(as_of, result, snapshot_info), result
+
+
 def _build_workout():
     requested_engine = resolve_training_prescription_engine()
+
+    if training_intelligence_mobile_enabled():
+        started = perf_counter()
+        as_of = datetime.now(timezone.utc)
+
+        try:
+            workout, ti_result = _build_training_intelligence_workout(as_of)
+            elapsed = perf_counter() - started
+            v3 = ti_result.get("workload_sanity_v3") or {}
+
+            _print_timing(
+                f"engine=training seconds={elapsed:.3f} "
+                f"training_intelligence_mobile_enabled=true "
+                f"requested_engine={requested_engine} actual_engine=training_intelligence "
+                f"date={as_of.date().isoformat()} "
+                f"family={ti_result.get('selected_session_family')} "
+                f"workload_status={v3.get('status')} "
+                f"quality_verdict={(ti_result.get('quality_v3') or {}).get('verdict')}"
+            )
+
+            if training_intelligence_shadow_compare_enabled():
+                legacy_started = perf_counter()
+                legacy_workout = _safe_engine(build_daily_workout_prescription, "training_legacy_shadow_compare")
+                legacy_elapsed = perf_counter() - legacy_started
+                legacy_session = legacy_workout.get("session") or {}
+                _print_timing(
+                    f"engine=training_shadow_compare seconds={legacy_elapsed:.3f} "
+                    f"legacy_total_sets={legacy_session.get('total_sets')} "
+                    f"tki_total_sets={(workout.get('session') or {}).get('total_sets')} "
+                    f"legacy_estimated_volume={legacy_session.get('estimated_total_volume')} "
+                    f"tki_estimated_volume={(workout.get('session') or {}).get('estimated_total_volume')} "
+                    f"legacy_session_type={legacy_session.get('session_type')} "
+                    f"tki_session_type={ti_result.get('selected_session_family')}"
+                )
+
+            return workout
+
+        except Exception as exc:
+            elapsed = perf_counter() - started
+            _print_timing(
+                f"engine=training seconds={elapsed:.3f} "
+                f"training_intelligence_mobile_enabled=true "
+                f"requested_engine={requested_engine} actual_engine=fallback "
+                f"status=fallback "
+                f"fallback_reason={type(exc).__name__}: {exc}"
+            )
+            # Explicit, observable fallback - never silently claim the
+            # calibrated engine succeeded. Falls through to the existing
+            # TKI-6 / B3 routing below, unchanged.
 
     if requested_engine == ENGINE_TKI:
         started = perf_counter()
@@ -374,6 +437,13 @@ def _training_card(workout):
                             "recent_inconsistency_score"
                         ),
                 },
+
+                # TKI-7: additive-only Training Intelligence per-exercise
+                # provenance. Absent/empty for the legacy engine (and for
+                # TKI-5.1's own adapter output) - {} is a safe default
+                # that requires no iOS decoding change.
+                "training_intelligence_evidence":
+                    exercise.get("training_intelligence_evidence") or {},
             }
         )
 
@@ -492,6 +562,13 @@ def _training_card(workout):
 
         "session_template_scores":
             session.get("session_template_scores") or [],
+
+        # TKI-7: additive-only Training Intelligence diagnostics
+        # (engine_source, engine_versions, workload status, quality
+        # verdict, binding justifications, decision snapshot id). {}
+        # for the legacy engine - no iOS decoding change is required.
+        "training_intelligence":
+            session.get("training_intelligence") or {},
 
         "exercises":
             exercise_details,

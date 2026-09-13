@@ -996,6 +996,35 @@ async def body_composition_progress_admin(
         ) from exc
 
 
+# TKI-7 section 21: Development/admin-only diagnostic - assembled
+# Training Intelligence prescription, legacy (B3) prescription, a
+# compact comparison, decision provenance, and quality verdict. Never
+# called from any user-facing route or the mobile app; read-only
+# (persist_snapshot=False - inspecting does not create a new immutable
+# decision record).
+@app.get(
+    "/training-intelligence/current"
+)
+async def training_intelligence_current_admin(
+    request: Request,
+):
+    require_admin(request)
+
+    try:
+        from training_intelligence.calibration.orchestrator import training_intelligence_diagnostic
+
+        return training_intelligence_diagnostic()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Training Intelligence diagnostic failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
 @app.get(
     "/api/v1/body-composition/progress"
 )

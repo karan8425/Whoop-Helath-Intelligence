@@ -7,7 +7,10 @@ from db import get_conn
 from freshness import freshness_status
 from todays_plan import build_todays_plan
 from activity_plan import build_activity_plan
-from training_engine_flag import resolve_training_prescription_engine, ENGINE_B3, ENGINE_TKI
+from training_engine_flag import (
+    resolve_training_prescription_engine, resolve_effective_training_engine,
+    ENGINE_B3, ENGINE_TKI, ENGINE_TRAINING_INTELLIGENCE,
+)
 
 
 # ============================================================
@@ -28,19 +31,28 @@ TABLE_NAME = "todays_plan_cache"
 # 8 -> 9: expose normalized session/rotation diagnostics and preserve
 # exercise-level progression evidence under low systemic recovery.
 # 9 -> 10: reject the cached legacy low-readiness policy description.
+# TKI-7 does not need a further PLAN_VERSION bump: the new calibrated
+# engine writes into its own brand-new ENGINE_TRAINING_INTELLIGENCE
+# cache partition (below) that has never been written to before, so
+# there is no stale-shape row in that partition to reject.
 PLAN_VERSION = 12
 
-# TKI-6: two engines can now generate today's plan (training_engine_
-# flag.py). Reusing the SAME (plan_date, plan_version) UNIQUE
+# TKI-6/TKI-7: three engines can now generate today's plan (training_
+# engine_flag.py). Reusing the SAME (plan_date, plan_version) UNIQUE
 # constraint the cache table already has - no schema change, no new
 # table, no migration - each engine gets its own numerically distinct
 # cache PARTITION of the identical plan_version integer column, so a
-# plan built under one engine can never be served as fresh under the
-# other. Offsets are PRODUCT POLICY / CALIBRATION PARAMETER bookkeeping,
-# not a scientific or semantic claim.
+# plan built under one engine can never be served as fresh under
+# another. TKI-7's TRAINING_INTELLIGENCE_MOBILE_ENABLED flag is
+# resolved via resolve_effective_training_engine() (higher precedence
+# than TRAINING_PRESCRIPTION_ENGINE) so enabling/disabling it can never
+# collide with, or be masked by, either pre-existing engine's cache.
+# Offsets are PRODUCT POLICY / CALIBRATION PARAMETER bookkeeping, not a
+# scientific or semantic claim.
 ENGINE_PLAN_VERSION_OFFSET = {
     ENGINE_B3: 0,
     ENGINE_TKI: 500,
+    ENGINE_TRAINING_INTELLIGENCE: 1000,
 }
 
 
@@ -432,11 +444,13 @@ def get_or_build_todays_plan(
     freshness = freshness_status()
     source_freshness = freshness.get("source_freshness") or {}
 
-    # TKI-6: resolved ONCE per request. Every cache read/write below uses
-    # this same engine's own cache partition (_effective_plan_version),
-    # so a plan built under one engine can never be served as a cache
-    # hit under the other - see ENGINE_PLAN_VERSION_OFFSET above.
-    engine = resolve_training_prescription_engine()
+    # TKI-6/TKI-7: resolved ONCE per request. Every cache read/write
+    # below uses this same engine's own cache partition (_effective_
+    # plan_version), so a plan built under one engine can never be
+    # served as a cache hit under another - see ENGINE_PLAN_VERSION_
+    # OFFSET above. resolve_effective_training_engine() gives
+    # TRAINING_INTELLIGENCE_MOBILE_ENABLED precedence when set.
+    engine = resolve_effective_training_engine()
     plan_version = _effective_plan_version(engine)
 
     if not freshness.get("can_generate_current_recommendation"):
