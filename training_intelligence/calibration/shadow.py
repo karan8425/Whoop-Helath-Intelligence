@@ -20,6 +20,7 @@ from training_intelligence.calibration.history import (
 )
 from training_intelligence.calibration.capacity import capacity_reference, feasible_capacity, choose_dose
 from training_intelligence.calibration.progression import prescribe, matched_history, movement_capacity
+from training_intelligence.calibration.workload_v2 import workload_sanity_v2, ACCEPTED_JUSTIFICATIONS
 
 MAX_EXERCISES = 6  # Versioned product ceiling, not a personal constant.
 MIN_EXERCISE_SETS = 2
@@ -98,6 +99,52 @@ def quality_verdict(exercises, feasible, sanity, states, target):
     return {"verdict": "QUESTIONABLE" if issues else "SUPPORTED", "reasons": issues or ["Readiness, dose and available workload/progression evidence are consistent."]}
 
 
+def quality_verdict_v2(exercises, feasible, sanity_v2, states, target):
+    """TKI-5.3 section 28: SUPPORTED requires (a) no hard readiness/dose
+    violation, (b) composition actually absorbed the target dose, (c)
+    progression evidence is acceptable OR honestly conservative (a
+    REBUILD/LOW-confidence movement alone is not disqualifying - it is
+    an honest "insufficient data" state, not a contradiction), and (d)
+    workload is WITHIN range OR deviates with an explicit, named,
+    binding justification (never a bare goal-mode mention).
+    QUESTIONABLE: no hard contradiction, but an unexplained calibration
+    gap remains (unjustified deviation, or workload confidence itself
+    too low to judge). CONTRADICTED: a hard safety/dose invariant is
+    violated."""
+    total = sum(e["working_sets"] for e in exercises)
+    if total > feasible["upper_bound_working_sets"]:
+        return {"verdict": "CONTRADICTED", "reasons": ["Dose exceeds the hard feasible upper bound."]}
+    blocked = {m for m, s in states.items() if s in ("FATIGUED", "SUPPRESSED")}
+    if any(blocked & set(e["primary_muscles"] + e["secondary_muscles"]) for e in exercises):
+        return {"verdict": "CONTRADICTED", "reasons": ["Prescription loads a fatigued/suppressed muscle."]}
+
+    issues = []
+    if total < target:
+        issues.append("Selected movements could not safely absorb the chosen dose.")
+    status = sanity_v2["status"]
+    if status == "INSUFFICIENT_DATA":
+        issues.append(
+            f"Comparable workload evidence is insufficient (comparable_count={sanity_v2['comparable_count']}, "
+            f"known_workload_fraction={sanity_v2['known_workload_fraction']})."
+        )
+    elif status.endswith("_UNEXPLAINED"):
+        issues.append(
+            f"Workload is {status.replace('_', ' ').lower()} with no accepted justification "
+            f"(ratio_to_median={sanity_v2['absolute_workload_ratio']})."
+        )
+    # A low-confidence/REBUILD movement is honest uncertainty, not a
+    # contradiction - only flagged as a QUESTIONABLE-worthy issue when
+    # it is NOT already covered by the workload-evidence issue above,
+    # to avoid double-counting the same underlying data gap.
+    low_confidence = [e["movement_name"] for e in exercises if e["confidence"] == "LOW"]
+    if low_confidence and status != "INSUFFICIENT_DATA":
+        issues.append(f"Weak paired progression evidence for: {low_confidence}.")
+    return {
+        "verdict": "QUESTIONABLE" if issues else "SUPPORTED",
+        "reasons": issues or ["Readiness, dose, workload envelope, and progression evidence are all consistent."],
+    }
+
+
 def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows=None,
                                          profiles=None, selection=None, readiness=None,
                                          muscle_readiness=None):
@@ -117,8 +164,11 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
         "selection_provenance": "Unchanged TKI-4 selection; TKI-5.2 calibrates the selected family's dose.",
     }
     if family == REST_FAMILY_NAME:
+        rest_quality = {"verdict": "SUPPORTED", "reasons": ["TKI-4 selected deliberate recovery."]}
         return dict(base, exercises=[], dose={"working_sets": 0, "delivered_sets": 0, "dose_shortfall": 0, "shortfall_reason": None},
-                    estimated_total_volume=0, quality={"verdict": "SUPPORTED", "reasons": ["TKI-4 selected deliberate recovery."]})
+                    estimated_total_volume=0, quality=rest_quality, quality_v2=rest_quality,
+                    workload_sanity_v2={"status": "WITHIN_PERSONAL_RANGE", "estimated_workload": 0,
+                                        "justification": ["deliberate_recovery_session"], "confidence": "HIGH"})
     relationships = multipliers(rows, as_of)
     sessions = sessions_from_rows(rows, as_of, relationships)
     capacity = capacity_reference(sessions, family, as_of)
@@ -208,16 +258,20 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
             "multiplier_source": workload["multiplier_source"],
             "estimated_volume": volume,
         })
+    goal_reduced = goal.get("range_position_fraction", .5) is not None and goal.get("range_position_fraction", .5) <= .2
     reasons = []
     for constraint in feasible["binding_constraints"]:
         if constraint["binding"] and constraint["constraint"] in ("systemic_readiness", "local_readiness", "detraining_uncertainty", "session_structure"):
             reasons.append(constraint)
     # Merely naming lean_cut is not an excuse: only explicitly reduced policy posture.
-    if goal.get("range_position_fraction", .5) is not None and goal.get("range_position_fraction", .5) <= .2:
+    if goal_reduced:
         reasons.append({"constraint": "reduced_goal_posture", "goal_mode": goal_mode})
     reference = envelope(sessions, family, as_of)
     sanity = workload_sanity(exercises, reference, reasons)
     quality = quality_verdict(exercises, feasible, sanity, states, target)
+    sanity_v2 = workload_sanity_v2(exercises, sessions, family, as_of, target,
+                                    feasible["binding_constraints"], goal_reduced)
+    quality_v2 = quality_verdict_v2(exercises, feasible, sanity_v2, states, target)
     return dict(base, personal_capacity_reference=capacity,
                 feasible_range=feasible,
                 dose={"working_sets": target, "delivered_sets": sum(e["working_sets"] for e in exercises),
@@ -231,4 +285,8 @@ def build_calibrated_shadow_prescription(as_of, goal_mode_override=None, *, rows
                              "eligible_pool_size": len(pool), "source": structure_source,
                              "historical_exercise_distribution": distribution(counts)},
                 exercises=exercises, estimated_total_volume=sanity["estimated_workload"],
-                workload_reference=reference, workload_sanity=sanity, quality=quality)
+                workload_reference=reference, workload_sanity=sanity, quality=quality,
+                # TKI-5.3 additive fields - the v1 fields above are kept
+                # unchanged for continuity/comparison; workload_sanity_v2
+                # and quality_v2 are the primary shadow diagnostic now.
+                workload_sanity_v2=sanity_v2, quality_v2=quality_v2)

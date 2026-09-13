@@ -16,7 +16,7 @@ from training_intelligence.stimulus.session_family import classify_workout_famil
 from training_intelligence.stimulus.taxonomy import to_canonical
 from integrations.tonal.training_priority import SESSION_TEMPLATES
 
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 LOOKBACK_DAYS = 365
 MIN_SESSIONS = 3
 MIN_MULTIPLIER_SETS = 6
@@ -24,6 +24,22 @@ MIN_MULTIPLIER_SESSIONS = 2
 RATIO_TOLERANCE = 0.12
 MIN_RATIO_AGREEMENT = 0.8
 MODE_FLAGS = ("eccentric", "chains", "progressive", "burnout", "flex")
+
+# TKI-5.3 (section 12): a smaller but highly consistent sample can still
+# establish confident cable semantics - do not force every movement
+# through the same MIN_MULTIPLIER_SETS floor when agreement is
+# exceptionally tight. PRODUCT POLICY / CALIBRATION PARAMETER, not a
+# statistical significance claim.
+MIN_MULTIPLIER_SETS_HIGH_AGREEMENT = 3
+HIGH_AGREEMENT_THRESHOLD = 0.95
+
+# TKI-5.3 (section 13): a session need not have EVERY set from a
+# confident-multiplier movement to contribute usable normalized-workload
+# evidence - only a majority of its real (stored) volume. Below this
+# fraction, the session is excluded from the normalized-workload
+# distribution entirely (as before) rather than trusting a mostly-
+# unknown estimate. PRODUCT POLICY / CALIBRATION PARAMETER.
+MIN_KNOWN_WORKLOAD_FRACTION = 0.6
 
 
 def number(value):
@@ -125,8 +141,14 @@ def load_history(as_of, conn=None):
 def multipliers(rows, as_of):
     """Learn only standard-mode one/two cable relationships, never flag-based x2.
 
-    A ratio must have >=6 valid sets, >=2 workouts and >=80% agreement
-    within 12% of one or two. Otherwise explicit low-confidence fallback.
+    TKI-5.3 (section 12): a ratio is confident either with the original
+    bar (>=6 valid sets, >=2 workouts, >=80% agreement within 12% of one
+    or two), OR with as few as 3 valid sets across >=2 workouts when
+    agreement is exceptionally tight (>=95%) - a small but highly
+    consistent sample should not be forced through the same floor as a
+    noisy one. Both thresholds are PRODUCT POLICY / CALIBRATION
+    PARAMETERs (history.py module docstring), not statistical
+    significance claims.
     """
     groups = defaultdict(list)
     for row in valid_rows(rows, as_of):
@@ -140,8 +162,13 @@ def multipliers(rows, as_of):
         nearest = min((1, 2), key=lambda n: abs(n - observed)) if observed is not None else 1
         agreement = sum(abs(r - nearest) <= RATIO_TOLERANCE * nearest for r in ratios) / len(ratios) if ratios else 0
         sessions = len({str(r["activity_id"]) for r in standard})
-        confident = (len(ratios) >= MIN_MULTIPLIER_SETS and sessions >= MIN_MULTIPLIER_SESSIONS
-                     and agreement >= MIN_RATIO_AGREEMENT)
+        confident = (
+            (len(ratios) >= MIN_MULTIPLIER_SETS and sessions >= MIN_MULTIPLIER_SESSIONS
+             and agreement >= MIN_RATIO_AGREEMENT)
+            or
+            (len(ratios) >= MIN_MULTIPLIER_SETS_HIGH_AGREEMENT and sessions >= MIN_MULTIPLIER_SESSIONS
+             and agreement >= HIGH_AGREEMENT_THRESHOLD)
+        )
         result[movement] = {
             "workload_model_version": POLICY_VERSION,
             "workload_multiplier": nearest if confident else 1,
@@ -187,9 +214,18 @@ def sessions_from_rows(rows, as_of, relationships=None):
     for activity, rr in groups.items():
         counts = Counter(classify_muscle_groups(r["muscle_groups"]).primary for r in rr)
         movements = {str(r["movement_id"]) for r in rr}
-        known = all(relationships[str(r["movement_id"])]["confidence"] != "LOW" for r in rr)
-        normalized = sum(r["base_weight"] * r["rep_count"] *
-                         relationships[str(r["movement_id"])]["workload_multiplier"] for r in rr)
+        # TKI-5.3 (section 13): known/unknown workload FRACTION, not an
+        # all-or-nothing per-session gate - one low-confidence movement
+        # no longer disqualifies an otherwise well-evidenced session.
+        per_set = [
+            (r, r["base_weight"] * r["rep_count"] * relationships[str(r["movement_id"])]["workload_multiplier"],
+             relationships[str(r["movement_id"])]["confidence"] != "LOW")
+            for r in rr
+        ]
+        normalized = sum(v for _, v, _ in per_set)
+        known_workload = sum(v for _, v, k in per_set if k)
+        known_fraction = (known_workload / normalized) if normalized else 0.0
+        known = known_fraction >= MIN_KNOWN_WORKLOAD_FRACTION
         sessions.append({
             "activity_id": activity, "begin_time": rr[0]["begin_time"],
             "family": classify_workout_family(frozenset(counts)),
@@ -198,6 +234,7 @@ def sessions_from_rows(rows, as_of, relationships=None):
             "primary_movement_count": len({str(r["movement_id"]) for r in rr if pattern(r) in COMPOUNDS}),
             "sets_per_movement": dict(Counter(str(r["movement_id"]) for r in rr)),
             "normalized_workload": round(normalized, 1), "workload_confident": known,
+            "known_workload_fraction": round(known_fraction, 4),
             "recorded_volume": sum(r["volume"] for r in rr),
         })
     return sorted(sessions, key=lambda s: (s["begin_time"], s["activity_id"]), reverse=True)
