@@ -16,6 +16,13 @@ architecturally - not by lowering a sample-count threshold.
 PRODUCT POLICY / CALIBRATION PARAMETER throughout. No physiological
 claims. Never invents certainty where evidence does not exist (Tier 5
 remains a real, expected outcome for genuinely sparse movements).
+
+V2.1 fix (PROGRESSION_EVIDENCE_VERSION 1 -> 2): `_sessions_by_mode_class`
+was applying the standard-mode-only `unassisted()` spotter-assistance
+check to every Smart Weight mode, which meant this module's own
+PARTIAL-mode (eccentric/chains/progressive) evidence path documented
+above was never actually reachable for most movements - see
+`_sessions_by_mode_class`'s docstring for the full forensic finding.
 """
 from __future__ import annotations
 
@@ -30,7 +37,7 @@ from training_intelligence.calibration.mode_compatibility import (
     MODE_COMPATIBILITY_POLICY_VERSION, classify as mode_classify,
 )
 
-PROGRESSION_EVIDENCE_VERSION = 1
+PROGRESSION_EVIDENCE_VERSION = 2
 
 MAX_EXACT_SESSIONS = 6
 MAX_COMPATIBLE_SESSIONS = 6
@@ -87,22 +94,57 @@ def rir_reliability(rows_for_movement):
 
 
 def _sessions_by_mode_class(rows, movement_id, as_of):
-    """All valid, unassisted rows for this movement (ANY Smart Weight
-    mode), grouped into sessions (most-recent-first, matching
-    valid_rows' own ordering), each session tagged EXACT/PARTIAL/
-    UNKNOWN via mode_compatibility - UNKNOWN sessions are never used."""
+    """All valid rows for this movement (ANY Smart Weight mode), grouped
+    into sessions (most-recent-first, matching valid_rows' own
+    ordering), each session tagged EXACT/PARTIAL/UNKNOWN via
+    mode_compatibility - UNKNOWN sessions are never used.
+
+    V2.1 fix: `unassisted()` is a spotter-assistance heuristic - it
+    compares avg_weight to base_weight to catch standard-mode reps
+    where a spotter meaningfully reduced the felt load. It was never
+    valid for eccentric/chains/progressive rows: those PARTIAL-
+    compatible modes, per mode_compatibility.py's own documented
+    policy, DELIBERATELY layer extra resistance on top of base_weight
+    at points in the rep, so avg_weight legitimately differs from
+    base_weight there even under full, unassisted effort (this was
+    confirmed against real Development data: PARTIAL-mode sessions
+    consistently show avg_weight ~5-10% ABOVE base_weight, the
+    signature of the mode's own mechanics, not of a spotter reducing
+    load). progression.py (v1) scoped this correctly with
+    `mode(r) == "standard" and unassisted(r)`; that scoping was lost
+    when this module generalized matching to every Smart Weight mode,
+    which meant `evidence()` silently discarded every PARTIAL-mode
+    session's rows before they could ever reach mode classification -
+    the mode-compatible fallback that mode_compatibility.py's policy
+    explicitly allows was never actually reachable in practice. Now
+    the assistance check is scoped back to standard-mode rows only,
+    where it remains a legitimate check for exact-mode evidence.
+
+    V2.1 fix #2: a real Tonal `activity_id` is not always one uniform
+    Smart Weight mode throughout (e.g. flex-mode warm-up sets followed
+    by eccentric-mode working sets in the same workout) - confirmed
+    against real Development history. Grouping used to be keyed by
+    activity_id alone and classified the WHOLE group from only its
+    first row's mode, which could silently fold a genuinely UNKNOWN-
+    mode set (flex/burnout) into a PARTIAL-classified group just
+    because it shared an activity_id with an eccentric/chains set - a
+    real equivalence claim this policy explicitly refuses to make.
+    Grouping is now keyed by (activity_id, mode) so a pool never
+    crosses a real mode boundary and every group is classified from
+    its own actual, shared mode."""
     rows = [r for r in valid_rows(rows, as_of)
-            if str(r["movement_id"]) == str(movement_id) and unassisted(r)]
+            if str(r["movement_id"]) == str(movement_id)
+            and (row_mode(r) != "standard" or unassisted(r))]
     order, grouped = [], defaultdict(list)
     for r in rows:
-        activity = str(r["activity_id"])
-        if activity not in grouped:
-            order.append(activity)
-        grouped[activity].append(r)
+        key = (str(r["activity_id"]), row_mode(r))
+        if key not in grouped:
+            order.append(key)
+        grouped[key].append(r)
     exact, compatible = [], []
-    for activity in order:
-        session_rows = grouped[activity]
-        session_mode = row_mode(session_rows[0])  # a session's sets share one logged mode combo
+    for key in order:
+        session_rows = grouped[key]
+        session_mode = key[1]  # this group's own actual, shared mode
         classification = mode_classify(session_mode)
         if classification == "EXACT" and len(exact) < MAX_EXACT_SESSIONS:
             exact.append(session_rows)

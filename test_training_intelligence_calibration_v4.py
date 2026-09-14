@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from training_intelligence.calibration.mode_compatibility import classify, is_usable_evidence
 from training_intelligence.calibration.progression_v2 import (
-    rir_reliability, evidence, prescribe_v2,
+    rir_reliability, evidence, prescribe_v2, _sessions_by_mode_class,
 )
 from training_intelligence.calibration.justification_v2 import (
     counterfactual_effects, justification_sufficient, LARGE_DEVIATION_RATIO,
@@ -28,14 +28,17 @@ def _row(activity, set_index, days_ago, movement_id=MOVE_ID, muscle_groups=("Che
          rep_count=10, base_weight=60.0, volume=None, eccentric=False, chains=False, progressive=False,
          burnout=False, flex=False, spotter=False, included=True, is_generic=False, custom_movement=False,
          is_bilateral=True, is_two_sided=False, is_alternating=False, warm_up=False,
-         rir=2.0, name="Standing Incline Press", accessory="StraightBar", duration=10, volume_ratio=1.0):
+         rir=2.0, name="Standing Incline Press", accessory="StraightBar", duration=10, volume_ratio=1.0,
+         avg_weight=None):
     begin = AS_OF - timedelta(days=days_ago)
     if volume is None:
         volume = base_weight * rep_count * volume_ratio
+    if avg_weight is None:
+        avg_weight = base_weight
     return {
         "activity_id": activity, "begin_time": begin, "end_time": begin + timedelta(seconds=duration),
         "duration_seconds": duration, "set_index": set_index, "movement_id": movement_id,
-        "rep_count": rep_count, "base_weight": base_weight, "avg_weight": base_weight,
+        "rep_count": rep_count, "base_weight": base_weight, "avg_weight": avg_weight,
         "volume": volume, "raw_data": {"warmUp": warm_up, "repsInReserve": rir},
         "eccentric": eccentric, "chains": chains, "progressive": progressive, "burnout": burnout, "flex": flex,
         "spotter": spotter, "struggling_score": None, "inconsistency_score": None,
@@ -130,6 +133,73 @@ class EvidenceTierTests(unittest.TestCase):
         self.assertIn(ev["evidence_tier"], (1, 2))
         if ev["evidence_tier"] == 2:
             self.assertGreaterEqual(len({r["activity_id"] for r in ev["pool"]}), 3)
+
+
+class ModeScopedAssistanceCheckTests(unittest.TestCase):
+    """V2.1 fix #1: `_sessions_by_mode_class` used to apply the
+    standard-mode-only spotter-assistance heuristic (`unassisted()`) to
+    EVERY Smart Weight mode. Real eccentric/chains sets legitimately
+    carry avg_weight materially above base_weight (the mode's own
+    mechanics, confirmed against real Development history in the V2.1
+    forensic report) - the old code silently discarded them all before
+    they could ever reach mode classification, making the PARTIAL
+    cross-mode fallback this module's own docstring describes
+    unreachable in practice. These tests model that avg/base divergence
+    explicitly (the pre-fix fixtures above never did - `_row()`
+    defaulted avg_weight to base_weight for every synthetic row, which
+    is why this defect was invisible to the existing suite)."""
+
+    def test_partial_mode_with_avg_weight_above_base_is_still_usable(self):
+        # Eccentric mode adding real extra resistance mid-rep: avg_weight
+        # ~10% above base_weight, exactly the pattern found in real data.
+        # A genuinely assisted rep would look nothing like this (avg
+        # BELOW base) - this is the mode's own mechanics, not assistance.
+        rows = []
+        for i in range(5):
+            rows += _session(f"ecc{i}", 5 + i * 10, base_weight=60.0,
+                              avg_weight=66.0, eccentric=True)
+        ev = evidence(rows, MOVE_ID, AS_OF)
+        self.assertEqual(ev["evidence_tier"], 3)
+        self.assertEqual(ev["compatible_mode_sessions"], 5)
+        self.assertIn("mode_compatible_fallback_used", ev["reason_codes"])
+
+    def test_standard_mode_assistance_check_still_applies(self):
+        # Regression guard: a genuinely assisted STANDARD-mode rep (avg
+        # well below base - a spotter reducing the felt load) must
+        # remain excluded exactly as before this fix.
+        rows = []
+        for i in range(4):
+            rows += _session(f"s{i}", 5 + i * 6, base_weight=60.0, avg_weight=45.0)
+        ev = evidence(rows, MOVE_ID, AS_OF)
+        self.assertEqual(ev["evidence_tier"], 5)
+        self.assertEqual(ev["exact_mode_sessions"], 0)
+
+    def test_mixed_mode_session_never_leaks_unknown_mode_rows_as_partial(self):
+        # V2.1 fix #2: one real Tonal activity_id can mix Smart Weight
+        # modes (flex warm-up sets, then eccentric working sets). The
+        # UNKNOWN-mode (flex) rows must never be folded into the
+        # PARTIAL-classified pool just because they share an
+        # activity_id with eccentric rows.
+        activity = "mixed1"
+        rows = (
+            [_row(activity, 0, 5, base_weight=60.0, avg_weight=61.0, flex=True),
+             _row(activity, 1, 5, base_weight=61.0, avg_weight=62.0, flex=True)]
+            + [_row(activity, 2, 5, base_weight=62.0, avg_weight=68.0, eccentric=True),
+               _row(activity, 3, 5, base_weight=63.0, avg_weight=69.0, eccentric=True)]
+        )
+        for i in range(1, 4):
+            rows += _session(f"ecc{i}", 10 + i * 10, base_weight=62.0, avg_weight=68.0, eccentric=True)
+        exact, compatible = _sessions_by_mode_class(rows, MOVE_ID, AS_OF)
+        self.assertEqual(exact, [])
+        compatible_weights = {r["base_weight"] for session in compatible for r in session}
+        # The flex (UNKNOWN-mode) sets' base_weights (60.0, 61.0) must
+        # never appear in the PARTIAL pool.
+        self.assertNotIn(60.0, compatible_weights)
+        self.assertNotIn(61.0, compatible_weights)
+        # The eccentric rows from the SAME activity_id must still be
+        # usable as their own, correctly-classified PARTIAL group.
+        self.assertIn(62.0, compatible_weights)
+        self.assertIn(63.0, compatible_weights)
 
 
 class PrescribeV2Tests(unittest.TestCase):

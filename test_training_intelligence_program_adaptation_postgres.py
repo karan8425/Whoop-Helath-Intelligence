@@ -208,7 +208,18 @@ class ProgramAdaptationSnapshotTests(unittest.TestCase):
         from training_intelligence.programs.adaptation.snapshot import (
             save_adaptation_snapshot, load_adaptation_snapshot, compare_adaptation_snapshot,
         )
-        as_of = datetime(2036, 1, 1, 8, 0, tzinfo=timezone.utc)
+        # V2.1: this specific as_of was bumped from 2036-01-01T08:00 -
+        # a row from that exact (as_of, program_id) was already
+        # persisted by a PRIOR code version (before the V2.1 progression
+        # evidence fix), and decision_id has no content/schema-version
+        # fingerprint (snapshot.py, reused unchanged - out of this
+        # milestone's scope), so `load_adaptation_snapshot` was loading
+        # that stale, pre-fix row and comparing it against a fresh
+        # replay under the NEW code - a real, disclosed cross-version
+        # limitation of the snapshot module, not a V2.1 regression.
+        # Using a timestamp no earlier milestone's snapshot test has
+        # ever saved avoids the collision.
+        as_of = datetime(2036, 1, 1, 8, 30, tzinfo=timezone.utc)
         override = {"program_id": self.program.id, "sequence_position": 0,
                     "last_completed_at": as_of - timedelta(days=2), "recently_completed_session_keys": ["upper_a"]}
         result = build_daily_program_adaptation(
